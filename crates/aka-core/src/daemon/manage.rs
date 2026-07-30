@@ -28,7 +28,8 @@ use zeroize::Zeroizing;
 
 use super::{bearer_token, err_missing_token, request_peer, ApiJson, AppState};
 use crate::manage::{
-    AccessBody, AllowedToolsBody, ApprovalResponseBody, ConfirmBody, ConnectionAddBody,
+    AccessBody, AllowedToolsBody, ApprovalResponseBody, AuditStatementsBody, ConfirmBody,
+    ConnectionAddBody,
     ConnectionConfigPatchBody, ConnectionRenameBody, ConnectionUpdateBody, ConnectionsReorderBody,
     DraftTestBody, ElicitationResponseBody, ManagementBackend, McpAuthDeliverBody,
     McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody,
@@ -162,6 +163,10 @@ pub fn router() -> Router<AppState> {
         .route("/connections/{id}/access", post(set_tool_access))
         .route("/connections/{id}/confirm", post(set_confirm_mode))
         .route("/connections/{id}/allowed-tools", post(set_allowed_tools))
+        .route(
+            "/connections/{id}/audit-statements",
+            post(set_audit_statements),
+        )
         .route("/connections/{id}/mcp-tools", get(list_mcp_tools))
         .route("/connections/{id}/mcp-status", post(mcp_status))
         .route(
@@ -723,6 +728,21 @@ async fn set_allowed_tools(
         state
             .manage
             .set_allowed_tools(id, body.tools)
+            .await
+            .map(|changed| json!({ "changed": changed })),
+    )
+}
+
+async fn set_audit_statements(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<AuditStatementsBody>,
+) -> Response {
+    respond(
+        state
+            .manage
+            .set_audit_statements(id, body.audit_statements)
             .await
             .map(|changed| json!({ "changed": changed })),
     )

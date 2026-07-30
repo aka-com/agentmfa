@@ -258,10 +258,24 @@ struct CancelTarget {
     backend_key: i32,
 }
 
+/// Synthesized `(pid, key)` → the upstream session it cancels.
+///
+/// One registry for the whole broker rather than one per listener. Every
+/// Postgres listener — the shared ticket proxy and each direct endpoint's
+/// socket/TCP pair — mints keys from the same space and resolves them from it,
+/// so a `CancelRequest` finds its session whichever of them the client dials.
+/// Per-listener registries worked only because a client normally cancels
+/// through the address it was given; that is a property of well-behaved
+/// clients, not something the broker was enforcing, and one registry costs
+/// nothing to be right about.
+#[derive(Default)]
+pub(crate) struct CancelRegistry {
+    targets: Mutex<HashMap<(i32, i32), CancelTarget>>,
+}
+
 struct ProxyState {
     broker: Arc<Broker>,
-    /// synthesized (pid, key) → upstream cancel target; removed at session end.
-    cancels: Mutex<HashMap<(i32, i32), CancelTarget>>,
+    cancels: Arc<CancelRegistry>,
     /// Admission control over the *unauthenticated* handshake phase. Accepting
     /// without a bound let anything that can reach the port spawn tasks and
     /// buffers without presenting a ticket; the permit is released as soon as
@@ -286,8 +300,8 @@ impl ProxyState {
                 broker.config.per_identity_per_min,
                 Duration::from_secs(60),
             ),
+            cancels: broker.pg_cancels.clone(),
             broker,
-            cancels: Mutex::new(HashMap::new()),
             handshakes: tokio::sync::Semaphore::new(permits),
         }
     }
@@ -420,10 +434,10 @@ fn record_dial_health(
     }
 }
 
-impl ProxyState {
+impl CancelRegistry {
     /// Mint a fresh random (pid, key) pair and register the mapping.
-    fn register_cancel(self: &Arc<Self>, target: CancelTarget) -> CancelRegistration {
-        let mut map = self.cancels.lock().unwrap();
+    fn register(self: &Arc<Self>, target: CancelTarget) -> CancelRegistration {
+        let mut map = self.targets.lock().unwrap();
         loop {
             let mut buf = [0u8; 8];
             getrandom::fill(&mut buf).expect("os rng");
@@ -432,24 +446,28 @@ impl ProxyState {
             if let std::collections::hash_map::Entry::Vacant(e) = map.entry((pid, key)) {
                 e.insert(target);
                 return CancelRegistration {
-                    state: self.clone(),
+                    registry: self.clone(),
                     key: (pid, key),
                 };
             }
         }
+    }
+
+    fn resolve(&self, pid: i32, key: i32) -> Option<CancelTarget> {
+        self.targets.lock().unwrap().get(&(pid, key)).cloned()
     }
 }
 
 /// RAII guard: unregisters the synthesized key mapping when the session's
 /// connection task ends, however it ends.
 struct CancelRegistration {
-    state: Arc<ProxyState>,
+    registry: Arc<CancelRegistry>,
     key: (i32, i32),
 }
 
 impl Drop for CancelRegistration {
     fn drop(&mut self) {
-        self.state.cancels.lock().unwrap().remove(&self.key);
+        self.registry.targets.lock().unwrap().remove(&self.key);
     }
 }
 
@@ -909,7 +927,7 @@ where
         return Ok(());
     }
 
-    let registration = state.register_cancel(CancelTarget {
+    let registration = state.cancels.register(CancelTarget {
         host,
         port,
         sslmode,
@@ -937,7 +955,10 @@ where
         broker: state.broker.clone(),
         connection: connection.name.clone(),
         agent: "endpoint".to_string(),
-        record_statements: state.broker.config.audit_pg_statements,
+        record_statements: state
+            .broker
+            .access
+            .audit_statements(&connection.id, state.broker.config.audit_pg_statements),
     };
     splice(client, upstream.stream, session, max_ttl, idle, audit).await;
     drop(registration);
@@ -1440,7 +1461,7 @@ async fn handle_conn(
     // Complete the downstream handshake: AuthenticationOk, the upstream's
     // ParameterStatus messages, a *synthesized* BackendKeyData mapped to the
     // real upstream pid/key, and ReadyForQuery with the upstream's status.
-    let registration = state.register_cancel(CancelTarget {
+    let registration = state.cancels.register(CancelTarget {
         host,
         port,
         sslmode,
@@ -1507,7 +1528,10 @@ async fn handle_conn(
         broker: state.broker.clone(),
         connection: connection.name.clone(),
         agent,
-        record_statements: state.broker.config.audit_pg_statements,
+        record_statements: state
+            .broker
+            .access
+            .audit_statements(&connection.id, state.broker.config.audit_pg_statements),
     };
     splice(client, upstream.stream, session, max_ttl, idle, audit).await;
     drop(registration);
@@ -1518,8 +1542,7 @@ async fn handle_conn(
 /// the mapped upstream session. Works while a query is executing
 /// on the mapped session, the cancel rides its own upstream connection.
 async fn handle_cancel(state: &Arc<ProxyState>, pid: i32, key: i32) {
-    let target = state.cancels.lock().unwrap().get(&(pid, key)).cloned();
-    let Some(target) = target else {
+    let Some(target) = state.cancels.resolve(pid, key) else {
         tracing::debug!("pg proxy: CancelRequest for unknown key, dropped");
         return;
     };
@@ -3112,5 +3135,42 @@ mod tests {
         let e = upstream_error(&msg[5..]);
         assert_eq!(e.kind, TestErrorKind::Other);
         assert_eq!(e.detail, "Database \"missing\" does not exist (3D000)");
+    }
+
+    /// P5. Every PG listener mints and resolves cancel keys from one registry,
+    /// so a CancelRequest reaching the broker through a different listener
+    /// than the session was opened on still finds its target. The registration
+    /// is RAII: the mapping goes when the session's task ends, however it ends.
+    #[test]
+    fn cancel_keys_are_registered_and_resolved_broker_wide() {
+        let registry = Arc::new(CancelRegistry::default());
+        let target = || CancelTarget {
+            host: "db.example".into(),
+            port: 5432,
+            sslmode: PgSslMode::VerifyFull,
+            trusted_ca_bundle_path: None,
+            backend_pid: 4242,
+            backend_key: 99,
+        };
+
+        let first = registry.register(target());
+        let second = registry.register(target());
+        assert_ne!(first.key, second.key, "keys are minted, not reused");
+
+        // A second handle onto the same registry — the shape a different
+        // listener has — resolves a key the first one minted.
+        let elsewhere = registry.clone();
+        let (pid, key) = first.key;
+        let found = elsewhere.resolve(pid, key).expect("resolved cross-listener");
+        assert_eq!(found.backend_pid, 4242);
+        assert_eq!(found.host, "db.example");
+
+        drop(first);
+        assert!(
+            elsewhere.resolve(pid, key).is_none(),
+            "the mapping dies with the session"
+        );
+        let (pid, key) = second.key;
+        assert!(elsewhere.resolve(pid, key).is_some(), "and only that one");
     }
 }

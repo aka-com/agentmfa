@@ -46,8 +46,9 @@
 //! Repeated logins ride the approval window like any other plane, so a `git`
 //! loop against one host asks once rather than once per fetch.
 //!
-//! v1 signs **ed25519** and **RSA** (`rsa-sha2-256` / `rsa-sha2-512`,
-//! selected by the client's SIGN_REQUEST flags) keys.
+//! The signer handles **ed25519**, **RSA** (`rsa-sha2-256` / `rsa-sha2-512`,
+//! selected by the client's SIGN_REQUEST flags), and **ECDSA** on nistp256 and
+//! nistp384, whose curve fixes the hash.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -299,13 +300,27 @@ pub fn private_key_for_vault(
     Ok(zeroize::Zeroizing::new(encoded.to_string()))
 }
 
+/// Whether the signer can use this key.
+///
+/// ECDSA is admitted only on the curves that are actually compiled in
+/// (`p256`/`p384`): `ssh-key` parses every curve it knows regardless, so a
+/// P-521 key would import cleanly and then fail at the first login — which is
+/// the failure mode this check exists to prevent.
 fn check_supported(key: &PrivateKey) -> Result<(), String> {
+    let unsupported = |key: &PrivateKey| {
+        format!(
+            "unsupported key type {:?} (AgentMFA signs ed25519, rsa, and ecdsa \
+             on nistp256/nistp384)",
+            key.key_data().algorithm().map(|a| a.as_str().to_string())
+        )
+    };
     match key.key_data() {
         KeypairData::Ed25519(_) | KeypairData::Rsa(_) => Ok(()),
-        other => Err(format!(
-            "unsupported key type {:?} (v1 signs ed25519 and rsa)",
-            other.algorithm().map(|a| a.as_str().to_string())
-        )),
+        KeypairData::Ecdsa(keypair) => match keypair.curve() {
+            ssh_key::EcdsaCurve::NistP256 | ssh_key::EcdsaCurve::NistP384 => Ok(()),
+            _ => Err(unsupported(key)),
+        },
+        _ => Err(unsupported(key)),
     }
 }
 
@@ -368,8 +383,9 @@ impl SshSigner {
     }
 
     /// Sign `data` honoring the SIGN_REQUEST `flags` (they select the RSA
-    /// hash; ed25519 has one algorithm). Returns the SSH-encoded signature
-    /// blob (`string alg` + `string sig`) the SIGN_RESPONSE carries.
+    /// hash; ed25519 and ECDSA each have one algorithm per key). Returns the
+    /// SSH-encoded signature blob (`string alg` + `string sig`) the
+    /// SIGN_RESPONSE carries.
     ///
     /// RSA signing can take long enough to matter on an async worker; callers
     /// should run this through `sign_on_blocking_thread`.
@@ -379,6 +395,12 @@ impl SshSigner {
                 .key
                 .try_sign(data)
                 .map_err(|e| format!("ed25519 sign failed: {e}"))?,
+            // The curve fixes the hash, so the RSA flags have nothing to say
+            // here; `ssh-key` produces the `ecdsa-sha2-nistp*` blob itself.
+            KeypairData::Ecdsa(_) => self
+                .key
+                .try_sign(data)
+                .map_err(|e| format!("ecdsa sign failed: {e}"))?,
             KeypairData::Rsa(_) => {
                 let hash = if flags & SSH_AGENT_RSA_SHA2_256 != 0 {
                     HashAlg::Sha256
@@ -1850,7 +1872,19 @@ async fn tofu_session_bind(
     };
     let observed = observed_binding.public.fingerprint(HashAlg::Sha256);
 
-    // Pin the observed key immediately and record it; there is no prompt.
+    // Ask before trusting, when the user has asked to be asked.
+    //
+    // The key has been proved to belong to whoever answered — `session-bind`
+    // carries its signature over the session id — but nothing yet says that
+    // whoever answered is the server the user meant. That is the question a
+    // pin settles permanently, and it is the one moment it can be asked.
+    if state.broker.store.settings().confirm_ssh_host_keys {
+        if let Some(refusal) = confirm_host_key(state, &observed).await {
+            return refusal;
+        }
+    }
+
+    // Pin the observed key and record it.
     let pinned = match state
         .broker
         .store
@@ -1884,6 +1918,48 @@ async fn tofu_session_bind(
     *state.host_key_fingerprint.lock().await = Some(pinned);
     *binding = Some(observed_binding.binding);
     frame(SSH_AGENT_SUCCESS, &[])
+}
+
+/// What trusting a first-seen host key commits the user to.
+const HOST_KEY_CONSEQUENCE: &str =
+    "Pinning is permanent for this tool: from now on only this key is accepted, and a server \
+     presenting any other is refused. If this is not the server you meant, the pin makes that \
+     mistake durable — check the fingerprint against one you already trust.";
+
+/// Ask the user to trust a host key seen for the first time.
+///
+/// Refuses on anything but approval, including a broker with no surface able
+/// to ask: an unattended machine must not answer a trust question by assuming
+/// yes. The refusal reaches the client as an ordinary agent failure, so the
+/// reason lives in the activity log like every other one here.
+async fn confirm_host_key(state: &Arc<AgentState>, observed: &Fingerprint) -> Option<Vec<u8>> {
+    let Ok(connection) = state.broker.store.connection_by_id(&state.connection_id) else {
+        return Some(refuse(state, "the connection has been removed"));
+    };
+    let verdict = state
+        .broker
+        .approvals
+        .gate(
+            crate::approvals::ApprovalRequest::new(
+                &connection,
+                state.agent.clone(),
+                format!("Trust the SSH host key for {}", connection.target()),
+            )
+            .detail(observed.to_string())
+            .consequence(HOST_KEY_CONSEQUENCE),
+        )
+        .await;
+    if verdict.is_allowed() {
+        return None;
+    }
+    Some(refuse_with(
+        state,
+        &format!("the host key was not trusted: {}", verdict.detail()),
+        verdict
+            .reason()
+            .map(|reason| reason.as_str())
+            .unwrap_or("refused"),
+    ))
 }
 
 /// Record an agent *connection* refused before the protocol was served.
@@ -2133,6 +2209,51 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--", "resolved.example"]));
+    }
+
+    /// S4. An ECDSA key used to import cleanly and then fail at first login,
+    /// because `ssh-key` parses curves it cannot sign. Import validation and
+    /// the signer now agree, and both cover exactly the curves compiled in.
+    #[test]
+    fn ecdsa_keys_on_supported_curves_import_and_sign() {
+        for curve in [Algorithm::Ecdsa { curve: ssh_key::EcdsaCurve::NistP256 },
+                      Algorithm::Ecdsa { curve: ssh_key::EcdsaCurve::NistP384 }] {
+            let key = PrivateKey::random(&mut OsRng, curve.clone()).unwrap();
+            let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
+
+            validate_private_key(pem.as_bytes())
+                .unwrap_or_else(|e| panic!("{curve:?} must import: {e}"));
+            let signer = SshSigner::from_pem(pem.as_bytes())
+                .unwrap_or_else(|e| panic!("{curve:?} must load: {e}"));
+
+            // Flags select the RSA hash and mean nothing here; the signature
+            // must verify against the key's own public half either way.
+            let blob = signer
+                .sign(b"session-id-and-userauth", 0)
+                .unwrap_or_else(|e| panic!("{curve:?} must sign: {e}"));
+            let signature = Signature::try_from(blob.as_slice()).unwrap();
+            key.public_key()
+                .key_data()
+                .verify(b"session-id-and-userauth", &signature)
+                .unwrap_or_else(|e| panic!("{curve:?} signature must verify: {e}"));
+        }
+    }
+
+    /// A curve the build cannot sign must be refused at import rather than
+    /// accepted and discovered at the first login.
+    #[test]
+    fn an_unsignable_curve_is_refused_at_import() {
+        let key = PrivateKey::random(
+            &mut OsRng,
+            Algorithm::Ecdsa { curve: ssh_key::EcdsaCurve::NistP521 },
+        );
+        // The build may not even be able to generate it; either way it must
+        // never reach the vault as a usable key.
+        if let Ok(key) = key {
+            let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
+            let error = validate_private_key(pem.as_bytes()).unwrap_err();
+            assert!(error.contains("unsupported key type"), "{error}");
+        }
     }
 
     /// SSH-23. A passphrase-protected key was refused with instructions to

@@ -147,10 +147,11 @@ pub enum ConnectionConfig {
         /// OpenSSH SHA-256/SHA-512 fingerprint of the destination host key.
         ///
         /// Empty means unpinned: the broker observes the key at the first agent
-        /// `session-bind` and pins it *without asking* — a dedicated approval
-        /// prompt is not built, and this comment used to claim one was. The pin
-        /// is recorded in the activity log, which is where the user learns of
-        /// it. Once set, a mismatching server key is refused.
+        /// `session-bind` and pins it. Whether that pin is *asked about* first
+        /// depends on [`Settings::confirm_ssh_host_keys`]; with it off — the
+        /// default — the pin happens silently and is recorded in the activity
+        /// log, which is where the user learns of it. Once set, a mismatching
+        /// server key is refused either way.
         ///
         /// Import pre-fills this from the user's own `known_hosts` when exactly
         /// one key is on file there, so the common case does not rely on
@@ -542,6 +543,17 @@ pub struct ToolAccess {
     /// written before this existed load as `Off`, the behaviour they had.
     #[serde(default)]
     pub confirm: ConfirmMode,
+    /// Whether this Postgres connection's statement text is recorded in the
+    /// activity log, overriding the broker-wide default.
+    ///
+    /// `None` inherits `--audit-pg-statements`. The override exists because
+    /// the decision is per-destination rather than per-machine: recording SQL
+    /// against a scratch database is free, and against one whose statements
+    /// carry `ALTER USER … PASSWORD` or personal data it is a retention
+    /// commitment. One global switch forced the strictest of those on all of
+    /// them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_statements: Option<bool>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -688,6 +700,21 @@ pub struct Settings {
     /// secret to a new target. Default 15 minutes.
     #[serde(default = "default_presence_window_secs")]
     pub presence_window_secs: u64,
+    /// Ask before trusting an SSH server's host key the first time it is seen,
+    /// instead of pinning it silently.
+    ///
+    /// Unpinned connections pin whatever key answers the first `session-bind`
+    /// and record it in the activity log — after the fact. That makes a
+    /// first-use interception the durable pin, and the log entry reads exactly
+    /// like a legitimate first connection. With this on, the pin is a decision
+    /// the user makes while it still matters.
+    ///
+    /// Off by default: it is a new gate, and the existing behaviour is what
+    /// every connection already has. Importing from `known_hosts` prefills the
+    /// fingerprint and skips trust-on-first-use entirely, which remains the
+    /// better answer where it is available.
+    #[serde(default)]
+    pub confirm_ssh_host_keys: bool,
 }
 
 fn default_presence_window_secs() -> u64 {
@@ -701,6 +728,7 @@ impl Default for Settings {
             legacy_pg_trusted_ca_bundle_path: None,
             menu_bar_hides_dock: false,
             presence_window_secs: default_presence_window_secs(),
+            confirm_ssh_host_keys: false,
         }
     }
 }

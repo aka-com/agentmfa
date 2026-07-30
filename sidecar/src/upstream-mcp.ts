@@ -62,6 +62,14 @@ export interface UpstreamResourceTemplate {
   mimeType?: string;
 }
 
+/** One prompt as the upstream describes it. */
+export interface UpstreamPrompt {
+  name: string;
+  title?: string;
+  description?: string;
+  arguments?: Array<{ name: string; description?: string; required?: boolean }>;
+}
+
 /** The subset of the upstream's advertised capabilities we act on. */
 export interface UpstreamCapabilities {
   tools?: unknown;
@@ -76,10 +84,19 @@ export interface UpstreamDiscovery {
   tools: UpstreamTool[];
   resources: UpstreamResource[];
   resourceTemplates: UpstreamResourceTemplate[];
+  prompts: UpstreamPrompt[];
 }
 
-/** Protocol revisions this client can actually speak, newest first. */
-export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18'] as const;
+/**
+ * Protocol revisions this client can actually speak, newest first.
+ *
+ * `initialize` offers the newest; a server may answer with an older one it
+ * prefers. Both are accepted because nothing here differs between them — the
+ * client posts JSON-RPC, reads the catalog, calls tools, and closes the
+ * session. Accepting only the newest turned a correct negotiation into an
+ * unreachable upstream.
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26'] as const;
 export const SUPPORTED_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
 
 /** A hostile or looping `nextCursor` must not page forever. */
@@ -159,6 +176,42 @@ function boundedCatalogItem(method: string, value: unknown): unknown | null {
       ...(inputSchema === undefined ? {} : { inputSchema }),
       ...(outputSchema === undefined ? {} : { outputSchema }),
       ...(annotations === undefined ? {} : { annotations }),
+    };
+  }
+  if (method === 'prompts/list') {
+    const name = boundedString(item.name, 1024);
+    if (!name || name !== item.name) return null;
+    // Argument metadata is relayed to the agent verbatim, so it is projected
+    // onto the known fields and bounded rather than passed through whole.
+    const args = Array.isArray(item.arguments)
+      ? item.arguments
+          .slice(0, 64)
+          .map((raw) => {
+            if (!raw || typeof raw !== 'object') return null;
+            const argument = raw as Record<string, unknown>;
+            const argName = boundedString(argument.name, 256);
+            if (!argName || argName !== argument.name) return null;
+            return {
+              name: argName,
+              ...(boundedString(argument.description) === undefined
+                ? {}
+                : { description: boundedString(argument.description) }),
+              ...(typeof argument.required === 'boolean'
+                ? { required: argument.required }
+                : {}),
+            };
+          })
+          .filter((argument): argument is NonNullable<typeof argument> => argument !== null)
+      : undefined;
+    return {
+      name,
+      ...(boundedString(item.title, 1024) === undefined
+        ? {}
+        : { title: boundedString(item.title, 1024) }),
+      ...(boundedString(item.description) === undefined
+        ? {}
+        : { description: boundedString(item.description) }),
+      ...(args === undefined ? {} : { arguments: args }),
     };
   }
   if (method === 'resources/list') {
@@ -594,7 +647,25 @@ export async function discoverUpstream(
         resourceTemplates = [];
       }
     }
-    return { capabilities, tools, resources, resourceTemplates };
+    let prompts: UpstreamPrompt[] = [];
+    if (capabilities.prompts) {
+      try {
+        prompts = await client.listPaged<UpstreamPrompt>(
+          'prompts/list',
+          'prompts',
+          MAX_RESOURCE_PAGES,
+          signal,
+        );
+      } catch (error) {
+        // Best-effort like resources: a server that advertises prompts and
+        // stumbles listing them still contributes its tools.
+        log('warn', 'an upstream advertised prompts but failed to list them', {
+          connection: connection.name,
+          error: String(error),
+        });
+      }
+    }
+    return { capabilities, tools, resources, resourceTemplates, prompts };
   } finally {
     // Best-effort: a failed teardown must not mask the real error, nor turn a
     // successful discovery into a failure.
@@ -642,7 +713,7 @@ async function runWithMrtr(
   broker: BrokerClient,
   auth: AgentAuth,
   connection: BrokerConnection,
-  method: 'tools/call' | 'resources/read',
+  method: 'tools/call' | 'resources/read' | 'prompts/get',
   baseParams: Record<string, unknown>,
   _toolLabel: string,
   signal?: AbortSignal,
@@ -778,6 +849,31 @@ export async function readUpstreamResource(
   signal?: AbortSignal,
 ): Promise<unknown> {
   return runWithMrtr(broker, auth, connection, 'resources/read', { uri }, uri, signal);
+}
+
+/**
+ * Fetch one prompt's messages from the upstream.
+ *
+ * Like a tool call, this rides the broker's HTTP plane, so the credential
+ * stays in the vault and the call is access-checked on the way through.
+ */
+export async function getUpstreamPrompt(
+  broker: BrokerClient,
+  auth: AgentAuth,
+  connection: BrokerConnection,
+  name: string,
+  args: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  return runWithMrtr(
+    broker,
+    auth,
+    connection,
+    'prompts/get',
+    { name, arguments: args },
+    name,
+    signal,
+  );
 }
 
 /** Argument-completion context, forwarded verbatim to the upstream. */

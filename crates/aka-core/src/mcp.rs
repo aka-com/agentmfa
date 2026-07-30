@@ -27,8 +27,15 @@ use crate::store::Store;
 use crate::types::{Connection, ConnectionConfig};
 
 /// Protocol revisions this client can actually speak, newest first.
+///
+/// `initialize` offers the newest and the server answers with the revision it
+/// chose; both are accepted here because nothing this client does differs
+/// between them — it POSTs JSON-RPC, reads tools and resources, and tears the
+/// session down. Refusing the older one meant a server that negotiated
+/// perfectly correctly was reported as unusable.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
+pub const PROTOCOL_VERSION_2025_03_26: &str = "2025-03-26";
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION, PROTOCOL_VERSION_2025_03_26];
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_CAP: usize = 4 * 1024 * 1024;

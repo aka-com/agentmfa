@@ -152,6 +152,9 @@ struct Bridge {
     /// eviction can be recovered without restarting the stdio MCP process.
     initialize_message: Option<String>,
     initialized_notification: Option<String>,
+    /// The revision `initialize` settled on, echoed on the notification leg
+    /// so a server that checks the header there accepts the stream.
+    protocol_version: Option<String>,
 }
 
 /// One request's outcome: the JSON-RPC messages to emit on stdout.
@@ -292,6 +295,24 @@ impl Bridge {
         }
     }
 
+    /// Capture the revision `initialize` settled on, so the notification leg
+    /// can present the header a conforming server requires on every request
+    /// after the handshake.
+    fn remember_negotiated_version(&mut self, messages: &[String]) {
+        for message in messages {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(message) else {
+                continue;
+            };
+            if let Some(version) = value
+                .pointer("/result/protocolVersion")
+                .and_then(serde_json::Value::as_str)
+            {
+                self.protocol_version = Some(version.to_string());
+                return;
+            }
+        }
+    }
+
     async fn recover_session(&mut self, current_method: Option<&str>) -> Result<(), String> {
         let initialize = self
             .initialize_message
@@ -356,7 +377,10 @@ impl Bridge {
                 Err(error) => return vec![internal_error(message, &error)],
             };
             match relay {
-                Relay::Messages(messages) => return messages,
+                Relay::Messages(messages) => {
+                    self.remember_negotiated_version(&messages);
+                    return messages;
+                }
                 Relay::StaleToken if !retried_token => {
                     retried_token = true;
                     if let Err(error) = self.refresh_token().await {
@@ -503,6 +527,110 @@ fn one_line(message: &str) -> Option<String> {
     }
 }
 
+/// Follow the streamable-HTTP GET leg, forwarding server-initiated messages.
+///
+/// A POST carries only the answer to the request that made it, so without this
+/// leg nothing the *server* starts ever reaches a stdio client — including the
+/// `notifications/tools/list_changed` the host sends when the user enables or
+/// renames a tool mid-session. The host advertises that as a live capability
+/// and it was true for HTTP clients and silently false through this bridge.
+///
+/// Only `method`-bearing messages are forwarded: responses belong to the POST
+/// that asked for them, and relaying one from here would answer a request
+/// twice. A server with no GET leg answers 405 and this stops quietly — that
+/// is a conforming, common answer, not a failure worth reporting.
+async fn follow_notifications(
+    http: reqwest::Client,
+    mcp_url: String,
+    token: String,
+    label: Option<String>,
+    session: String,
+    protocol_version: Option<String>,
+    out: tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    // A dropped stream is reconnected, because an idle event stream being
+    // closed by a proxy is ordinary. The backoff keeps a server that refuses
+    // the leg outright from becoming a hot loop.
+    let mut backoff = Duration::from_millis(500);
+    loop {
+        let mut request = http
+            .get(&mcp_url)
+            .header("authorization", format!("Bearer {token}"))
+            .header("accept", "text/event-stream")
+            .header("mcp-session-id", session.clone());
+        if let Some(label) = &label {
+            request = request.header("x-agentmfa-client", label.clone());
+        }
+        if let Some(version) = &protocol_version {
+            request = request.header("mcp-protocol-version", version.clone());
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            // The host is gone or restarting; the POST path reports that
+            // properly, so this leg just waits for it to come back.
+            Err(_) => {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+                continue;
+            }
+        };
+        let status = response.status();
+        // 405 is "no GET leg here"; 401 means the POST path will re-key and
+        // rebuild this stream. Either way there is nothing to follow.
+        if status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+            || status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::NOT_FOUND
+        {
+            return;
+        }
+        let is_stream = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"));
+        if !is_stream {
+            return;
+        }
+        backoff = Duration::from_millis(500);
+        let mut parser = SseParser::default();
+        let mut body = response;
+        loop {
+            match body.chunk().await {
+                Ok(Some(chunk)) => {
+                    for event in parser.push_bytes(&chunk) {
+                        if !forward_server_message(&out, event) {
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        if let Some(event) = parser.finish() {
+            if !forward_server_message(&out, event) {
+                return;
+            }
+        }
+        tokio::time::sleep(backoff).await;
+    }
+}
+
+/// Emit one frame from the notification leg. Returns false when stdout has
+/// gone, which is the bridge shutting down.
+fn forward_server_message(
+    out: &tokio::sync::mpsc::UnboundedSender<String>,
+    message: String,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&message) else {
+        return true;
+    };
+    if value.get("method").and_then(serde_json::Value::as_str).is_none() {
+        return true;
+    }
+    out.send(message).is_ok()
+}
+
 /// Run the bridge until stdin closes (the MCP client hanging up).
 pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
     let socket = paths.socket_file();
@@ -517,10 +645,35 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
         session: None,
         initialize_message: None,
         initialized_notification: None,
+        protocol_version: None,
     };
 
+    // Two sources write stdout — request answers and the server's own
+    // notifications — so one task owns the handle and both queue through it.
+    // Interleaving them any other way would risk splicing two JSON-RPC lines
+    // into one.
+    let (out, mut outbox) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let writer = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        while let Some(message) = outbox.recv().await {
+            let Some(line) = one_line(&message) else {
+                continue;
+            };
+            if stdout.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                return;
+            }
+            if stdout.flush().await.is_err() {
+                return;
+            }
+        }
+    });
+
+    // The notification leg is bound to one session; a re-initialize (a sidecar
+    // restart, an evicted session) mints a new one and this follows it there.
+    let mut notifications: Option<tokio::task::JoinHandle<()>> = None;
+    let mut followed_session: Option<String> = None;
+
     let mut stdin = BufReader::new(tokio::io::stdin());
-    let mut stdout = tokio::io::stdout();
     let mut input = Vec::new();
     loop {
         input.clear();
@@ -537,15 +690,7 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
         let line = match std::str::from_utf8(&input) {
             Ok(line) => line,
             Err(error) => {
-                let frame = parse_error(&format!("stdin was not UTF-8: {error}"));
-                stdout
-                    .write_all(format!("{frame}\n").as_bytes())
-                    .await
-                    .map_err(|error| format!("stdout write failed: {error}"))?;
-                stdout
-                    .flush()
-                    .await
-                    .map_err(|error| format!("stdout flush failed: {error}"))?;
+                let _ = out.send(parse_error(&format!("stdin was not UTF-8: {error}")));
                 continue;
             }
         };
@@ -555,32 +700,39 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
         let value = match serde_json::from_str::<serde_json::Value>(line) {
             Ok(value) => value,
             Err(error) => {
-                let frame = parse_error(&format!("invalid JSON on stdin: {error}"));
-                stdout
-                    .write_all(format!("{frame}\n").as_bytes())
-                    .await
-                    .map_err(|error| format!("stdout write failed: {error}"))?;
-                stdout
-                    .flush()
-                    .await
-                    .map_err(|error| format!("stdout flush failed: {error}"))?;
+                let _ = out.send(parse_error(&format!("invalid JSON on stdin: {error}")));
                 continue;
             }
         };
         let messages = bridge.relay_message(line, &value).await;
         for message in messages {
-            if let Some(line) = one_line(&message) {
-                stdout
-                    .write_all(format!("{line}\n").as_bytes())
-                    .await
-                    .map_err(|error| format!("stdout write failed: {error}"))?;
+            if out.send(message).is_err() {
+                return Ok(());
             }
         }
-        stdout
-            .flush()
-            .await
-            .map_err(|error| format!("stdout flush failed: {error}"))?;
+        if bridge.session != followed_session {
+            if let Some(task) = notifications.take() {
+                task.abort();
+            }
+            followed_session = bridge.session.clone();
+            if let Some(session) = bridge.session.clone() {
+                notifications = Some(tokio::spawn(follow_notifications(
+                    bridge.http.clone(),
+                    bridge.mcp_url.clone(),
+                    bridge.token.clone(),
+                    bridge.label.clone(),
+                    session,
+                    bridge.protocol_version.clone(),
+                    out.clone(),
+                )));
+            }
+        }
     }
+    if let Some(task) = notifications.take() {
+        task.abort();
+    }
+    drop(out);
+    let _ = writer.await;
     Ok(())
 }
 
@@ -754,6 +906,7 @@ mod tests {
             session: None,
             initialize_message: None,
             initialized_notification: None,
+            protocol_version: None,
         };
 
         let Relay::Messages(init) = bridge
@@ -835,6 +988,7 @@ mod tests {
             session: None,
             initialize_message: None,
             initialized_notification: None,
+            protocol_version: None,
         };
         assert!(matches!(
             bridge
@@ -923,6 +1077,7 @@ mod tests {
             session: None,
             initialize_message: None,
             initialized_notification: None,
+            protocol_version: None,
         };
         let initialize = serde_json::json!({
             "jsonrpc": "2.0",
@@ -955,5 +1110,84 @@ mod tests {
         assert_eq!(response["result"]["recovered"], true);
         assert_eq!(state.lock().unwrap().generation, 2);
         assert_eq!(bridge.session.as_deref(), Some("session-2"));
+    }
+
+    /// M2. The host announces tool-list changes on the streamable-HTTP GET
+    /// leg. A POST-only bridge never opened it, so a stdio client's tool list
+    /// silently went stale while the app said it was live.
+    #[tokio::test]
+    async fn the_notification_leg_relays_server_initiated_messages() {
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+
+        async fn stream() -> axum::response::Response {
+            (
+                [("content-type", "text/event-stream")],
+                // A response frame shares the leg with notifications; relaying
+                // it would answer a POST's request a second time.
+                concat!(
+                    "data: {\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{}}\n\n",
+                    "data: {\"jsonrpc\":\"2.0\",",
+                    "\"method\":\"notifications/tools/list_changed\"}\n\n",
+                ),
+            )
+                .into_response()
+        }
+
+        let app = axum::Router::new().route("/mcp", get(stream));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let (out, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(follow_notifications(
+            reqwest::Client::new(),
+            format!("http://127.0.0.1:{port}/mcp"),
+            "aka_testkey".into(),
+            None,
+            "sess-1".into(),
+            Some("2025-06-18".into()),
+            out,
+        ));
+
+        let relayed = tokio::time::timeout(Duration::from_secs(5), inbox.recv())
+            .await
+            .expect("a notification within the deadline")
+            .expect("the leg forwarded a message");
+        let value: serde_json::Value = serde_json::from_str(&relayed).unwrap();
+        assert_eq!(value["method"], "notifications/tools/list_changed");
+        task.abort();
+    }
+
+    /// A server with no GET leg answers 405. That is conforming, so the bridge
+    /// stops following rather than retrying forever or reporting a failure.
+    #[tokio::test]
+    async fn a_server_without_a_notification_leg_is_not_retried() {
+        use axum::routing::get;
+
+        let app = axum::Router::new().route(
+            "/mcp",
+            get(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let (out, mut inbox) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            follow_notifications(
+                reqwest::Client::new(),
+                format!("http://127.0.0.1:{port}/mcp"),
+                "aka_testkey".into(),
+                None,
+                "sess-1".into(),
+                None,
+                out,
+            ),
+        )
+        .await
+        .expect("the follower returns rather than retrying");
+        assert!(inbox.recv().await.is_none(), "nothing was forwarded");
     }
 }

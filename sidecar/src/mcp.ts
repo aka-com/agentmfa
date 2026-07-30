@@ -22,7 +22,7 @@ import {
   ResourceTemplate,
 } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+import type { GetPromptResult, ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { BrokerClient, BrokerError, type BrokerConnection, type BrokerIdentity } from './broker';
 import { z } from 'zod';
@@ -33,12 +33,14 @@ import {
   callUpstreamTool,
   completeUpstream,
   discoverUpstream,
+  getUpstreamPrompt,
   namespaceFor,
   readUpstreamResource,
   upstreamToolName,
   upstreamToolNameCandidate,
   type CompletionContext,
   UpstreamRpcError,
+  type UpstreamPrompt,
   type UpstreamResource,
   type UpstreamResourceTemplate,
   type UpstreamTool,
@@ -83,6 +85,16 @@ function resourceBudget(): number {
 }
 
 /**
+ * How many upstream prompts a session registers before the rest are dropped.
+ * Prompts are small, but a runaway catalog should not balloon a session any
+ * more than a runaway tool list may.
+ */
+function promptBudget(): number {
+  const raw = Number(process.env.AGENTMFA_PROMPT_BUDGET ?? 100);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 100;
+}
+
+/**
  * The resource surface shared across a session's connections: the URIs and
  * template names already claimed (so two upstreams cannot collide), and the
  * running budget count. Registered as one flat namespace, the way the SDK
@@ -98,6 +110,13 @@ interface ResourceSurface {
 
 interface UpstreamToolSurface {
   registered: number;
+}
+
+/** Prompt names claimed this session, and the running budget count. */
+interface PromptSurface {
+  takenNames: Set<string>;
+  registered: number;
+  withheld: number;
 }
 
 /** One upstream tool in the session's search index. */
@@ -250,6 +269,8 @@ interface Registration {
   withheld?: string[];
   /** How many resources + templates this upstream contributed. */
   resources?: number;
+  /** How many prompts this upstream contributed. */
+  prompts?: number;
   /** Set when an MCP upstream could not be reached at session open. */
   error?: string;
   /** Non-fatal upstream state that explains an intentionally empty surface. */
@@ -349,7 +370,14 @@ export async function createToolServer(
       // access state for the life of the session (see `refreshWiring`), so a tool
       // that has been renamed away or switched off stops being offered instead
       // of sitting there answering 404 or 403 until the agent reconnects.
-      capabilities: { tools: { listChanged: true } },
+      // Prompts and resources are declared up front for the same reason
+      // tools are: a server that registers none still has to answer their
+      // list methods with an empty list rather than "method not found".
+      capabilities: {
+        tools: { listChanged: true },
+        prompts: { listChanged: true },
+        resources: { listChanged: true },
+      },
       instructions:
         'AgentMFA brokers API, database, SSH, and Streamable-HTTP MCP access. ' +
         'Connections are enabled for all local agents by default when added; ' +
@@ -360,6 +388,8 @@ export async function createToolServer(
         'hop-by-hop headers are reserved. Its bounded result is ' +
         '{status, headers, body, body_encoding}; use request_id on mutating ' +
         'retries. A `_open` tool returns a short-lived ticket and local endpoint. ' +
+        'An upstream MCP server also contributes its own resources and prompts, ' +
+        'namespaced by connection: list them with resources/list and prompts/list. ' +
         'Native connection tools refresh during this session; reconnect to ' +
         'refresh an upstream MCP catalog. Use agentmfa_status first when a tool ' +
         'is missing, and search/call meta-tools for catalog overflow.',
@@ -497,6 +527,10 @@ export async function createToolServer(
         .filter((registration) => liveNames.has(registration.connection.name))
         .reduce((sum, registration) => sum + (registration.resources ?? 0), 0);
 
+      const prompts = registrations
+        .filter((registration) => liveNames.has(registration.connection.name))
+        .reduce((sum, registration) => sum + (registration.prompts ?? 0), 0);
+
       // One hint, chosen by what is most actionable. Reconnecting re-runs this
       // whole build, so it resolves both pending wirings and dead upstreams.
       let hint: string | undefined;
@@ -534,6 +568,9 @@ export async function createToolServer(
                       resource_hint:
                         'list them with resources/list and resources/templates/list',
                     }
+                  : {}),
+                ...(prompts
+                  ? { prompts, prompt_hint: 'list them with prompts/list' }
                   : {}),
                 ...(searchOnly
                   ? {
@@ -578,6 +615,11 @@ export async function createToolServer(
     withheld: 0,
   };
   const upstreamToolSurface: UpstreamToolSurface = { registered: 0 };
+  const promptSurface: PromptSurface = {
+    takenNames: new Set<string>(),
+    registered: 0,
+    withheld: 0,
+  };
   // Discovery is independent per upstream. Start every handshake together
   // and wait only for their bounded session-open attempts; registration below
   // remains deterministic in broker order after the promises settle.
@@ -602,13 +644,15 @@ export async function createToolServer(
     if (connection.mcp_path) {
       const outcome = await registerUpstream(
         server, toolRegistry, broker, principal, connection, taken, upstreamIndex,
-        upstreamToolSurface, resourceSurface, discoveries.get(connection)!,
+        upstreamToolSurface, resourceSurface, promptSurface,
+        discoveries.get(connection)!,
       );
       registrations.push({
         connection,
         tools: outcome.tools,
         withheld: outcome.withheld,
         resources: outcome.resources,
+        prompts: outcome.prompts,
         error: outcome.error,
         status: outcome.status,
         warnings: outcome.warnings,
@@ -965,6 +1009,8 @@ interface UpstreamRegistration {
   withheld: string[];
   /** How many resources + templates this upstream contributed. */
   resources: number;
+  /** How many prompts this upstream contributed. */
+  prompts: number;
   error?: string;
   status?: 'no_tools_capability' | 'empty_tools' | 'no_allowed_tools';
   warnings?: string[];
@@ -989,6 +1035,7 @@ async function registerUpstream(
   index: IndexedTool[],
   toolSurface: UpstreamToolSurface,
   resourceSurface: ResourceSurface,
+  promptSurface: PromptSurface,
   discoveryPromise: Promise<Awaited<ReturnType<typeof discoverUpstream>>>,
 ): Promise<UpstreamRegistration> {
   let discovery: Awaited<ReturnType<typeof discoverUpstream>>;
@@ -1003,6 +1050,7 @@ async function registerUpstream(
       tools: [],
       withheld: [],
       resources: 0,
+      prompts: 0,
       error: frameUntrustedText(
         `could not reach the MCP server: ${String(error)}`,
         2048,
@@ -1139,11 +1187,20 @@ async function registerUpstream(
     discovery,
     resourceSurface,
   );
+  const prompts = registerUpstreamPrompts(
+    server,
+    broker,
+    principal,
+    connection,
+    discovery.prompts,
+    promptSurface,
+  );
 
   return {
     tools: registered,
     withheld,
     resources,
+    prompts,
     status,
     warnings: warnings.length ? warnings : undefined,
   };
@@ -1401,6 +1458,105 @@ function registerUpstreamResources(
     });
   }
   return count;
+}
+
+/**
+ * Register an upstream's prompts under this connection's namespace.
+ *
+ * Prompts are the third thing an MCP server offers and the one AgentMFA was
+ * dropping on the floor: a server's tools and resources were re-exposed while
+ * its prompts stayed invisible, so a curated workflow the vendor shipped was
+ * simply unavailable through the broker. Fetching one rides the same HTTP
+ * plane as a tool call, so the credential never leaves the vault.
+ *
+ * Namespaced by connection because prompt names are a flat space in the SDK
+ * and two upstreams may both offer a `review`. Names that still collide are
+ * dropped rather than fatal, matching the tool and resource surfaces.
+ */
+function registerUpstreamPrompts(
+  server: McpServer,
+  broker: BrokerClient,
+  principal: Principal,
+  connection: BrokerConnection,
+  prompts: UpstreamPrompt[],
+  surface: PromptSurface,
+): number {
+  let count = 0;
+  for (const prompt of prompts) {
+    if (!prompt.name) continue;
+    if (surface.registered >= promptBudget()) {
+      surface.withheld++;
+      continue;
+    }
+    const name = `${namespaceFor(connection)}/${prompt.name}`;
+    if (surface.takenNames.has(name)) {
+      log('warn', 'skipping an upstream prompt whose name collides', {
+        connection: connection.name,
+        name,
+      });
+      continue;
+    }
+    // The SDK builds the prompt's argument schema from a zod shape. Every
+    // upstream argument is a string; `required` decides whether it is
+    // optional, and the description is upstream prose, so it is sanitized
+    // like every other piece of catalog text.
+    const argsShape: Record<string, z.ZodType<string | undefined>> = {};
+    for (const argument of prompt.arguments ?? []) {
+      if (!argument.name) continue;
+      const described = argument.description
+        ? z.string().describe(sanitizeUntrustedText(argument.description, 500).text)
+        : z.string();
+      argsShape[argument.name] = argument.required ? described : described.optional();
+    }
+    try {
+      server.registerPrompt(
+        name,
+        {
+          description: describePrompt(connection, prompt),
+          ...(prompt.title
+            ? { title: sanitizeUntrustedText(prompt.title, 200).text }
+            : {}),
+          argsSchema: argsShape,
+        },
+        async (args: Record<string, string | undefined>, extra) => {
+          const supplied: Record<string, string> = {};
+          for (const [key, value] of Object.entries(args ?? {})) {
+            if (typeof value === 'string') supplied[key] = value;
+          }
+          return sanitizeUpstreamResult(
+            await getUpstreamPrompt(
+              broker, principal, connection, prompt.name, supplied, extra?.signal,
+            ),
+          ) as GetPromptResult;
+        },
+      );
+      surface.takenNames.add(name);
+      surface.registered++;
+      count++;
+    } catch (error) {
+      log('warn', 'could not register an upstream prompt', {
+        connection: connection.name,
+        name,
+        error: String(error),
+      });
+    }
+  }
+  if (surface.withheld) {
+    log('info', 'some upstream prompts were over the registration budget', {
+      connection: connection.name,
+      withheld: surface.withheld,
+    });
+  }
+  return count;
+}
+
+/** What an agent is told a re-exposed upstream prompt is, and whose it is. */
+function describePrompt(connection: BrokerConnection, prompt: UpstreamPrompt): string {
+  const own = prompt.description
+    ? frameUntrustedText(prompt.description, 2000).text
+    : '';
+  return `Prompt from the "${connection.name}" MCP server (${connection.target}), `
+    + `brokered by AgentMFA.${own ? `\n${own}` : ''}`;
 }
 
 /** Mint a transport + server pair for a new session. */

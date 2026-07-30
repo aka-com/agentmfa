@@ -1276,6 +1276,27 @@ pub async fn set_allowed_tools(
         .map_err(|e| e.to_string())
 }
 
+/// Record this Postgres connection's statement text in the activity log, or
+/// stop; `null` restores the broker-wide default.
+///
+/// Ungated in both directions: turning it on records the user's own traffic
+/// rather than granting an agent anything, and turning it off narrows what a
+/// durable log retains.
+#[tauri::command]
+pub async fn set_audit_statements(
+    state: State<'_, AppState>,
+    connection_id: String,
+    audit_statements: Option<bool>,
+) -> CmdResult<bool> {
+    let connection_id = parse_id(&connection_id)?;
+    state
+        .brokers
+        .backend()
+        .set_audit_statements(connection_id, audit_statements)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// List an MCP connection's upstream tools (names + descriptions), for the
 /// per-wiring tool picker. Read-only against the upstream.
 #[tauri::command]
@@ -1650,6 +1671,24 @@ pub async fn set_menu_bar_hides_dock(
     Ok(())
 }
 
+/// Ask before trusting a first-seen SSH host key. Turning it off weakens a
+/// gate the user put up, so the core authenticates before it applies.
+#[tauri::command]
+pub async fn set_confirm_ssh_host_keys(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    on: bool,
+) -> CmdResult<()> {
+    state
+        .brokers
+        .backend()
+        .set_confirm_ssh_host_keys(on)
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(EVT_SETTINGS, ());
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn set_presence_window(
     app: AppHandle,
@@ -1770,6 +1809,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         list_elicitations,
         respond_elicitation,
         set_allowed_tools,
+        set_audit_statements,
         list_mcp_tools,
         issue_endpoint,
         get_endpoint,
@@ -1780,6 +1820,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         close_session,
         set_reauth_on_read,
         set_menu_bar_hides_dock,
+        set_confirm_ssh_host_keys,
         set_presence_window,
         get_notification_settings,
         set_notification_settings,

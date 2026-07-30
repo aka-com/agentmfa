@@ -113,6 +113,10 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                 + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()))
             .to_rfc3339()
         }),
+        audit_statements: entry.as_ref().and_then(|e| e.audit_statements),
+        audit_statements_effective: broker
+            .access
+            .audit_statements(&conn.id, broker.config.audit_pg_statements),
         allowed_tools: entry.and_then(|e| e.allowed_tools),
         endpoint: broker.endpoints.get_for_connection(&conn.id).map(|e| {
             let dsn = match &conn.config {
@@ -381,6 +385,7 @@ pub fn settings_dto(broker: &Broker) -> SettingsDto {
     SettingsDto {
         reauth_on_read: settings.reauth_on_read,
         menu_bar_hides_dock: settings.menu_bar_hides_dock,
+        confirm_ssh_host_keys: settings.confirm_ssh_host_keys,
         presence_window_secs: settings.presence_window_secs,
     }
 }
@@ -1110,6 +1115,14 @@ pub struct AllowedToolsBody {
     pub tools: Option<Vec<String>>,
 }
 
+/// `POST /v1/manage/connections/{id}/audit-statements`. `audit_statements:
+/// null` restores the broker-wide default.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct AuditStatementsBody {
+    #[serde(default)]
+    pub audit_statements: Option<bool>,
+}
+
 /// `POST /v1/manage/oauth/start`: begin a relayed BYO-app OAuth connect.
 /// The redirect URI is the shell's own loopback catcher.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -1160,6 +1173,8 @@ pub struct SettingsPatchBody {
     pub reauth_on_read: Option<bool>,
     #[serde(default)]
     pub menu_bar_hides_dock: Option<bool>,
+    #[serde(default)]
+    pub confirm_ssh_host_keys: Option<bool>,
     #[serde(default)]
     pub presence_window_secs: Option<u64>,
 }
@@ -1270,6 +1285,13 @@ pub trait ManagementBackend: Send + Sync {
         connection_id: Uuid,
         tools: Option<Vec<String>>,
     ) -> ManageResult<bool>;
+    /// Record this Postgres connection's statement text, or stop; `None`
+    /// restores the broker-wide `--audit-pg-statements` default.
+    async fn set_audit_statements(
+        &self,
+        connection_id: Uuid,
+        audit_statements: Option<bool>,
+    ) -> ManageResult<bool>;
     async fn issue_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto>;
     /// Read the connection's already-issued direct endpoint without minting or
     /// rotating; `None` when none is issued. Ungated display read — it takes no
@@ -1330,6 +1352,9 @@ pub trait ManagementBackend: Send + Sync {
     async fn settings(&self) -> ManageResult<SettingsDto>;
     async fn set_reauth_on_read(&self, on: bool) -> ManageResult<()>;
     async fn set_menu_bar_hides_dock(&self, on: bool) -> ManageResult<()>;
+    /// Ask before trusting a first-seen SSH host key. Turning it off weakens a
+    /// gate and takes its own authentication.
+    async fn set_confirm_ssh_host_keys(&self, on: bool) -> ManageResult<()>;
     async fn set_presence_window(&self, secs: u64) -> ManageResult<()>;
 
     /* discovery */
@@ -1660,6 +1685,17 @@ impl ManagementBackend for LocalBackend {
             .await
     }
 
+    async fn set_audit_statements(
+        &self,
+        connection_id: Uuid,
+        audit_statements: Option<bool>,
+    ) -> ManageResult<bool> {
+        self.blocking(move |broker| {
+            broker.ui_set_audit_statements(&connection_id, audit_statements)
+        })
+        .await
+    }
+
     async fn issue_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto> {
         Ok(self
             .broker
@@ -1754,6 +1790,11 @@ impl ManagementBackend for LocalBackend {
 
     async fn set_reauth_on_read(&self, on: bool) -> ManageResult<()> {
         self.blocking(move |broker| broker.ui_change_reauth_on_read(on))
+            .await
+    }
+
+    async fn set_confirm_ssh_host_keys(&self, on: bool) -> ManageResult<()> {
+        self.blocking(move |broker| broker.ui_set_confirm_ssh_host_keys(on))
             .await
     }
 

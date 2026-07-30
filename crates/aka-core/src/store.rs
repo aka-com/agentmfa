@@ -1252,6 +1252,15 @@ impl Store {
         self.commit(&mut state, next)
     }
 
+    pub fn set_confirm_ssh_host_keys(&self, on: bool) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let mut settings = state.settings();
+        settings.confirm_ssh_host_keys = on;
+        let mut next = state.clone();
+        next.settings = Some(settings);
+        self.commit(&mut state, next)
+    }
+
     /// Unvalidated persistence; the broker's UI command restricts the value
     /// to the offered choices.
     pub fn set_presence_window_secs(&self, secs: u64) -> Result<()> {

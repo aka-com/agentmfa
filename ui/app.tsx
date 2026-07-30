@@ -1464,6 +1464,38 @@ function ConfirmationSection({ connection: c }: {
       ? <div className="cd-confirm-note">With no AgentMFA approval surface attached,
           this tool’s traffic is refused rather than carried.</div>
       : null}
+    <StatementRecording connection={c} />
+  </div>;
+}
+
+/**
+ * Whether this database's statement text is kept in Activity.
+ *
+ * Postgres only, and it sits under the confirmation switch because it answers
+ * the question that switch leaves open: one approval covers every statement in
+ * the session, so this is what decides whether those statements are anywhere
+ * afterwards. Off by default — SQL literals carry passwords and personal data,
+ * and that is a retention choice per database rather than per machine.
+ */
+function StatementRecording({ connection: c }: { connection: ConnectionSummary }): ReactNode {
+  if (c.type !== 'pg') return null;
+  const on = Boolean(c.agent_access.audit_statements_effective);
+  const overridden = c.agent_access.audit_statements != null;
+  return <div className="cd-confirm-row cd-statements">
+    <div className="cd-confirm-txt">
+      <div className="cd-confirm-lbl">Record statements in Activity</div>
+      <div className="cd-confirm-sub">
+        {on
+          ? 'The SQL of each statement is written to the activity log, where it can '
+            + 'carry credentials and personal data.'
+          : 'Only the number of statements per session is recorded, not their text.'}
+        {overridden ? ' Set on this tool.' : ' Following the broker default.'}
+      </div>
+    </div>
+    <button className={`switch ${on ? 'on' : ''}`} role="switch" aria-checked={on}
+      title={on ? 'Statement text is recorded' : 'Statement text is not recorded'}
+      aria-label={`${on ? 'Stop recording' : 'Record'} statement text for ${c.name}`}
+      data-act={on ? 'statements-off' : 'statements-on'} data-conn={c.id}></button>
   </div>;
 }
 
@@ -4178,11 +4210,23 @@ function SettingsSheet(): ReactNode {
         data-act="toggle-menubar-dock" role="checkbox"
         aria-checked={s.menu_bar_hides_dock}></button></div>
     : null;
+  // Applies to the broker that actually signs, so unlike the window-chrome
+  // toggle above this one is meaningful in remote mode too.
+  const hostKeyRow = <div className="set-row"><div className="set-txt">
+      <div className="st-title">Ask before trusting a new SSH host key</div>
+      <div className="st-sub">
+        Unpinned servers are otherwise trusted the first time they answer, and
+        the pin is permanent. Needs AgentMFA open to answer: with nothing
+        attached, a first login to an unpinned server is refused.
+      </div></div>
+    <button className={`switch ${s.confirm_ssh_host_keys ? 'on' : ''}`}
+      data-act="toggle-confirm-host-keys" role="checkbox"
+      aria-checked={s.confirm_ssh_host_keys}></button></div>;
   return (
     <>
       <h3 id="settings-title">Settings</h3>
       {notificationRow}{notificationWarning}{notificationPreviewRow}
-      {settingsFailed ? settingsFailureRow : <>{authenticationRows}{dockRow}</>}
+      {settingsFailed ? settingsFailureRow : <>{authenticationRows}{hostKeyRow}{dockRow}</>}
       <div className="sheet-actions"><button className="btn primary" data-act="sheet-cancel">Done</button></div>
     </>
   );
@@ -5884,6 +5928,22 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       releaseDropdownForm();
       await refresh('connections');
       break;
+    case 'statements-on':
+      if (await run(() => invoke('set_audit_statements', {
+        connectionId: btn.dataset.conn || '', auditStatements: true,
+      }))) {
+        toast('📝 Recording statement text in Activity');
+      }
+      await refresh('connections');
+      break;
+    case 'statements-off':
+      if (await run(() => invoke('set_audit_statements', {
+        connectionId: btn.dataset.conn || '', auditStatements: false,
+      }))) {
+        toast('📝 No longer recording statement text');
+      }
+      await refresh('connections');
+      break;
 
     case 'rotate-key-ask': {
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
@@ -6077,6 +6137,22 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         const on = !state.settings.menu_bar_hides_dock;
         await run(() => invoke('set_menu_bar_hides_dock', { on }));
         toast(on ? '🚢 Dock icon hidden in the menu bar' : '🚢 Dock icon kept in the menu bar');
+      }
+      await refresh('settings');
+      break;
+    case 'toggle-confirm-host-keys':
+      {
+        const on = !state.settings.confirm_ssh_host_keys;
+        // Turning it off weakens a gate, so the broker authenticates first
+        // and a refused sheet leaves the switch alone — the same shape the
+        // read-gate and traffic-confirmation switches use.
+        if (!on && !await holdDropdownFormOpen()) break;
+        if (await run(() => invoke('set_confirm_ssh_host_keys', { on }))) {
+          toast(on
+            ? '🔑 Asking before trusting a new SSH host key'
+            : '🔑 New SSH host keys are pinned without asking');
+        }
+        if (!on) releaseDropdownForm();
       }
       await refresh('settings');
       break;

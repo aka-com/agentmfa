@@ -158,6 +158,7 @@ interface MockAccess {
   /** RFC 3339 end of a denial's cooldown, while retries are auto-refused. */
   confirm_cooldown_until?: string | null;
   allowed_tools?: string[];
+  audit_statements?: boolean;
   endpoint?: {
     endpoint_id: string;
     type: ConnectionType;
@@ -213,6 +214,7 @@ interface MockArgs {
   enabled: boolean;
   decision?: ApprovalDecision;
   tools?: string[] | null;
+  auditStatements?: boolean | null;
   clientSecret?: string | null;
   token?: string | null;
   source: string;
@@ -253,6 +255,7 @@ const db: MockDatabase = {
   settings: {
     reauth_on_read: true,
     menu_bar_hides_dock: false,
+    confirm_ssh_host_keys: false,
     presence_window_secs: 15 * 60,
   },
 };
@@ -558,6 +561,9 @@ function connDto(c: MockConnection): ConnectionSummary {
         confirm_window_agents: record?.confirm_window_agents ?? [],
         confirm_cooldown_until: record?.confirm_cooldown_until ?? null,
         allowed_tools: record?.allowed_tools ?? null,
+        audit_statements: record?.audit_statements ?? null,
+        // The mock broker's own default is off, matching the shipped default.
+        audit_statements_effective: record?.audit_statements ?? false,
         // `sshDsn` is deliberately dropped: the chip is what a connection
         // listing carries, and an SSH endpoint's socket path is not in it.
         endpoint: record?.endpoint
@@ -1145,6 +1151,23 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       emit('aka://connections-changed', {});
       return true;
     }
+    case 'set_audit_statements': {
+      const connection = db.connections.find((c) => c.id === args.connectionId);
+      if (!connection) return false;
+      let record = db.access.find((a) => a.connection_id === connection.id);
+      if (!record) {
+        record = { connection_id: connection.id, enabled: true };
+        db.access.push(record);
+      }
+      const requested = args.auditStatements;
+      const before = record.audit_statements;
+      if (requested == null) delete record.audit_statements;
+      else record.audit_statements = requested;
+      if ((before ?? null) === (requested ?? null)) return false;
+      emit('aka://wirings-changed', {});
+      emit('aka://connections-changed', {});
+      return true;
+    }
     case 'list_mcp_tools': {
       const c = db.connections.find((x) => x.id === args.id);
       if (!c || !c.mcp_path) throw 'this connection has no MCP path';
@@ -1338,6 +1361,10 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     }
     case 'set_reauth_on_read':
       db.settings.reauth_on_read = args.on;
+      emit('aka://settings-changed', {});
+      return;
+    case 'set_confirm_ssh_host_keys':
+      db.settings.confirm_ssh_host_keys = args.on;
       emit('aka://settings-changed', {});
       return;
     case 'set_menu_bar_hides_dock':

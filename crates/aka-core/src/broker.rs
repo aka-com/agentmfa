@@ -174,6 +174,9 @@ pub struct Broker {
     /// The PG proxy's ephemeral loopback port, set when the daemon starts;
     /// surfaced only in open responses' DSNs.
     pub(crate) pg_proxy_port: std::sync::OnceLock<u16>,
+    /// Synthesized Postgres cancel keys, shared by every PG listener so a
+    /// `CancelRequest` resolves whichever one the client sends it to.
+    pub(crate) pg_cancels: Arc<crate::capability::pg::CancelRegistry>,
     pub(crate) http_client: reqwest::Client,
     /// Last successfully-listed upstream MCP tools per connection. The
     /// per-wiring tool picker falls back to this when a live listing can't be
@@ -365,6 +368,7 @@ impl Broker {
             advertise_host: std::sync::OnceLock::new(),
             sidecar_mcp_port: Mutex::new(None),
             pg_proxy_port: std::sync::OnceLock::new(),
+            pg_cancels: Arc::new(crate::capability::pg::CancelRegistry::default()),
             token_limiter: KeyedLimiter::new(
                 config.per_identity_per_min,
                 std::time::Duration::from_secs(60),
@@ -2499,6 +2503,53 @@ impl Broker {
         self.elicitations.elicit(request).await
     }
 
+    /// Record (or stop recording) the SQL of a Postgres connection's
+    /// statements in the activity log; `None` restores the broker-wide
+    /// default.
+    ///
+    /// No native gate either way. Turning it *on* adds a record of the user's
+    /// own traffic rather than granting an agent anything, and turning it
+    /// *off* narrows what a durable log retains — which is the direction the
+    /// gates exist to protect, not to obstruct.
+    pub fn ui_set_audit_statements(
+        &self,
+        connection_id: &Uuid,
+        audit_statements: Option<bool>,
+    ) -> Result<bool> {
+        let _gate = self.config_gate.lock().unwrap();
+        let connection = self.store.connection_by_id(connection_id)?;
+        let changed = self
+            .access
+            .set_audit_statements(*connection_id, audit_statements)?;
+        if changed {
+            let effective = self
+                .access
+                .audit_statements(connection_id, self.config.audit_pg_statements);
+            self.audit.append(
+                AuditEntry::new(
+                    AuditKind::SettingsChanged,
+                    format!(
+                        "Statement recording {} for {}",
+                        if effective { "enabled" } else { "disabled" },
+                        connection.name
+                    ),
+                )
+                .connection(connection.name.clone())
+                .field("setting", "audit_statements")
+                .field(
+                    "new",
+                    match audit_statements {
+                        Some(on) => on.to_string(),
+                        None => "default".to_string(),
+                    },
+                )
+                .field("effective", effective),
+            );
+            self.events.wirings_changed();
+        }
+        Ok(changed)
+    }
+
     /// Curate which upstream MCP tools agents may call on a connection.
     /// `None` restores the default (all tools); `Some` is enforced by the
     /// broker on every `tools/call` and mirrored by the sidecar's tool
@@ -2782,6 +2833,39 @@ impl Broker {
         Ok(())
     }
 
+    /// Ask before trusting a first-seen SSH host key, or stop asking.
+    ///
+    /// Turning it **off** removes a gate the user deliberately put up, the same
+    /// class of change as disabling the read gate, so it takes a real
+    /// authentication that the presence window does not cover. Turning it on
+    /// only adds friction and is free.
+    pub fn ui_set_confirm_ssh_host_keys(&self, on: bool) -> Result<()> {
+        let old = self.store.settings().confirm_ssh_host_keys;
+        if old == on {
+            return Ok(());
+        }
+        let confirmation = if on {
+            None
+        } else {
+            Some(self.confirm_action(
+                "stop asking before trusting a new SSH host key — the first key a \
+                 server presents will be pinned without asking",
+            )?)
+        };
+        self.store.set_confirm_ssh_host_keys(on)?;
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::SettingsChanged,
+                "Setting changed: confirm new SSH host keys",
+            )
+            .field("setting", "confirm_ssh_host_keys")
+            .field("old", old)
+            .field("new", on)
+            .maybe_confirmation(confirmation),
+        );
+        Ok(())
+    }
+
     pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         let old = self.store.settings().menu_bar_hides_dock;
         if old == on {
@@ -2979,7 +3063,7 @@ mod tests {
         let fresh_gate = ["confirm_", "action("].concat();
         let windowed_gate = ["confirm_user_", "action("].concat();
         let configuration_gate = ["confirm_configuration_", "action("].concat();
-        assert_eq!(source.matches(&fresh_gate).count(), 11);
+        assert_eq!(source.matches(&fresh_gate).count(), 12);
         assert_eq!(source.matches(&windowed_gate).count(), 6);
         assert_eq!(source.matches(&configuration_gate).count(), 2);
 
@@ -2998,15 +3082,28 @@ mod tests {
             "Clear AgentMFA activity history",
             "Disable OS authentication requirement",
             "Change how long AgentMFA stays unlocked",
+            "stop asking before trusting a new SSH host key",
         ] {
             assert!(
                 source.contains(reason),
                 "missing confirmation inventory item: {reason}"
             );
         }
+        // Trust-on-first-use pins a host key permanently, so whether it asks
+        // first has to stay traceable to the setting.
+        //
+        // Asserted against the SSH capability's own source, not this file: the
+        // previous version of this check looked for a phrase in `broker.rs`
+        // that appeared nowhere except inside the assertion itself, so it held
+        // no matter what the code did.
+        let ssh = include_str!("capability/ssh.rs");
         assert!(
-            source.contains("pins it *without asking*"),
-            "SSH trust-on-first-use must remain documented as prompt-free"
+            ssh.contains("settings().confirm_ssh_host_keys"),
+            "the host-key pin must consult the setting"
+        );
+        assert!(
+            ssh.contains("confirm_host_key"),
+            "and route the question through the approval surface"
         );
     }
 }

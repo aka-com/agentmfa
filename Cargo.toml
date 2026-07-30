@@ -62,7 +62,10 @@ tokio-postgres = "0.7"
 # in the trusted onboarding surface, and the decrypted OpenSSH form is what the
 # vault seals. It brings in bcrypt-pbkdf and the AES/ChaCha ciphers OpenSSH uses
 # for `-o KDF=bcrypt`.
-ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rsa", "ecdsa", "encryption"] }
+# `p256`/`p384` are what make ECDSA keys *signable*: the bare `ecdsa`
+# feature only parses them, so without these a user's ECDSA key imported
+# fine and then failed at the first login.
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rsa", "ecdsa", "p256", "p384", "encryption"] }
 rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
 signature = "2"
 

@@ -96,7 +96,7 @@ const upstream = {
   cancelledRequestIds: [] as number[],
   discoveryBarrier: false,
   discoveryReplies: [] as Array<() => void>,
-  capabilities: { tools: {}, resources: {}, completions: {} } as
+  capabilities: { tools: {}, resources: {}, completions: {}, prompts: {} } as
     | Record<string, unknown>
     | undefined,
   toolPages: undefined as
@@ -128,7 +128,7 @@ function resetUpstream(): void {
   upstream.cancelledRequestIds = [];
   upstream.discoveryBarrier = false;
   upstream.discoveryReplies = [];
-  upstream.capabilities = { tools: {}, resources: {}, completions: {} };
+  upstream.capabilities = { tools: {}, resources: {}, completions: {}, prompts: {} };
   upstream.toolPages = undefined;
   upstream.rpcFailure = false;
   upstream.lastRetry = undefined;
@@ -329,6 +329,38 @@ function upstreamHttp(call: {
           name: 'Home',
           description: 'The workspace home page',
           mimeType: 'text/markdown',
+        },
+      ],
+    });
+  }
+
+  if (request.method === 'prompts/list') {
+    return reply({
+      prompts: [
+        {
+          name: 'summarize',
+          title: 'Summarize a page',
+          description: 'Summarize a Notion page',
+          arguments: [
+            { name: 'pageId', description: 'The page to summarize', required: true },
+            { name: 'tone', description: 'How to write it' },
+          ],
+        },
+      ],
+    });
+  }
+
+  if (request.method === 'prompts/get') {
+    const params = request.params as { name: string; arguments?: Record<string, string> };
+    return reply({
+      description: `prompt ${params.name}`,
+      messages: [
+        {
+          role: 'user',
+          content: {
+            type: 'text',
+            text: `${params.name}:${JSON.stringify(params.arguments ?? {})}`,
+          },
         },
       ],
     });
@@ -1383,6 +1415,58 @@ test("an MCP upstream's resources and templates are re-exposed", async () => {
   }
 });
 
+test("an MCP upstream's prompts are re-exposed under its namespace", async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+
+    const { prompts } = await client.listPrompts();
+    const summarize = prompts.find((prompt) => prompt.name.endsWith('/summarize'));
+    assert.ok(summarize, `expected a namespaced summarize prompt, got ${JSON.stringify(
+      prompts.map((prompt) => prompt.name),
+    )}`);
+    // Namespaced by connection: two upstreams may each offer a `summarize`,
+    // and prompt names are one flat space in the protocol.
+    assert.notEqual(summarize.name, 'summarize');
+    // Upstream prose is framed as untrusted wherever it reaches the agent.
+    assert.match(String(summarize.description), /brokered by AgentMFA/);
+    assert.match(String(summarize.description), new RegExp(UNTRUSTED_BEGIN.replace(/[[\]]/g, '\\$&')));
+    assert.deepEqual(
+      summarize.arguments?.map((argument) => ({
+        name: argument.name,
+        required: argument.required ?? false,
+      })),
+      [
+        { name: 'pageId', required: true },
+        { name: 'tone', required: false },
+      ],
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+test('getting a prompt proxies to the upstream through the broker', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    const { prompts } = await client.listPrompts();
+    const name = prompts.find((prompt) => prompt.name.endsWith('/summarize'))!.name;
+
+    const result = await client.getPrompt({ name, arguments: { pageId: 'home' } });
+    const [message] = result.messages;
+    assert.equal(message.role, 'user');
+    // The upstream saw the prompt's own name and the arguments it was given —
+    // the namespace is this side's, and is stripped before the upstream leg.
+    assert.match(
+      String((message.content as { text: string }).text),
+      /summarize:\{"pageId":"home"\}/,
+    );
+  } finally {
+    await app.close();
+  }
+});
+
 test('reading a static resource proxies to the upstream through the broker', async () => {
   const app = await harness();
   try {
@@ -1487,6 +1571,31 @@ test('an unsupported upstream protocol version is rejected during discovery', as
     ) as { errors?: Array<{ name: string; error: string }> };
     assert.equal(status.errors?.[0]?.name, 'notion');
     assert.match(status.errors?.[0]?.error ?? '', /unsupported protocol version 2099-01-01/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('an upstream that negotiates the older protocol revision still works', async () => {
+  const app = await harness();
+  try {
+    // A server may answer `initialize` with an older revision it prefers.
+    // Nothing this client does differs between the two, so refusing it turned
+    // a correct negotiation into an unreachable upstream.
+    upstream.protocolVersion = '2025-03-26';
+    const client = await app.connect('token-mcp');
+    const status = payload(
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
+    ) as { errors?: Array<{ name: string; error: string }> };
+    assert.equal(status.errors, undefined, JSON.stringify(status.errors));
+
+    const tools = await client.listTools();
+    assert.ok(
+      tools.tools.some((tool) => tool.name === upstreamToolName(
+        { name: 'notion' } as never, 'search',
+      )),
+      'the upstream contributed its tools over the older revision',
+    );
   } finally {
     await app.close();
   }

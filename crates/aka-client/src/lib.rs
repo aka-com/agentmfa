@@ -23,7 +23,8 @@ use aka_api::{
 };
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
-    AccessBody, AllowedToolsBody, ApprovalResponseBody, BackendProfile, ConfirmBody,
+    AccessBody, AllowedToolsBody, ApprovalResponseBody, AuditStatementsBody, BackendProfile,
+    ConfirmBody,
     ConnectionAddBody, ConnectionConfigPatch, ConnectionConfigPatchBody, ConnectionRenameBody,
     ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody,
     ManageResult, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody,
@@ -949,6 +950,19 @@ impl ManagementBackend for RemoteBackend {
         .map(|body| body.changed)
     }
 
+    async fn set_audit_statements(
+        &self,
+        connection_id: Uuid,
+        audit_statements: Option<bool>,
+    ) -> ManageResult<bool> {
+        self.post::<ChangedBody, _>(
+            &format!("/v1/manage/connections/{connection_id}/audit-statements"),
+            &AuditStatementsBody { audit_statements },
+        )
+        .await
+        .map(|body| body.changed)
+    }
+
     async fn issue_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto> {
         self.post_empty(&format!("/v1/manage/connections/{connection_id}/endpoint"))
             .await
@@ -1032,6 +1046,14 @@ impl ManagementBackend for RemoteBackend {
     async fn set_menu_bar_hides_dock(&self, on: bool) -> ManageResult<()> {
         self.patch_settings(SettingsPatchBody {
             menu_bar_hides_dock: Some(on),
+            ..Default::default()
+        })
+        .await
+    }
+
+    async fn set_confirm_ssh_host_keys(&self, on: bool) -> ManageResult<()> {
+        self.patch_settings(SettingsPatchBody {
+            confirm_ssh_host_keys: Some(on),
             ..Default::default()
         })
         .await

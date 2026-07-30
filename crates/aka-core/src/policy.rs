@@ -175,6 +175,7 @@ impl AccessTable {
                                 enabled: false,
                                 allowed_tools: None,
                                 confirm: ConfirmMode::Off,
+                                audit_statements: None,
                                 updated_at: Utc::now(),
                             });
                             continue;
@@ -199,6 +200,7 @@ impl AccessTable {
                             enabled: true,
                             allowed_tools,
                             confirm: ConfirmMode::Off,
+                            audit_statements: None,
                             updated_at: Utc::now(),
                         });
                     }
@@ -226,6 +228,7 @@ impl AccessTable {
                             }),
                             allowed_tools: None,
                             confirm: ConfirmMode::Off,
+                            audit_statements: None,
                             updated_at: Utc::now(),
                         })
                         .collect();
@@ -345,6 +348,7 @@ impl AccessTable {
                 enabled,
                 allowed_tools: None,
                 confirm: ConfirmMode::Off,
+                audit_statements: None,
                 updated_at: Utc::now(),
             }),
         }
@@ -379,6 +383,7 @@ impl AccessTable {
                 enabled: true,
                 allowed_tools: tools,
                 confirm: ConfirmMode::Off,
+                audit_statements: None,
                 updated_at: Utc::now(),
             }),
         }
@@ -410,6 +415,54 @@ impl AccessTable {
                 enabled: true,
                 allowed_tools: None,
                 confirm,
+                audit_statements: None,
+                updated_at: Utc::now(),
+            }),
+        }
+        self.persist(&next)?;
+        *entries = next;
+        Ok(true)
+    }
+
+    /// Whether this connection records statement text, given the broker-wide
+    /// default. An entry with no override inherits it.
+    pub fn audit_statements(&self, connection_id: &Uuid, default: bool) -> bool {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| &e.connection_id == connection_id)
+            .and_then(|e| e.audit_statements)
+            .unwrap_or(default)
+    }
+
+    /// Override statement recording for one connection; `None` restores the
+    /// broker-wide default. Returns whether the stored override changed.
+    pub fn set_audit_statements(
+        &self,
+        connection_id: Uuid,
+        audit_statements: Option<bool>,
+    ) -> Result<bool> {
+        let mut entries = self.entries.lock().unwrap();
+        let current = entries
+            .iter()
+            .find(|e| e.connection_id == connection_id)
+            .and_then(|e| e.audit_statements);
+        if current == audit_statements {
+            return Ok(false);
+        }
+        let mut next = entries.clone();
+        match next.iter_mut().find(|e| e.connection_id == connection_id) {
+            Some(entry) => {
+                entry.audit_statements = audit_statements;
+                entry.updated_at = Utc::now();
+            }
+            None => next.push(ToolAccess {
+                connection_id,
+                enabled: true,
+                allowed_tools: None,
+                confirm: ConfirmMode::default(),
+                audit_statements,
                 updated_at: Utc::now(),
             }),
         }
@@ -471,6 +524,51 @@ mod tests {
         assert!(t.allows(&conn));
         assert_eq!(t.allowed_tools(&conn), None);
         assert!(t.entry(&conn).is_none());
+    }
+
+    /// P6. Statement recording is a per-destination retention choice layered
+    /// over the operator's broker-wide default: no override follows the
+    /// default whichever way it is set, and an override wins over it in both
+    /// directions until explicitly dropped.
+    #[test]
+    fn statement_recording_overrides_the_broker_default_in_both_directions() {
+        let (t, _dir) = table();
+        let conn = Uuid::new_v4();
+
+        // No entry at all: whatever the operator launched with.
+        assert!(!t.audit_statements(&conn, false));
+        assert!(t.audit_statements(&conn, true));
+
+        // Opt one connection in while the broker default is off.
+        assert!(t.set_audit_statements(conn, Some(true)).unwrap());
+        assert!(t.audit_statements(&conn, false));
+        assert!(!t.set_audit_statements(conn, Some(true)).unwrap());
+
+        // And opt one out while the default is on — the direction that makes
+        // this a retention control rather than a convenience.
+        assert!(t.set_audit_statements(conn, Some(false)).unwrap());
+        assert!(!t.audit_statements(&conn, true));
+
+        // Dropping the override returns the connection to the default.
+        assert!(t.set_audit_statements(conn, None).unwrap());
+        assert!(t.audit_statements(&conn, true));
+        assert!(!t.audit_statements(&conn, false));
+        assert_eq!(t.entry(&conn).unwrap().audit_statements, None);
+    }
+
+    /// The override is orthogonal to access: setting it must not disturb the
+    /// enabled flag or a curated tool subset sharing the same record.
+    #[test]
+    fn statement_recording_leaves_the_rest_of_the_entry_alone() {
+        let (t, _dir) = table();
+        let conn = Uuid::new_v4();
+        t.set_enabled(conn, false).unwrap();
+        t.set_allowed_tools(conn, Some(vec!["search".into()])).unwrap();
+
+        t.set_audit_statements(conn, Some(true)).unwrap();
+        assert!(!t.allows(&conn));
+        assert_eq!(t.allowed_tools(&conn), Some(vec!["search".into()]));
+        assert!(t.audit_statements(&conn, false));
     }
 
     #[test]

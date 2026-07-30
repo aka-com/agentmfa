@@ -284,6 +284,15 @@ pub struct AccessDto {
     /// Curated upstream MCP tool subset; absent means all tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
+    /// Per-connection override for recording Postgres statement text; absent
+    /// means the broker-wide default applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_statements: Option<bool>,
+    /// What that resolves to for this connection, override or default, so a
+    /// client can render the effective state without knowing the broker's
+    /// launch flags.
+    #[serde(default)]
+    pub audit_statements_effective: bool,
     /// The direct endpoint issued for this connection, if any. Its presence
     /// flips the row's control from "Issue" to "Reissue / Revoke".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -624,6 +633,9 @@ pub enum ApprovalDecisionDto {
 pub struct SettingsDto {
     pub reauth_on_read: bool,
     pub menu_bar_hides_dock: bool,
+    /// Ask before trusting an SSH server's host key the first time it is seen.
+    #[serde(default)]
+    pub confirm_ssh_host_keys: bool,
     pub presence_window_secs: u64,
 }
 
@@ -711,6 +723,8 @@ mod tests {
                 confirm_window_agents: vec![],
                 confirm_cooldown_until: None,
                 allowed_tools: None,
+                audit_statements: None,
+                audit_statements_effective: false,
                 endpoint: None,
             },
             host: None,

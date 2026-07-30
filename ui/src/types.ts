@@ -41,6 +41,13 @@ export interface AgentAccess {
   /** Curated upstream MCP tool subset; absent means all tools. */
   allowed_tools?: string[] | null;
   /**
+   * Per-connection override for recording Postgres statement text; absent
+   * means the broker-wide default applies.
+   */
+  audit_statements?: boolean | null;
+  /** What that resolves to, override or default — what the row renders. */
+  audit_statements_effective?: boolean;
+  /**
    * The direct endpoint issued for this connection, if any. Its presence
    * flips the row's control from "Issue" to "Reissue / Revoke". `dsn` is the
    * pasteable address (including the retained Postgres endpoint credential)
@@ -292,6 +299,8 @@ export interface BrokerProfile {
 export interface Settings {
   reauth_on_read: boolean;
   menu_bar_hides_dock: boolean;
+  /** Ask before trusting a first-seen SSH host key. */
+  confirm_ssh_host_keys: boolean;
   /** Seconds one OS authentication keeps user-plane actions from re-prompting. */
   presence_window_secs: number;
 }
@@ -526,6 +535,10 @@ export interface CommandMap {
   cancel_mcp_auth: CommandSpec<{ id: string }, boolean>;
   mcp_status: CommandSpec<{ id: string; options?: McpCheckOptions | null }, McpStatusReport>;
   set_allowed_tools: CommandSpec<{ connectionId: string; tools?: string[] | null }, boolean>;
+  set_audit_statements: CommandSpec<
+    { connectionId: string; auditStatements?: boolean | null },
+    boolean
+  >;
   list_mcp_tools: CommandSpec<{ id: string }, McpToolCatalog>;
   oauth_connect: CommandSpec<{ input: ConnectionInput; clientSecret?: string | null }, void>;
   oauth_reconnect: CommandSpec<{ id: string }, void>;
@@ -551,6 +564,7 @@ export interface CommandMap {
   }, boolean>;
   set_reauth_on_read: CommandSpec<{ on: boolean }, void>;
   set_menu_bar_hides_dock: CommandSpec<{ on: boolean }, void>;
+  set_confirm_ssh_host_keys: CommandSpec<{ on: boolean }, void>;
   set_presence_window: CommandSpec<{ secs: number }, void>;
   ui_set_mode: CommandSpec<{ mode: string }, void>;
   ui_hide_main: CommandSpec<undefined, void>;

@@ -486,6 +486,12 @@ enum SettingsCommand {
         /// Keep one successful presence check valid for this many seconds.
         #[arg(long, value_parser = parse_presence_window_secs)]
         presence_window_secs: Option<u64>,
+        /// Ask before trusting an SSH server's host key the first time it is
+        /// seen, instead of pinning it silently. Needs an attached approval
+        /// surface: with none, the first login to an unpinned server is
+        /// refused rather than trusted.
+        #[arg(long)]
+        confirm_ssh_host_keys: Option<bool>,
         #[arg(long)]
         root: Option<PathBuf>,
         #[arg(long)]
@@ -571,6 +577,31 @@ enum ConnCommand {
         /// Stop confirming (the default is to start).
         #[arg(long)]
         off: bool,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
+    },
+    /// Record the SQL of this Postgres connection's statements in the
+    /// activity log, or stop. Without --on or --off, prints the effective
+    /// setting. Statement text can carry credentials and personal data, so
+    /// this is a per-destination retention choice on top of the broker-wide
+    /// --audit-pg-statements default.
+    AuditStatements {
+        /// The connection to change.
+        name: String,
+        /// Start recording statement text for this connection.
+        #[arg(long, conflicts_with_all = ["off", "default"])]
+        on: bool,
+        /// Stop recording statement text for this connection.
+        #[arg(long, conflicts_with = "default")]
+        off: bool,
+        /// Drop the override and follow the broker-wide default.
+        #[arg(long)]
+        default: bool,
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -910,6 +941,14 @@ fn run_cli() {
                 root,
                 broker,
             } => cmd_conn_confirm(name, root, broker, !off),
+            ConnCommand::AuditStatements {
+                name,
+                on,
+                off,
+                default,
+                root,
+                broker,
+            } => cmd_conn_audit_statements(name, root, broker, on, off, default),
             ConnCommand::Test { name, root, broker } => cmd_conn_test(name, root, broker, json),
             ConnCommand::Endpoint {
                 name,
@@ -933,12 +972,14 @@ fn run_cli() {
                 reauth_on_read,
                 menu_bar_hides_dock,
                 presence_window_secs,
+                confirm_ssh_host_keys,
                 root,
                 broker,
             } => cmd_settings_set(
                 reauth_on_read,
                 menu_bar_hides_dock,
                 presence_window_secs,
+                confirm_ssh_host_keys,
                 root,
                 broker,
                 json,
@@ -1817,6 +1858,7 @@ fn cmd_settings_get(root: Option<PathBuf>, url: Option<String>, json: bool) {
         println!("reauth on read: {}", settings.reauth_on_read);
         println!("menu bar hides Dock: {}", settings.menu_bar_hides_dock);
         println!("presence window: {} seconds", settings.presence_window_secs);
+        println!("confirm new SSH host keys: {}", settings.confirm_ssh_host_keys);
     }
 }
 
@@ -1824,11 +1866,16 @@ fn cmd_settings_set(
     reauth_on_read: Option<bool>,
     menu_bar_hides_dock: Option<bool>,
     presence_window_secs: Option<u64>,
+    confirm_ssh_host_keys: Option<bool>,
     root: Option<PathBuf>,
     url: Option<String>,
     json: bool,
 ) {
-    if reauth_on_read.is_none() && menu_bar_hides_dock.is_none() && presence_window_secs.is_none() {
+    if reauth_on_read.is_none()
+        && menu_bar_hides_dock.is_none()
+        && presence_window_secs.is_none()
+        && confirm_ssh_host_keys.is_none()
+    {
         die_with(
             ExitCode::Usage,
             "settings set requires at least one setting flag",
@@ -1844,6 +1891,12 @@ fn cmd_settings_set(
     if let Some(secs) = presence_window_secs {
         managed.run_gated(managed.backend.set_presence_window(secs));
     }
+    if let Some(on) = confirm_ssh_host_keys {
+        if on {
+            managed.require_approval_surface();
+        }
+        managed.run_gated(managed.backend.set_confirm_ssh_host_keys(on));
+    }
     let settings = managed.run(managed.backend.settings());
     if json {
         print_json(&settings);
@@ -1852,6 +1905,7 @@ fn cmd_settings_set(
         println!("reauth on read: {}", settings.reauth_on_read);
         println!("menu bar hides Dock: {}", settings.menu_bar_hides_dock);
         println!("presence window: {} seconds", settings.presence_window_secs);
+        println!("confirm new SSH host keys: {}", settings.confirm_ssh_host_keys);
     }
 }
 
@@ -2038,6 +2092,62 @@ fn cmd_conn_confirm(name: String, root: Option<PathBuf>, url: Option<String>, on
         }
     } else {
         eprintln!("traffic confirmation was already {state} for {name}");
+    }
+}
+
+fn cmd_conn_audit_statements(
+    name: String,
+    root: Option<PathBuf>,
+    url: Option<String>,
+    on: bool,
+    off: bool,
+    default: bool,
+) {
+    let managed = management_backend(root, url);
+    let dto = conn_dto(&managed, &name);
+    if dto.kind != "pg" {
+        die_with(
+            ExitCode::Usage,
+            format!("{name} is a {} connection; statement recording applies to Postgres", dto.kind),
+        );
+    }
+    let requested = match (on, off, default) {
+        (true, _, _) => Some(Some(true)),
+        (_, true, _) => Some(Some(false)),
+        (_, _, true) => Some(None),
+        _ => None,
+    };
+    let Some(requested) = requested else {
+        // No flag: report rather than change, so the effective state is
+        // readable without guessing at the broker's launch flags.
+        let source = match dto.agent_access.audit_statements {
+            Some(_) => "set on this tool",
+            None => "inherited from the broker default",
+        };
+        println!(
+            "statement recording is {} for {name} ({source})",
+            if dto.agent_access.audit_statements_effective {
+                "on"
+            } else {
+                "off"
+            }
+        );
+        return;
+    };
+    let changed = managed.run(managed.backend.set_audit_statements(dto_id(&dto.id), requested));
+    let updated = conn_dto(&managed, &name);
+    let state = if updated.agent_access.audit_statements_effective {
+        "on"
+    } else {
+        "off"
+    };
+    if changed {
+        eprintln!("statement recording {state} for {name}");
+        if updated.agent_access.audit_statements_effective {
+            eprintln!("  statement text can carry credentials and personal data into the activity log");
+        }
+    } else {
+        eprintln!("statement recording was already {state} for {name}");
     }
 }
 
@@ -3927,6 +4037,8 @@ mod tests {
                 confirm_window_agents: vec![],
                 confirm_cooldown_until: None,
                 allowed_tools: None,
+                audit_statements: None,
+                audit_statements_effective: false,
                 endpoint: None,
             },
             host: None,
