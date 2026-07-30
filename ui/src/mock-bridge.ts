@@ -170,6 +170,8 @@ interface MockAccess {
      * it; the connection list does not.
      */
     sshDsn?: string;
+    /** SSH only: the socket makes callers present the endpoint secret. */
+    require_auth?: boolean;
   };
 }
 
@@ -215,6 +217,7 @@ interface MockArgs {
   decision?: ApprovalDecision;
   tools?: string[] | null;
   auditStatements?: boolean | null;
+  requireAuth: boolean;
   clientSecret?: string | null;
   token?: string | null;
   source: string;
@@ -571,6 +574,7 @@ function connDto(c: MockConnection): ConnectionSummary {
               endpoint_id: record.endpoint.endpoint_id,
               type: record.endpoint.type,
               dsn: record.endpoint.dsn ?? null,
+              require_auth: record.endpoint.require_auth ?? false,
             }
           : null,
       };
@@ -1221,8 +1225,15 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       // socket path on the chip: the filename is derived from the endpoint
       // secret precisely so it is not enumerable, which means only a
       // vault-backed read can name it. `sshDsn` stands in for the vault here.
+      // A reissue rotates the secret without deciding anything about whether
+      // the socket is authenticated, so the flag rides through it.
+      const requireAuth = record.endpoint?.require_auth ?? false;
+      if (kind === 'ssh' && requireAuth) {
+        shownSecret = secret;
+        example = `mfa ssh-agent ${connection.name}`;
+      }
       record.endpoint = kind === 'ssh'
-        ? { endpoint_id: endpointId, type: kind, sshDsn: dsn }
+        ? { endpoint_id: endpointId, type: kind, sshDsn: dsn, require_auth: requireAuth }
         : { endpoint_id: endpointId, type: kind, dsn };
       audit('wired', `Direct endpoint issued: ${connection.name}`);
       emit('aka://wirings-changed', {});
@@ -1235,12 +1246,27 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       const endpoint = db.access.find((a) => a.connection_id === args.connectionId)?.endpoint;
       if (!connection || !endpoint) return null;
       const dsn = endpoint.dsn ?? endpoint.sshDsn ?? '';
-      const secret = connection.type === 'ssh' ? '' : MOCK_ENDPOINT_SECRET;
+      // An SSH endpoint surfaces its secret exactly when the socket will
+      // demand it; otherwise there is nowhere for a client to present one.
+      const secret = connection.type !== 'ssh' || endpoint.require_auth ? MOCK_ENDPOINT_SECRET : '';
       const example = connection.type === 'pg' ? `DATABASE_URL="${dsn}"`
         : connection.type === 'ssh'
-          ? `SSH_AUTH_SOCK="${dsn}" ${sshInvocationCommand({ ...connection, target: connTarget(connection) })}`
+          ? endpoint.require_auth
+            ? `mfa ssh-agent ${connection.name}`
+            : `SSH_AUTH_SOCK="${dsn}" ${sshInvocationCommand({ ...connection, target: connTarget(connection) })}`
         : `curl -H "Authorization: Bearer ${secret}" ${dsn}/`;
       return { endpoint_id: endpoint.endpoint_id, type: connection.type, dsn, secret, example };
+    }
+    case 'set_endpoint_require_auth': {
+      const record = db.access.find((a) => a.connection_id === args.connectionId);
+      const connection = db.connections.find((c) => c.id === args.connectionId);
+      if (!record?.endpoint || connection?.type !== 'ssh') return false;
+      if ((record.endpoint.require_auth ?? false) === args.requireAuth) return false;
+      record.endpoint.require_auth = args.requireAuth;
+      audit('wired', `SSH endpoint authentication ${args.requireAuth ? 'required' : 'no longer required'} for ${connection.name}`);
+      emit('aka://wirings-changed', {});
+      emit('aka://connections-changed', {});
+      return true;
     }
     case 'revoke_endpoint': {
       const record = db.access.find((a) => a.endpoint?.endpoint_id === args.endpointId);

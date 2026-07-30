@@ -309,6 +309,12 @@ pub struct EndpointChip {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsn: Option<String>,
+    /// SSH only: whether the agent socket makes a caller present the endpoint
+    /// secret before it will list or sign. Carried on the chip because it
+    /// changes what the row must say — an authenticated socket is reached
+    /// through `mfa ssh-agent`, not by pointing `IdentityAgent` at the path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_auth: bool,
 }
 
 /// The result of issuing a direct endpoint: the pasteable address, a

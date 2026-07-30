@@ -144,6 +144,7 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                 endpoint_id: e.id.to_string(),
                 kind: e.kind.as_str().to_string(),
                 dsn,
+                require_auth: e.require_auth,
             }
         }),
     };
@@ -1115,6 +1116,12 @@ pub struct AllowedToolsBody {
     pub tools: Option<Vec<String>>,
 }
 
+/// `POST /v1/manage/connections/{id}/endpoint/require-auth`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct EndpointRequireAuthBody {
+    pub require_auth: bool,
+}
+
 /// `POST /v1/manage/connections/{id}/audit-statements`. `audit_statements:
 /// null` restores the broker-wide default.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -1291,6 +1298,13 @@ pub trait ManagementBackend: Send + Sync {
         &self,
         connection_id: Uuid,
         audit_statements: Option<bool>,
+    ) -> ManageResult<bool>;
+    /// Require the `authenticate@agentmfa.dev` extension on this connection's
+    /// SSH endpoint socket, or stop requiring it.
+    async fn set_endpoint_require_auth(
+        &self,
+        connection_id: Uuid,
+        require_auth: bool,
     ) -> ManageResult<bool>;
     async fn issue_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto>;
     /// Read the connection's already-issued direct endpoint without minting or
@@ -1694,6 +1708,17 @@ impl ManagementBackend for LocalBackend {
             broker.ui_set_audit_statements(&connection_id, audit_statements)
         })
         .await
+    }
+
+    async fn set_endpoint_require_auth(
+        &self,
+        connection_id: Uuid,
+        require_auth: bool,
+    ) -> ManageResult<bool> {
+        Ok(self
+            .broker
+            .ui_set_endpoint_require_auth(&connection_id, require_auth)
+            .await?)
     }
 
     async fn issue_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto> {

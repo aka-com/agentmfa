@@ -84,8 +84,18 @@ const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;
 const SSH_AGENTC_SIGN_REQUEST: u8 = 13;
 const SSH_AGENT_SIGN_RESPONSE: u8 = 14;
 const SSH_AGENTC_EXTENSION: u8 = 27;
+const SSH_AGENT_EXTENSION_FAILURE: u8 = 28;
 
 const SESSION_BIND_EXTENSION: &[u8] = b"session-bind@openssh.com";
+/// AgentMFA's own agent extension: proves the caller holds this endpoint's
+/// secret before the socket will list identities or sign.
+///
+/// The ssh-agent wire protocol has no credential field, which is why a
+/// standing endpoint socket was authorized by whoever could open it. This adds
+/// the missing field as an extension — the one place the protocol leaves for
+/// it — carrying the same secret the PG and HTTP endpoints already present.
+/// Vendor-named per PROTOCOL.agent so it cannot collide with OpenSSH's own.
+const AUTHENTICATE_EXTENSION: &[u8] = b"authenticate@agentmfa.dev";
 const HOSTBOUND_AUTH_METHOD: &[u8] = b"publickey-hostbound-v00@openssh.com";
 
 // SIGN_REQUEST flags selecting the RSA hash (OpenSSH PROTOCOL.agent).
@@ -644,6 +654,17 @@ impl Drop for SocketGuard {
 struct AgentState {
     broker: Arc<Broker>,
     ticket: String,
+    /// The standing endpoint this socket serves, if any. `None` on the
+    /// per-open ticket path, whose socket is already bounded by the ticket
+    /// that minted it and by its own expiry.
+    ///
+    /// Held as an id, not as a resolved posture: whether the endpoint demands
+    /// `authenticate@agentmfa.dev` is read from the registry when a connection
+    /// is accepted, the same place the access re-check happens. Capturing it
+    /// at bind time would have made a posture change need a rebind, and
+    /// rebinding a Unix socket in place is how you delete the socket you just
+    /// created — the retiring listener's guard unlinks the path by name.
+    endpoint_id: Option<Uuid>,
     /// Pinned login the userauth blob must name.
     user: String,
     /// The pinned host key: `Some` from open time when the connection was
@@ -1283,6 +1304,10 @@ pub async fn open_agent(
     let state = Arc::new(AgentState {
         broker: broker.clone(),
         ticket,
+        // A per-open socket is already bounded by the ticket that minted it
+        // and by its own expiry, so it is not the standing authority the
+        // extension exists to protect.
+        endpoint_id: None,
         user,
         host_key_fingerprint: tokio::sync::Mutex::new(host_key_fingerprint),
         bind_gate: tokio::sync::Mutex::new(()),
@@ -1540,6 +1565,7 @@ pub async fn bind_endpoint(
         // Endpoints never redeem a ticket; the per-connection access re-check
         // gates them instead.
         ticket: String::new(),
+        endpoint_id: Some(endpoint.id),
         user,
         host_key_fingerprint: tokio::sync::Mutex::new(host_key_fingerprint),
         bind_gate: tokio::sync::Mutex::new(()),
@@ -1694,6 +1720,7 @@ async fn serve(
     let mut idle_deadline = tokio::time::Instant::now() + idle;
     let close_signal = session.close_signal.clone();
     let mut binding = None;
+    let mut auth = AgentAuthState::for_connection(state);
 
     // Buffered read half: answering a request can park on the user, and
     // watching the client for departure while it does must not consume the
@@ -1725,7 +1752,9 @@ async fn serve(
                     _ = close_signal.notified() => return "closed_by_user",
                     _ = tokio::time::sleep_until(ttl_deadline) => return "session_ttl",
                     _ = client_gone(&mut reader) => return "client_closed",
-                    response = handle_request(state, signer.as_ref(), &mut binding, kind, &payload) => response,
+                    response = handle_request(
+                        state, signer.as_ref(), &mut binding, &mut auth, kind, &payload,
+                    ) => response,
                 };
                 session
                     .bytes_down
@@ -1752,21 +1781,64 @@ async fn client_gone<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) {
     }
 }
 
+/// Whether one accepted connection must prove it holds the endpoint secret,
+/// and whether it has.
+///
+/// Per connection, not per socket: an unauthenticated caller must not be able
+/// to ride a state another caller established, which is the whole point.
+/// `required` is sampled once when the connection is accepted, so flipping the
+/// endpoint's posture mid-connection cannot strand a client that has already
+/// authenticated — turning it *on* closes the live sessions instead.
+struct AgentAuthState {
+    required: bool,
+    authenticated: bool,
+    /// One wrong secret ends this connection's usefulness. Guessing then
+    /// costs a fresh connection per attempt instead of a frame, and the
+    /// activity log records attackers rather than their keystrokes.
+    refused: bool,
+}
+
+impl AgentAuthState {
+    fn for_connection(state: &AgentState) -> Self {
+        let required = state
+            .endpoint_id
+            .and_then(|id| state.broker.endpoints.get(&id))
+            .is_some_and(|endpoint| endpoint.require_auth);
+        Self {
+            required,
+            authenticated: false,
+            refused: false,
+        }
+    }
+}
+
 /// Answer one agent request. Unknown requests and refused signatures both
 /// return SSH_AGENT_FAILURE — the ssh client's cue to move on.
 async fn handle_request(
     state: &Arc<AgentState>,
     signer: Option<&Arc<SshSigner>>,
     binding: &mut Option<SessionBinding>,
+    auth: &mut AgentAuthState,
     kind: u8,
     payload: &[u8],
 ) -> Vec<u8> {
+    // On an authenticated endpoint nothing but the authentication extension
+    // itself is served until the caller proves it holds the secret — not the
+    // identity list, and not a session-bind. Listing identities is the
+    // reconnaissance step, so exempting it would hand an unauthenticated
+    // caller the public key and the connection's name for free.
+    if auth.required && !auth.authenticated && (auth.refused || kind != SSH_AGENTC_EXTENSION) {
+        return frame(SSH_AGENT_FAILURE, &[]);
+    }
     match kind {
         SSH_AGENTC_REQUEST_IDENTITIES => {
             let body = signer
                 .map(|signer| signer.identities_answer(&state.comment))
                 .unwrap_or_else(|| 0u32.to_be_bytes().to_vec());
             frame(SSH_AGENT_IDENTITIES_ANSWER, &body)
+        }
+        SSH_AGENTC_EXTENSION if extension_name(payload) == AUTHENTICATE_EXTENSION => {
+            authenticate_extension(state, auth, payload)
         }
         SSH_AGENTC_EXTENSION => {
             // Route on the extension name. Every EXTENSION used to fall into
@@ -1777,8 +1849,7 @@ async fn handle_request(
             // therefore looked like a security event in the activity log.
             // An unknown extension gets the bare failure the protocol defines
             // for it and no record at all.
-            let name = Reader::new(payload).string().unwrap_or_default();
-            if name != SESSION_BIND_EXTENSION {
+            if extension_name(payload) != SESSION_BIND_EXTENSION {
                 return frame(SSH_AGENT_FAILURE, &[]);
             }
             if binding.is_some() {
@@ -1791,6 +1862,69 @@ async fn handle_request(
         SSH_AGENTC_SIGN_REQUEST => sign_response(state, signer, binding.as_ref(), payload).await,
         _ => frame(SSH_AGENT_FAILURE, &[]),
     }
+}
+
+/// The extension name at the head of an EXTENSION payload.
+fn extension_name(payload: &[u8]) -> &[u8] {
+    Reader::new(payload).string().unwrap_or_default()
+}
+
+/// Answer `authenticate@agentmfa.dev`: the caller presents this endpoint's
+/// secret, and the connection is marked authenticated when it matches.
+///
+/// Resolved through the registry by hash and required to resolve to *this*
+/// endpoint: a valid secret for a different endpoint is that endpoint's
+/// authority, not this one's. A failure is recorded because nothing
+/// legitimate presents a wrong secret here, and the only other trace would be
+/// a closed socket — and it is recorded once, because the connection stops
+/// answering after it, so a guesser cannot use the log as an amplifier.
+///
+/// Accepted on any endpoint socket, not only one that currently demands it: a
+/// forwarder that read the posture a moment ago and connected a moment later
+/// should not be broken by the race, and proving a secret you already hold
+/// grants nothing the socket was withholding.
+fn authenticate_extension(
+    state: &Arc<AgentState>,
+    auth: &mut AgentAuthState,
+    payload: &[u8],
+) -> Vec<u8> {
+    let Some(endpoint_id) = state.endpoint_id else {
+        // Nothing to prove: a per-open ticket socket has no endpoint secret.
+        // Answering success would let a client believe it had authenticated
+        // something, so this is the protocol's "I don't implement that".
+        return frame(SSH_AGENT_EXTENSION_FAILURE, &[]);
+    };
+    let mut reader = Reader::new(payload);
+    let (Some(_name), Some(secret)) = (reader.string(), reader.string()) else {
+        return frame(SSH_AGENT_EXTENSION_FAILURE, &[]);
+    };
+    if !reader.is_empty() {
+        return frame(SSH_AGENT_EXTENSION_FAILURE, &[]);
+    }
+    let presented = zeroize::Zeroizing::new(String::from_utf8_lossy(secret).into_owned());
+    let matches = state
+        .broker
+        .endpoints
+        .resolve_secret(&presented)
+        .is_some_and(|resolved| resolved.id == endpoint_id);
+    if !matches {
+        auth.refused = true;
+        state.broker.audit.append(
+            AuditEntry::new(
+                AuditKind::Denied,
+                format!("SSH endpoint authentication refused: {}", state.connection_name),
+            )
+            .agent(state.agent.clone())
+            .connection(state.connection_name.clone())
+            .detail("the presented secret is not this endpoint's".to_string())
+            .outcome("invalid_secret")
+            .field("kind", "ssh")
+            .field("endpoint_id", endpoint_id.to_string()),
+        );
+        return frame(SSH_AGENT_EXTENSION_FAILURE, &[]);
+    }
+    auth.authenticated = true;
+    frame(SSH_AGENT_SUCCESS, &[])
 }
 
 /// Answer a `session-bind@openssh.com` request. Pinned connections verify

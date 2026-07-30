@@ -123,6 +123,9 @@ impl EndpointRegistry {
             existing.secret_hash = secret_hash;
             existing.secret = secret.clone();
             existing.kind = kind;
+            // `require_auth` is deliberately untouched: a rotation is not a
+            // decision to weaken the socket, and doing so silently would
+            // relax the posture exactly when the user was tightening it.
             let endpoint = existing.clone();
             self.persist(&next)?;
             *endpoints = next;
@@ -140,12 +143,34 @@ impl EndpointRegistry {
             secret_hash,
             secret: secret.clone(),
             port: None,
+            require_auth: false,
             created_at: Utc::now(),
         };
         next.push(endpoint.clone());
         self.persist(&next)?;
         *endpoints = next;
         Ok(IssuedEndpoint { endpoint, secret })
+    }
+
+    /// Require (or stop requiring) the `authenticate@agentmfa.dev` extension
+    /// on an SSH endpoint's socket. Returns whether the flag changed.
+    ///
+    /// Reissuing preserves it: rotating the secret is not a decision about
+    /// whether the socket is authenticated, and silently relaxing the stronger
+    /// posture during a rotation would be the worst possible time to do it.
+    pub fn set_require_auth(&self, id: &Uuid, require_auth: bool) -> Result<bool> {
+        let mut endpoints = self.endpoints.lock().unwrap();
+        let Some(pos) = endpoints.iter().position(|e| &e.id == id) else {
+            return Err(CoreError::EndpointNotFound);
+        };
+        if endpoints[pos].require_auth == require_auth {
+            return Ok(false);
+        }
+        let mut next = endpoints.clone();
+        next[pos].require_auth = require_auth;
+        self.persist(&next)?;
+        *endpoints = next;
+        Ok(true)
     }
 
     /// Pin an endpoint's loopback port (HTTP reverse-proxy endpoints), so a

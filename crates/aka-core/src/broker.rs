@@ -1999,17 +1999,34 @@ impl Broker {
                     .display()
                     .to_string();
                 let target = ssh_endpoint_invocation(destination.as_deref(), user, host, *port);
-                // SSH has no presented secret: the ssh-agent protocol offers no
-                // password, so the socket path is the whole capability. The
-                // minted secret is not surfaced.
+                // The socket path used to be the whole capability, because the
+                // ssh-agent protocol has no password field — so the minted
+                // secret was never surfaced. An endpoint that requires
+                // `authenticate@agentmfa.dev` does present it, and a client
+                // that cannot read it cannot use the socket at all.
                 IssuedEndpointInfo {
                     endpoint_id: endpoint.id,
                     kind: ConnectionKind::Ssh,
                     dsn: sock.clone(),
                     // The socket path is the only address an ssh-agent has.
                     tcp_dsn: None,
-                    secret: String::new(),
-                    example: format!("SSH_AUTH_SOCK=\"{sock}\" {target}"),
+                    secret: if endpoint.require_auth {
+                        recovered.clone()
+                    } else {
+                        String::new()
+                    },
+                    // An authenticated socket refuses a client that merely
+                    // points `SSH_AUTH_SOCK` at it, so the example has to be
+                    // the forwarder: an address that looks usable and is not
+                    // is worse than no address at all.
+                    example: if endpoint.require_auth {
+                        format!(
+                            "mfa ssh-agent {} -- {target}",
+                            shell_word(&connection.name)
+                        )
+                    } else {
+                        format!("SSH_AUTH_SOCK=\"{sock}\" {target}")
+                    },
                 }
             }
             ConnectionConfig::Api { .. } => {
@@ -2119,6 +2136,81 @@ impl Broker {
             Ok(value) => value.to_string(),
             Err(_) => String::new(),
         }
+    }
+
+    /// Require (or stop requiring) `authenticate@agentmfa.dev` on an SSH
+    /// endpoint's socket, rebinding its listener so the change takes effect on
+    /// the next connection rather than the next broker start.
+    ///
+    /// Turning it **on** only narrows, so the in-app confirm is the gate.
+    /// Turning it **off** widens who may sign with a standing credential, so
+    /// it takes a fresh authentication the presence window does not cover.
+    pub async fn ui_set_endpoint_require_auth(
+        self: &Arc<Self>,
+        connection_id: &Uuid,
+        require_auth: bool,
+    ) -> Result<bool> {
+        let connection = self.store.connection_by_id(connection_id)?;
+        if connection.kind() != ConnectionKind::Ssh {
+            return Err(CoreError::InvalidConnectionConfig(
+                "only SSH endpoints carry an agent-protocol authentication step; \
+                 Postgres and HTTP endpoints already present their secret"
+                    .into(),
+            ));
+        }
+        let Some(endpoint) = self.endpoints.get_for_connection(connection_id) else {
+            return Err(CoreError::EndpointNotFound);
+        };
+        if endpoint.require_auth == require_auth {
+            return Ok(false);
+        }
+        let confirmation = if require_auth {
+            None
+        } else {
+            let store = self.store.clone();
+            let description = format!(
+                "stop requiring authentication on the SSH endpoint for “{}” — any \
+                 process that finds its socket can sign again",
+                connection.name
+            );
+            Some(
+                tokio::task::spawn_blocking(move || store.confirm_action(&description))
+                    .await
+                    .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??,
+            )
+        };
+        let changed = {
+            let _gate = self.config_gate.lock().unwrap();
+            self.endpoints.set_require_auth(&endpoint.id, require_auth)?
+        };
+        if !changed {
+            return Ok(false);
+        }
+        // The listener reads the posture when it accepts a connection, so new
+        // clients are covered without a rebind — and the socket path never
+        // moves, so a pasted `IdentityAgent` line keeps resolving. What a
+        // rebind would not have fixed is the connections already open: they
+        // were accepted under the old rule. Turning authentication *on* is a
+        // decision that those must stop signing, so close them.
+        if require_auth {
+            self.data_plane.close_endpoint_sessions(&endpoint.id);
+        }
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::Wired,
+                format!(
+                    "SSH endpoint authentication {} for {}",
+                    if require_auth { "required" } else { "no longer required" },
+                    connection.name
+                ),
+            )
+            .connection(connection.name.clone())
+            .field("endpoint_id", endpoint.id.to_string())
+            .field("require_auth", require_auth)
+            .maybe_confirmation(confirmation),
+        );
+        self.events.wirings_changed();
+        Ok(true)
     }
 
     /// Revoke one direct endpoint: drop the record, stop its listener, and
@@ -2915,6 +3007,20 @@ fn remember_connect_request(
     true
 }
 
+/// One shell word: quoted only when it would otherwise split or expand.
+/// Connection names are free text, and this one lands in a copy-and-run
+/// command line.
+fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._@%+:,/-".contains(&b))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 /// The `ssh` command an issued endpoint hands the user.
 ///
 /// A non-default port is spelled out even behind an imported alias, so the
@@ -3071,7 +3177,7 @@ mod tests {
         let fresh_gate = ["confirm_", "action("].concat();
         let windowed_gate = ["confirm_user_", "action("].concat();
         let configuration_gate = ["confirm_configuration_", "action("].concat();
-        assert_eq!(source.matches(&fresh_gate).count(), 12);
+        assert_eq!(source.matches(&fresh_gate).count(), 13);
         assert_eq!(source.matches(&windowed_gate).count(), 6);
         assert_eq!(source.matches(&configuration_gate).count(), 2);
 
@@ -3091,6 +3197,7 @@ mod tests {
             "Disable OS authentication requirement",
             "Change how long AgentMFA stays unlocked",
             "stop asking before trusting a new SSH host key",
+            "stop requiring authentication on the SSH endpoint",
         ] {
             assert!(
                 source.contains(reason),

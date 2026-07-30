@@ -5939,6 +5939,22 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       releaseDropdownForm();
       await refresh('connections');
       break;
+    case 'endpoint-auth-on':
+      if (await run(() => invoke('set_endpoint_require_auth', {
+        connectionId: btn.dataset.conn || '', requireAuth: true,
+      }))) {
+        toast('🔒 The agent socket now requires the endpoint secret');
+      }
+      await refresh('connections');
+      break;
+    case 'endpoint-auth-off':
+      if (await run(() => invoke('set_endpoint_require_auth', {
+        connectionId: btn.dataset.conn || '', requireAuth: false,
+      }))) {
+        toast('🔓 The agent socket no longer requires the endpoint secret');
+      }
+      await refresh('connections');
+      break;
     case 'statements-on':
       if (await run(() => invoke('set_audit_statements', {
         connectionId: btn.dataset.conn || '', auditStatements: true,

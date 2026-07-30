@@ -507,9 +507,23 @@ export function sshInvocationCommand(
 /** One command that uses the issued signing socket to reach its SSH target. */
 export function sshDirectCommand(
   socket: string,
-  connection: Parameters<typeof sshInvocationCommand>[0],
+  connection: Parameters<typeof sshInvocationCommand>[0] & { name?: string },
+  requireAuth = false,
 ): string {
+  // An authenticated agent socket refuses a client that merely points
+  // `SSH_AUTH_SOCK` at it: the ssh-agent protocol gives stock `ssh` nowhere to
+  // present the endpoint secret. The forwarder is the command that works, so
+  // it is the command shown — an address that cannot be used is worse than no
+  // address, because it looks like a working one.
+  if (requireAuth) {
+    return `mfa ssh-agent ${shellWord(connection.name ?? '')} -- ${sshInvocationCommand(connection)}`;
+  }
   return `${sshAuthSockAssignment(socket)} ${sshInvocationCommand(connection)}`;
+}
+
+/** One shell word: quoted only when it would otherwise split or expand. */
+function shellWord(value: string): string {
+  return /^[A-Za-z0-9._@%+:,/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\''`)}'`;
 }
 
 /**

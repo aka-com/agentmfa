@@ -69,7 +69,9 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
   const expanded = Boolean(state.epExpanded[c.id]);
   const endpointAddress = directEndpointAddress(c.type, endpoint, state.sshSockets[c.id]);
   const endpointText = endpointAddress
-    ? c.type === 'ssh' ? sshDirectCommand(endpointAddress, c) : endpointAddress
+    ? c.type === 'ssh'
+      ? sshDirectCommand(endpointAddress, c, Boolean(endpoint.require_auth))
+      : endpointAddress
     : null;
   const copyTitle = c.type === 'ssh' ? 'Copy the SSH command' : 'Copy the connection command';
   const copyButton = endpointText
@@ -103,7 +105,44 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
     {withFormats && endpointText && endpointAddress
       ? <EndpointFormatRow connection={c} address={endpointAddress} />
       : null}
+    <EndpointAuthRow connection={c} />
   </>;
+}
+
+/**
+ * Whether this SSH endpoint's agent socket makes callers prove they hold the
+ * endpoint secret.
+ *
+ * SSH is the only kind that needs asking. Postgres and HTTP endpoints present
+ * their secret as part of connecting, but the ssh-agent protocol has no field
+ * for one — so without this the socket is authorized by whoever can open it,
+ * and its unguessable filename is the only thing standing between a
+ * same-machine process and a login as the pinned user.
+ *
+ * Off by default, because turning it on is a real trade: stock `ssh` cannot
+ * send the extension, so an authenticated endpoint has to be reached through
+ * `mfa ssh-agent` rather than by naming the socket.
+ */
+function EndpointAuthRow({ connection: c }: { connection: ConnectionSummary }): ReactNode {
+  const endpoint = c.agent_access.endpoint;
+  if (c.type !== 'ssh' || !endpoint) return null;
+  const on = Boolean(endpoint.require_auth);
+  return <div className="cd-confirm-row cd-ep-auth">
+    <div className="cd-confirm-txt">
+      <div className="cd-confirm-lbl">Require the endpoint secret</div>
+      <div className="cd-confirm-sub">
+        {on
+          ? 'The signing socket refuses to list keys or sign until the caller presents this '
+            + 'endpoint’s secret. Reach it with the mfa ssh-agent command above.'
+          : 'Any process running as you that finds the signing socket can log in as the '
+            + 'pinned user. The ssh-agent protocol carries no password of its own.'}
+      </div>
+    </div>
+    <button className={`switch ${on ? 'on' : ''}`} role="switch" aria-checked={on}
+      title={on ? 'The socket requires the endpoint secret' : 'The socket requires no secret'}
+      aria-label={`${on ? 'Stop requiring' : 'Require'} the endpoint secret for ${c.name}`}
+      data-act={on ? 'endpoint-auth-off' : 'endpoint-auth-on'} data-conn={c.id}></button>
+  </div>;
 }
 
 export function ConnectionToggle({ connection: c }: {

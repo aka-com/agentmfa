@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 use super::{bearer_token, err_missing_token, request_peer, ApiJson, AppState};
 use crate::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, AuditStatementsBody, ConfirmBody,
-    ConnectionAddBody,
+    ConnectionAddBody, EndpointRequireAuthBody,
     ConnectionConfigPatchBody, ConnectionRenameBody, ConnectionUpdateBody, ConnectionsReorderBody,
     DraftTestBody, ElicitationResponseBody, ManagementBackend, McpAuthDeliverBody,
     McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody,
@@ -174,6 +174,10 @@ pub fn router() -> Router<AppState> {
             post(issue_endpoint).get(get_endpoint),
         )
         .route("/connections/{id}/endpoint/copy", post(copy_endpoint))
+        .route(
+            "/connections/{id}/endpoint/require-auth",
+            post(set_endpoint_require_auth),
+        )
         .route("/endpoints/{id}", delete(revoke_endpoint))
         .route("/mcp-auth", post(mcp_auth_start))
         .route(
@@ -743,6 +747,21 @@ async fn set_audit_statements(
         state
             .manage
             .set_audit_statements(id, body.audit_statements)
+            .await
+            .map(|changed| json!({ "changed": changed })),
+    )
+}
+
+async fn set_endpoint_require_auth(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<EndpointRequireAuthBody>,
+) -> Response {
+    respond(
+        state
+            .manage
+            .set_endpoint_require_auth(id, body.require_auth)
             .await
             .map(|changed| json!({ "changed": changed })),
     )

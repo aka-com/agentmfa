@@ -98,6 +98,10 @@ pub struct SseParser {
 }
 
 impl SseParser {
+    /// Feed a `str` chunk. The wire is bytes — the reader hands us
+    /// `push_bytes` — so this exists for tests that spell their chunks as
+    /// literals and split them at awkward boundaries.
+    #[cfg(test)]
     pub fn push(&mut self, chunk: &str) -> Vec<String> {
         self.push_bytes(chunk.as_bytes())
     }

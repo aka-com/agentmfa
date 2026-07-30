@@ -53,7 +53,18 @@ export interface AgentAccess {
    * pasteable address (including the retained Postgres endpoint credential)
    * or, for SSH, the stable agent-socket path.
    */
-  endpoint?: { endpoint_id: string; type: ConnectionType; dsn?: string | null } | null;
+  endpoint?: {
+    endpoint_id: string;
+    type: ConnectionType;
+    dsn?: string | null;
+    /**
+     * SSH only: the agent socket refuses to list or sign until the caller
+     * presents the endpoint secret. Changes what the row can say — such a
+     * socket is reached through `mfa ssh-agent`, not by pointing
+     * `IdentityAgent` straight at the path.
+     */
+    require_auth?: boolean;
+  } | null;
 }
 
 /**
@@ -537,6 +548,10 @@ export interface CommandMap {
   set_allowed_tools: CommandSpec<{ connectionId: string; tools?: string[] | null }, boolean>;
   set_audit_statements: CommandSpec<
     { connectionId: string; auditStatements?: boolean | null },
+    boolean
+  >;
+  set_endpoint_require_auth: CommandSpec<
+    { connectionId: string; requireAuth: boolean },
     boolean
   >;
   list_mcp_tools: CommandSpec<{ id: string }, McpToolCatalog>;

@@ -27,6 +27,7 @@ use aka_core::manage::{
     ConfirmBody,
     ConnectionAddBody, ConnectionConfigPatch, ConnectionConfigPatchBody, ConnectionRenameBody,
     ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody,
+    EndpointRequireAuthBody,
     ManageResult, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody,
     OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
@@ -958,6 +959,19 @@ impl ManagementBackend for RemoteBackend {
         self.post::<ChangedBody, _>(
             &format!("/v1/manage/connections/{connection_id}/audit-statements"),
             &AuditStatementsBody { audit_statements },
+        )
+        .await
+        .map(|body| body.changed)
+    }
+
+    async fn set_endpoint_require_auth(
+        &self,
+        connection_id: Uuid,
+        require_auth: bool,
+    ) -> ManageResult<bool> {
+        self.post::<ChangedBody, _>(
+            &format!("/v1/manage/connections/{connection_id}/endpoint/require-auth"),
+            &EndpointRequireAuthBody { require_auth },
         )
         .await
         .map(|body| body.changed)

@@ -314,7 +314,10 @@ test('the SSH endpoint field includes the configured ssh invocation', async () =
   )?.[1];
 
   assert.ok(endpointStrip, 'endpoint strip renderer is present');
-  assert.match(endpointStrip, /c\.type === 'ssh'\s*\?\s*sshDirectCommand\(endpointAddress, c\)/);
+  assert.match(
+    endpointStrip,
+    /c\.type === 'ssh'\s*\?\s*sshDirectCommand\(endpointAddress, c, Boolean\(endpoint\.require_auth\)\)/,
+  );
   assert.doesNotMatch(endpointStrip, /sshAuthSockCommand/);
 });
 

@@ -1583,3 +1583,259 @@ async fn the_session_ends_when_the_client_closes_its_agent_fd_after_signing() {
         "the signature must be recorded"
     );
 }
+
+/* --------------------- authenticated endpoint sockets --------------------- */
+
+const SSH_AGENT_EXTENSION_FAILURE: u8 = 28;
+const AUTHENTICATE_EXTENSION: &[u8] = b"authenticate@agentmfa.dev";
+
+/// Present `secret` on this connection and return the reply type.
+async fn authenticate(stream: &mut UnixStream, secret: &str) -> u8 {
+    let mut body = Vec::new();
+    put_string(&mut body, AUTHENTICATE_EXTENSION);
+    put_string(&mut body, secret.as_bytes());
+    write_message(stream, SSH_AGENTC_EXTENSION, &body).await;
+    read_message(stream).await.0
+}
+
+/// Turn on the socket's authentication requirement and hand back the secret a
+/// client must now present, read the way the app reads it.
+async fn require_endpoint_auth(h: &Harness) -> String {
+    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    assert!(
+        h.broker
+            .ui_set_endpoint_require_auth(&conn.id, true)
+            .await
+            .unwrap(),
+        "the flag should have changed"
+    );
+    let info = h
+        .broker
+        .ui_get_endpoint(&conn.id)
+        .await
+        .unwrap()
+        .expect("issued");
+    assert!(
+        !info.secret.is_empty(),
+        "an authenticated endpoint surfaces the secret a client has to send"
+    );
+    assert!(
+        info.example.contains("mfa ssh-agent"),
+        "the example must name the forwarder that can send it: {}",
+        info.example
+    );
+    info.secret
+}
+
+/// SSH-1 / SEC-28. The ssh-agent protocol carries no credential, so a standing
+/// endpoint socket was authorized by whoever could open it. With
+/// `require_auth`, the socket does nothing until the caller proves it holds
+/// the endpoint secret.
+#[tokio::test]
+async fn an_authenticated_endpoint_refuses_everything_until_the_secret_arrives() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    h.pair().await;
+    let info = h.issue_ssh_endpoint().await;
+    let secret = require_endpoint_auth(&h).await;
+
+    // Listing identities is the reconnaissance step, so it is refused too:
+    // exempting it would hand out the public key and the connection's comment.
+    let mut s = UnixStream::connect(&info.dsn).await.unwrap();
+    write_message(&mut s, SSH_AGENTC_REQUEST_IDENTITIES, &[]).await;
+    assert_eq!(read_message(&mut s).await.0, SSH_AGENT_FAILURE);
+
+    // So is session-bind, which would otherwise pin a host key on an
+    // unauthenticated connection.
+    let mut body = Vec::new();
+    put_string(&mut body, b"session-bind@openssh.com");
+    put_string(&mut body, &host_key.public_key().to_bytes().unwrap());
+    put_string(&mut body, b"session-id");
+    put_string(&mut body, b"sig");
+    body.push(0);
+    write_message(&mut s, SSH_AGENTC_EXTENSION, &body).await;
+    assert_eq!(read_message(&mut s).await.0, SSH_AGENT_FAILURE);
+
+    // With the secret, the same connection works exactly as before.
+    assert_eq!(authenticate(&mut s, &secret).await, SSH_AGENT_SUCCESS);
+    assert_eq!(bind_host(&mut s, &host_key).await, SSH_AGENT_SUCCESS);
+    assert_lists_identity(&mut s, &key).await;
+    let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
+    let (kind, sig) = sign(&mut s, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
+    verify_signature(key.public_key(), &sig, &data);
+}
+
+/// A wrong secret leaves the connection exactly where it was, and says so in
+/// the activity log — nothing legitimate presents one, and a closed socket is
+/// otherwise the only trace.
+#[tokio::test]
+async fn a_wrong_endpoint_secret_is_refused_and_recorded() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let _host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    h.pair().await;
+    let info = h.issue_ssh_endpoint().await;
+    let _secret = require_endpoint_auth(&h).await;
+
+    let mut s = UnixStream::connect(&info.dsn).await.unwrap();
+    assert_eq!(
+        authenticate(&mut s, "not-the-secret").await,
+        SSH_AGENT_EXTENSION_FAILURE
+    );
+    write_message(&mut s, SSH_AGENTC_REQUEST_IDENTITIES, &[]).await;
+    assert_eq!(
+        read_message(&mut s).await.0,
+        SSH_AGENT_FAILURE,
+        "a refused attempt must not leave the connection authenticated"
+    );
+
+    assert!(
+        h.broker.audit.recent(20).iter().any(|e| {
+            e.kind == aka_core::audit::AuditKind::Denied
+                && e.outcome.as_deref() == Some("invalid_secret")
+        }),
+        "the refusal must be recorded"
+    );
+}
+
+/// One guess per connection. Otherwise the socket is a free oracle: a caller
+/// could try secrets as fast as it can write frames, and each attempt would
+/// add a line to the activity log the user is supposed to be able to read.
+#[tokio::test]
+async fn a_connection_that_guesses_wrong_stops_answering() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let _host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    h.pair().await;
+    let info = h.issue_ssh_endpoint().await;
+    let secret = require_endpoint_auth(&h).await;
+
+    let mut s = UnixStream::connect(&info.dsn).await.unwrap();
+    assert_eq!(authenticate(&mut s, "guess-one").await, SSH_AGENT_EXTENSION_FAILURE);
+    // Even the correct secret cannot rescue this connection.
+    assert_eq!(
+        authenticate(&mut s, &secret).await,
+        SSH_AGENT_FAILURE,
+        "a burned connection must not accept a second attempt"
+    );
+    assert_eq!(
+        h.broker
+            .audit
+            .recent(50)
+            .iter()
+            .filter(|e| e.outcome.as_deref() == Some("invalid_secret"))
+            .count(),
+        1,
+        "one connection writes at most one refusal"
+    );
+
+    // A fresh connection is unaffected — this bounds guessing, it does not
+    // lock the endpoint out.
+    let mut fresh = UnixStream::connect(&info.dsn).await.unwrap();
+    assert_eq!(authenticate(&mut fresh, &secret).await, SSH_AGENT_SUCCESS);
+}
+
+/// The proof is per connection. If it were per socket, one authenticated
+/// client would reopen the socket for every other process on the machine.
+#[tokio::test]
+async fn one_connections_authentication_does_not_carry_to_another() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let _host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    h.pair().await;
+    let info = h.issue_ssh_endpoint().await;
+    let secret = require_endpoint_auth(&h).await;
+
+    let mut authenticated = UnixStream::connect(&info.dsn).await.unwrap();
+    assert_eq!(
+        authenticate(&mut authenticated, &secret).await,
+        SSH_AGENT_SUCCESS
+    );
+
+    let mut other = UnixStream::connect(&info.dsn).await.unwrap();
+    write_message(&mut other, SSH_AGENTC_REQUEST_IDENTITIES, &[]).await;
+    assert_eq!(read_message(&mut other).await.0, SSH_AGENT_FAILURE);
+}
+
+/// Turning it on is a decision that the processes already holding the socket
+/// must stop signing; leaving them connected would make the switch mean
+/// "…starting next reboot".
+#[tokio::test]
+async fn turning_authentication_on_closes_the_connections_it_was_not_asked_of() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    h.pair().await;
+    let info = h.issue_ssh_endpoint().await;
+
+    let mut before = bound_stream(&info.dsn, &host_key).await;
+    assert_lists_identity(&mut before, &key).await;
+    assert_eq!(h.broker.sessions().len(), 1);
+
+    let _secret = require_endpoint_auth(&h).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !h.broker.sessions().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the live endpoint session should be closed");
+}
+
+/// A per-open ticket socket has no endpoint secret behind it: it is already
+/// bounded by the ticket that minted it and by its own expiry, so it neither
+/// demands the extension nor pretends to implement it.
+#[tokio::test]
+async fn a_per_open_socket_neither_requires_nor_implements_the_extension() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let _host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    let mut s = UnixStream::connect(&auth_sock).await.unwrap();
+    // Serves without any proof…
+    write_message(&mut s, SSH_AGENTC_REQUEST_IDENTITIES, &[]).await;
+    assert_eq!(read_message(&mut s).await.0, SSH_AGENT_IDENTITIES_ANSWER);
+    // …and answers the extension honestly rather than claiming success.
+    assert_eq!(
+        authenticate(&mut s, "anything").await,
+        SSH_AGENT_EXTENSION_FAILURE
+    );
+}
+
+/// Rotating the secret is not a decision to weaken the socket. Silently
+/// clearing the flag during a reissue would relax the posture at exactly the
+/// moment the user was tightening it.
+#[tokio::test]
+async fn reissuing_an_endpoint_keeps_it_authenticated() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let _host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    h.pair().await;
+    h.issue_ssh_endpoint().await;
+    let first = require_endpoint_auth(&h).await;
+
+    let reissued = h.issue_ssh_endpoint().await;
+    assert_ne!(reissued.secret, first, "the secret rotates");
+    assert!(
+        !reissued.secret.is_empty() && reissued.example.contains("mfa ssh-agent"),
+        "the socket still requires authentication after a rotation"
+    );
+
+    let mut s = UnixStream::connect(&reissued.dsn).await.unwrap();
+    assert_eq!(
+        authenticate(&mut s, &first).await,
+        SSH_AGENT_EXTENSION_FAILURE,
+        "the retired secret must not still open the socket"
+    );
+    let mut s = UnixStream::connect(&reissued.dsn).await.unwrap();
+    assert_eq!(
+        authenticate(&mut s, &reissued.secret).await,
+        SSH_AGENT_SUCCESS
+    );
+}

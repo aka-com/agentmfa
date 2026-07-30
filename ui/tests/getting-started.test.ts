@@ -160,6 +160,36 @@ test('direct SSH commands combine the socket with the configured destination', (
   );
 });
 
+// SSH-1 / SEC-28. An endpoint that requires the secret cannot be reached by
+// naming its socket: stock `ssh` has no way to send the agent extension that
+// carries one. Showing the SSH_AUTH_SOCK form anyway would be an address that
+// looks usable and silently is not.
+test('an authenticated endpoint is shown as the forwarder command, not a socket', () => {
+  assert.equal(
+    sshDirectCommand('/tmp/agent.sock', {
+      name: 'production',
+      destination: 'production',
+      user: 'deploy',
+      host: 'prod.example.com',
+      port: 2222,
+      target: 'deploy@prod.example.com:2222',
+    }, true),
+    `mfa ssh-agent production -- ssh -p 2222 ${sshBrokerFlags()} production`,
+  );
+  // A name is free text and this lands on a command line.
+  assert.equal(
+    sshDirectCommand('/tmp/agent.sock', {
+      name: 'prod box',
+      destination: 'production',
+      user: 'deploy',
+      host: 'prod.example.com',
+      port: 22,
+      target: 'deploy@prod.example.com',
+    }, true),
+    `mfa ssh-agent 'prod box' -- ssh ${sshBrokerFlags()} production`,
+  );
+});
+
 // SSH-1: the agent socket's filename is derived from the endpoint secret, so
 // the path cannot be found by listing the endpoints directory. Reconstructing
 // one from the endpoint id — which this used to do — is exactly the guessable

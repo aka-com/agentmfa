@@ -1417,6 +1417,7 @@
    statements are anywhere afterwards. Ruled off rather than nested: it is a
    sibling setting, not a detail of the switch. */
 .cd-statements { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.cd-ep-auth { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 .cd-confirm-window {
   display: flex; align-items: center; gap: 7px; margin-top: 9px;
   padding: 7px 10px; border-radius: 8px; font-size: 0.75rem;

@@ -1297,6 +1297,27 @@ pub async fn set_audit_statements(
         .map_err(|e| e.to_string())
 }
 
+/// Require (or stop requiring) the `authenticate@agentmfa.dev` extension on an
+/// SSH endpoint's agent socket.
+///
+/// Gating is asymmetric and lives in the broker: turning it on only narrows,
+/// while turning it off widens who may sign with a standing credential and
+/// takes a fresh authentication there.
+#[tauri::command]
+pub async fn set_endpoint_require_auth(
+    state: State<'_, AppState>,
+    connection_id: String,
+    require_auth: bool,
+) -> CmdResult<bool> {
+    let connection_id = parse_id(&connection_id)?;
+    state
+        .brokers
+        .backend()
+        .set_endpoint_require_auth(connection_id, require_auth)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// List an MCP connection's upstream tools (names + descriptions), for the
 /// per-wiring tool picker. Read-only against the upstream.
 #[tauri::command]
@@ -1448,6 +1469,18 @@ fn ssh_flags() -> String {
         .join(" ")
 }
 
+/// Whether this connection's agent socket refuses callers that have not
+/// presented the endpoint secret. Such a socket cannot be named directly in
+/// `SSH_AUTH_SOCK` or `IdentityAgent` — stock `ssh` has no way to send the
+/// extension — so every copied form has to route through the forwarder.
+fn endpoint_requires_auth(connection: &aka_api::ConnectionDto) -> bool {
+    connection
+        .agent_access
+        .endpoint
+        .as_ref()
+        .is_some_and(|endpoint| endpoint.require_auth)
+}
+
 fn ssh_scp_command(connection: &aka_api::ConnectionDto, socket: &str) -> String {
     let destination = ssh_destination(connection).unwrap_or_else(|| connection.target.clone());
     let port = connection
@@ -1455,6 +1488,13 @@ fn ssh_scp_command(connection: &aka_api::ConnectionDto, socket: &str) -> String 
         .filter(|port| *port != 22)
         .map(|port| format!(" -P {port}"))
         .unwrap_or_default();
+    if endpoint_requires_auth(connection) {
+        return format!(
+            "mfa ssh-agent {} -- scp{port} {} <file> {destination}:",
+            shell_quoted(&connection.name),
+            ssh_flags()
+        );
+    }
     format!(
         "SSH_AUTH_SOCK={} scp{port} {} <file> {destination}:",
         shell_quoted(socket),
@@ -1486,7 +1526,23 @@ fn ssh_config_block(connection: &aka_api::ConnectionDto, socket: &str) -> Option
     if let Some(user) = user {
         lines.push(format!("  User {user}"));
     }
-    lines.push(format!("  IdentityAgent {}", shell_quoted(socket)));
+    // `IdentityAgent` names a path, never a command, so an authenticated
+    // endpoint needs a forwarder already listening somewhere stable. The
+    // comment is the missing half of the block: without it the config is
+    // syntactically fine and silently signs nothing.
+    if endpoint_requires_auth(connection) {
+        let forwarder = format!("~/.ssh/agentmfa-{alias}.sock");
+        lines.insert(
+            0,
+            format!(
+                "# Needs a forwarder running: mfa ssh-agent {} --socket {forwarder}",
+                shell_quoted(&connection.name)
+            ),
+        );
+        lines.push(format!("  IdentityAgent {}", shell_quoted(&forwarder)));
+    } else {
+        lines.push(format!("  IdentityAgent {}", shell_quoted(socket)));
+    }
     lines.extend(
         aka_core::capability::ssh::SSH_BROKER_OPTIONS
             .iter()
@@ -1810,6 +1866,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         respond_elicitation,
         set_allowed_tools,
         set_audit_statements,
+        set_endpoint_require_auth,
         list_mcp_tools,
         issue_endpoint,
         get_endpoint,
@@ -1861,6 +1918,7 @@ mod tests {
     fn api_input() -> ConnectionInput {
         ConnectionInput {
             mcp_path: None,
+            test_path: None,
             name: "notion".into(),
             kind: "api".into(),
             host: Some("mcp.notion.com".into()),
@@ -1916,6 +1974,7 @@ mod tests {
     fn connection_input_preserves_api_origin_and_ws_template() {
         let api = ConnectionInput {
             mcp_path: None,
+            test_path: None,
             name: "local-api".into(),
             kind: "api".into(),
             host: Some("localhost".into()),

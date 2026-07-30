@@ -600,6 +600,23 @@ pub struct DirectEndpoint {
     /// for PG/SSH endpoints, whose stable socket path derives from the id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Whether this SSH endpoint's socket refuses to act until the caller has
+    /// proved it holds the endpoint secret.
+    ///
+    /// The ssh-agent protocol carries no credential, so a standing agent
+    /// socket is authorized by whoever can open it — which, for a same-user
+    /// process, is everyone. The secret minted for the endpoint was never
+    /// presented; only the socket's derived filename made it awkward to find.
+    /// With this on, a connection must first send the
+    /// `authenticate@agentmfa.dev` extension, moving the boundary from
+    /// "can list a directory" to "can read the vault".
+    ///
+    /// Off by default because stock `ssh` cannot send an extension: an
+    /// authenticated endpoint is reached through `mfa ssh-agent`, which
+    /// supplies the proof and forwards. PG and HTTP endpoints ignore this —
+    /// their protocols present the secret already.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_auth: bool,
     pub created_at: DateTime<Utc>,
 }
 

@@ -58,6 +58,7 @@ use zeroize::Zeroizing;
 
 mod client;
 mod mcp_bridge;
+mod ssh_agent;
 
 fn parse_client_label(value: &str) -> Result<String, String> {
     if !value.is_empty()
@@ -258,6 +259,37 @@ enum Command {
         /// Attribution only, never authorization.
         #[arg(long)]
         client: Option<String>,
+    },
+    /// Run a local ssh-agent socket that speaks for a connection's *direct
+    /// endpoint*, presenting the endpoint secret the agent protocol gives
+    /// stock `ssh` no way to send.
+    ///
+    /// Only needed for an endpoint issued with `--require-auth`: an
+    /// unauthenticated endpoint socket can be used directly as
+    /// `IdentityAgent`. Every request still reaches the broker and the broker
+    /// still asks — this adds the credential, never a decision.
+    ///
+    /// With a trailing `-- <command…>`, runs that command with SSH_AUTH_SOCK
+    /// already pointing at the socket and exits with its status; without one,
+    /// prints the socket path and stays in the foreground until interrupted.
+    #[command(name = "ssh-agent")]
+    SshAgent {
+        /// The ssh connection whose endpoint to speak for.
+        connection: String,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this machine's.
+        #[arg(long)]
+        broker: Option<String>,
+        /// Bind here instead of a private temporary path, so a
+        /// `~/.ssh/config` `IdentityAgent` line can name it. The path outlives
+        /// no run: the socket is removed when this command exits.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Run this with SSH_AUTH_SOCK set, then exit with its status.
+        #[arg(last = true)]
+        command: Vec<String>,
     },
     /// Manage secrets from the terminal (dev/headless use; the desktop app
     /// is the primary interface).
@@ -660,6 +692,16 @@ enum ConnCommand {
         /// can be performed as an offline edit while the broker is stopped.
         #[arg(long, conflicts_with_all = ["issue", "url", "secret"])]
         revoke: bool,
+        /// ssh: make the agent socket refuse to list or sign until the caller
+        /// presents the endpoint secret, so finding the socket is no longer
+        /// enough to use it. Stock `ssh` cannot send the extension that does
+        /// this — reach an authenticated endpoint through `mfa ssh-agent`.
+        #[arg(long, conflicts_with_all = ["revoke", "no_require_auth"])]
+        require_auth: bool,
+        /// ssh: stop requiring authentication on the agent socket, returning
+        /// it to "whoever can open it can sign". Takes a fresh confirmation.
+        #[arg(long, conflicts_with = "revoke")]
+        no_require_auth: bool,
         /// Print only the pasteable address (the base URL / DSN / agent
         /// socket), for `$(mfa conn endpoint <name> --url)`.
         #[arg(long, conflicts_with = "secret")]
@@ -768,6 +810,16 @@ fn endpoint_action(issue: bool, revoke: bool) -> Result<EndpointAction, &'static
     }
 }
 
+/// The requested socket-authentication posture, or `None` to leave it alone.
+/// Clap already refuses both flags together, so this only names the mapping.
+fn endpoint_require_auth(require_auth: bool, no_require_auth: bool) -> Option<bool> {
+    match (require_auth, no_require_auth) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
 fn endpoint_action_supported(action: EndpointAction, online: bool) -> Result<(), &'static str> {
     if action == EndpointAction::Issue && !online {
         Err(
@@ -837,7 +889,7 @@ fn main() {
     match std::panic::catch_unwind(run_cli) {
         Ok(()) => {}
         Err(payload) => match payload.downcast::<CliExit>() {
-            Ok(exit) => std::process::exit(exit.code as i32),
+            Ok(exit) => std::process::exit(exit.code),
             Err(payload) => std::panic::resume_unwind(payload),
         },
     }
@@ -910,6 +962,13 @@ fn run_cli() {
             root,
             client,
         } => cmd_ssh(connection, root, client, json),
+        Command::SshAgent {
+            connection,
+            root,
+            broker,
+            socket,
+            command,
+        } => cmd_ssh_agent(connection, root, broker, socket, command),
         Command::Secret { command } => match command {
             SecretCommand::Add {
                 name,
@@ -969,11 +1028,23 @@ fn run_cli() {
                 name,
                 issue,
                 revoke,
+                require_auth,
+                no_require_auth,
                 url,
                 secret,
                 root,
                 broker,
-            } => cmd_conn_endpoint(name, issue, revoke, url, secret, root, broker, json),
+            } => cmd_conn_endpoint(
+                name,
+                issue,
+                revoke,
+                endpoint_require_auth(require_auth, no_require_auth),
+                url,
+                secret,
+                root,
+                broker,
+                json,
+            ),
         },
         Command::Sessions {
             close,
@@ -1042,13 +1113,21 @@ enum ExitCode {
 
 #[derive(Debug)]
 struct CliExit {
-    code: ExitCode,
+    code: i32,
 }
 
 /// Unwind the active command before the process exits. In particular, this
 /// gives every `Zeroizing<String>` holding a secret, management token, or
 /// short-lived credential a chance to scrub its allocation.
 fn exit_with(code: ExitCode) -> ! {
+    exit_with_raw(code as i32)
+}
+
+/// Exit carrying a status this process did not choose: the exit code of a
+/// child command run on the user's behalf. Flattening those to a generic
+/// failure would hide the distinctions a caller acts on — `ssh`'s 255 for
+/// "could not connect" reads very differently from the remote command's 1.
+fn exit_with_raw(code: i32) -> ! {
     std::panic::resume_unwind(Box::new(CliExit { code }))
 }
 
@@ -1783,12 +1862,20 @@ fn cmd_conn_show(name: String, root: Option<PathBuf>, url: Option<String>, json:
     );
     match &dto.agent_access.endpoint {
         Some(endpoint) => println!(
-            "direct endpoint: {} ({})",
+            "direct endpoint: {} ({}){}",
             endpoint
                 .dsn
                 .as_deref()
                 .unwrap_or("issued; use `mfa conn endpoint` to copy"),
-            endpoint.kind
+            endpoint.kind,
+            // Whether the socket is a standing signing oracle for anything
+            // that can open it is the most consequential fact about an SSH
+            // endpoint, so it belongs on the line that reports one.
+            if endpoint.require_auth {
+                ", authenticated"
+            } else {
+                ""
+            }
         ),
         None => println!("direct endpoint: none"),
     }
@@ -2196,6 +2283,7 @@ fn cmd_conn_endpoint(
     name: String,
     issue: bool,
     revoke: bool,
+    require_auth: Option<bool>,
     url: bool,
     secret: bool,
     root: Option<PathBuf>,
@@ -2249,7 +2337,7 @@ fn cmd_conn_endpoint(
         return;
     }
 
-    let info = match action {
+    let mut info = match action {
         EndpointAction::Issue => managed.run_gated(managed.backend.issue_endpoint(connection_id)),
         EndpointAction::Read => match managed.run(managed.backend.get_endpoint(connection_id)) {
             Some(info) => info,
@@ -2263,6 +2351,34 @@ fn cmd_conn_endpoint(
         },
         EndpointAction::Revoke => unreachable!("revocation returns above"),
     };
+    // Applied after issuance so `--issue --require-auth` is one command, and
+    // re-read afterwards so the example and secret printed below describe the
+    // posture the endpoint actually ends up in rather than the one it had.
+    if let Some(require_auth) = require_auth {
+        // Only turning it *off* is gated in the broker; announcing a wait for
+        // a confirmation that is not coming would be its own small lie.
+        let call = managed
+            .backend
+            .set_endpoint_require_auth(connection_id, require_auth);
+        let changed = if require_auth {
+            managed.run(call)
+        } else {
+            managed.run_gated(call)
+        };
+        if changed {
+            eprintln!(
+                "the agent socket for {name} {}",
+                if require_auth {
+                    "now requires the endpoint secret — reach it through `mfa ssh-agent`"
+                } else {
+                    "no longer requires the endpoint secret"
+                }
+            );
+            if let Some(reread) = managed.run(managed.backend.get_endpoint(connection_id)) {
+                info = reread;
+            }
+        }
+    }
     if json {
         print_json(&info);
         return;
@@ -2786,6 +2902,130 @@ fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>, js
         eprintln!("  {line}");
     }
     println!("{auth_sock}");
+}
+
+/// Serve a local ssh-agent socket that presents a direct endpoint's secret.
+///
+/// Reads the endpoint through the *gated copy* path when it requires
+/// authentication: starting a forwarder hands a standing signing credential to
+/// a process, which is the same act as putting it on the clipboard and
+/// deserves the same confirmation and the same audit entry. An endpoint that
+/// requires nothing takes the ungated read, because prompting for a secret
+/// that will not be sent would train the user to click through.
+fn cmd_ssh_agent(
+    connection: String,
+    root: Option<PathBuf>,
+    broker: Option<String>,
+    socket_path: Option<PathBuf>,
+    command: Vec<String>,
+) {
+    require_existing_root_for_read(root.as_deref(), broker.is_some());
+    let managed = management_backend(root, broker);
+    let dto = conn_dto(&managed, &connection);
+    if dto.kind != "ssh" {
+        die_with(
+            ExitCode::Usage,
+            format!(
+                "{connection} is a {} connection; only ssh connections have an agent socket",
+                dto.kind
+            ),
+        );
+    }
+    if managed.remote.is_none() {
+        die_with(
+            ExitCode::NoBroker,
+            "the endpoint socket is served by a running broker; start AgentMFA or \
+             `mfa serve`, then retry",
+        );
+    }
+    let connection_id = dto_id(&dto.id);
+    let Some(info) = managed.run(managed.backend.get_endpoint(connection_id)) else {
+        die_with(
+            ExitCode::NotFound,
+            format!(
+                "no direct endpoint is issued for {connection} — issue one with \
+                 `mfa conn endpoint {connection} --issue --require-auth`"
+            ),
+        );
+    };
+    // A secret on an SSH endpoint *is* the require-auth flag: the broker
+    // surfaces it only for a socket that will demand it.
+    let secret = if info.secret.is_empty() {
+        eprintln!(
+            "  note: this endpoint does not require authentication; its socket can be used \
+             directly as IdentityAgent"
+        );
+        None
+    } else {
+        let copied = managed.run_gated(managed.backend.copy_endpoint(connection_id));
+        match copied {
+            Some(copied) if !copied.secret.is_empty() => {
+                Some(std::sync::Arc::new(Zeroizing::new(copied.secret)))
+            }
+            // Revoked between the two reads; the socket below would be gone
+            // too, so say what happened rather than serving a dead path.
+            _ => die_with(
+                ExitCode::NotFound,
+                format!("the direct endpoint for {connection} was revoked while starting"),
+            ),
+        }
+    };
+    let upstream = PathBuf::from(&info.dsn);
+
+    managed.runtime.block_on(async move {
+        let socket = match socket_path {
+            Some(path) => ssh_agent::AgentSocket::bind_at(path),
+            None => ssh_agent::AgentSocket::bind(),
+        }
+        .unwrap_or_else(|error| die(format!("could not bind a local agent socket: {error}")));
+        let path = socket.path().display().to_string();
+        if command.is_empty() {
+            // Same shape as `mfa ssh`: guidance on stderr, the one pasteable
+            // value on stdout, so `$(…)` captures only the path. Unlike
+            // `mfa ssh` the path dies with this process, so the export is
+            // only useful to another terminal while this one is running.
+            eprintln!("  serving {connection}'s endpoint until you press Ctrl-C");
+            eprintln!("  in another terminal:  export SSH_AUTH_SOCK=\"{path}\"");
+            // Not `$(mfa ssh-agent …)`: this command does not exit, so a
+            // command substitution around it waits forever. The socket dies
+            // with this process, which is also why the path is only useful
+            // while it is on screen.
+            eprintln!("  or run the client here:  mfa ssh-agent {connection} -- ssh ...");
+            println!("{path}");
+            socket
+                .serve(upstream, secret, async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await;
+            return;
+        }
+        let mut child = tokio::process::Command::new(&command[0]);
+        child.args(&command[1..]).env("SSH_AUTH_SOCK", &path);
+        let mut child = match child.spawn() {
+            Ok(child) => child,
+            Err(error) => die(format!("could not run {}: {error}", command[0])),
+        };
+        let mut status = None;
+        socket
+            .serve(upstream, secret, async {
+                status = child.wait().await.ok();
+            })
+            .await;
+        // The command's status is this command's status: `mfa ssh-agent x --
+        // ssh host` must fail when the ssh does, or a script wrapping it
+        // cannot tell.
+        let Some(status) = status else { return };
+        match status.code() {
+            Some(0) => {}
+            Some(code) => exit_with_raw(code),
+            // Killed by a signal: report it the way a shell does, so a
+            // Ctrl-C'd `ssh` is not indistinguishable from one that succeeded.
+            None => {
+                use std::os::unix::process::ExitStatusExt as _;
+                exit_with_raw(128 + status.signal().unwrap_or(0))
+            }
+        }
+    });
 }
 
 /// Print the shared agent key, rotating it first when asked. The plain
@@ -3587,7 +3827,7 @@ mod tests {
         let exit = failure
             .downcast::<CliExit>()
             .expect("CLI exit carries its typed status");
-        assert_eq!(exit.code, ExitCode::Authentication);
+        assert_eq!(exit.code, ExitCode::Authentication as i32);
         assert!(
             dropped.load(std::sync::atomic::Ordering::SeqCst),
             "sensitive command state must be dropped before process exit"
@@ -3898,6 +4138,59 @@ mod tests {
         assert!(endpoint_action_supported(EndpointAction::Issue, true).is_ok());
         assert!(endpoint_action_supported(EndpointAction::Read, false).is_ok());
         assert!(endpoint_action_supported(EndpointAction::Revoke, false).is_ok());
+    }
+
+    /// SSH-1 / SEC-28. The two flags are opposites rather than a tri-state,
+    /// so an unmentioned posture must stay untouched — `--issue` alone must
+    /// not silently take authentication off a socket that had it.
+    #[test]
+    fn endpoint_authentication_flags_only_speak_when_asked() {
+        assert_eq!(endpoint_require_auth(false, false), None);
+        assert_eq!(endpoint_require_auth(true, false), Some(true));
+        assert_eq!(endpoint_require_auth(false, true), Some(false));
+
+        assert!(Cli::try_parse_from([
+            "mfa", "conn", "endpoint", "production", "--require-auth", "--no-require-auth",
+        ])
+        .is_err());
+        // Revocation removes the endpoint, so a posture for it is nonsense.
+        assert!(Cli::try_parse_from([
+            "mfa", "conn", "endpoint", "production", "--revoke", "--require-auth",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "mfa", "conn", "endpoint", "production", "--issue", "--require-auth",
+        ])
+        .is_ok());
+    }
+
+    /// The forwarder takes its command after `--`, so the flags of the thing
+    /// being run (`ssh -o …`) cannot be mistaken for the forwarder's own.
+    #[test]
+    fn the_ssh_agent_forwarder_passes_its_command_through_untouched() {
+        let cli = Cli::try_parse_from([
+            "mfa", "ssh-agent", "production", "--socket", "/tmp/a.sock",
+            "--", "ssh", "-o", "IdentitiesOnly=no", "prod",
+        ])
+        .expect("a command after -- parses");
+        let Command::SshAgent {
+            connection,
+            socket,
+            command,
+            ..
+        } = cli.command
+        else {
+            panic!("expected the ssh-agent command");
+        };
+        assert_eq!(connection, "production");
+        assert_eq!(socket.as_deref(), Some(Path::new("/tmp/a.sock")));
+        assert_eq!(command, ["ssh", "-o", "IdentitiesOnly=no", "prod"]);
+
+        let cli = Cli::try_parse_from(["mfa", "ssh-agent", "production"]).unwrap();
+        let Command::SshAgent { command, .. } = cli.command else {
+            panic!("expected the ssh-agent command");
+        };
+        assert!(command.is_empty(), "no command means serve in the foreground");
     }
 
     #[test]
