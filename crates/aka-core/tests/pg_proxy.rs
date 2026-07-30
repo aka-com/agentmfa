@@ -1525,6 +1525,9 @@ async fn the_tcp_endpoint_port_is_pinned_across_a_rebind() {
     h.pair().await;
     let before = h.issue_endpoint().await.tcp_dsn.unwrap();
 
+    // A rebind is a no-op while the listener is still registered. Model a
+    // restart so this actually exercises pinned-port reuse.
+    h.broker.stop_endpoint_listeners_for_restart().await;
     h.broker.rebind_endpoints().await;
 
     let conn = h.broker.store.connection_by_name("prod-db").unwrap();
@@ -1547,4 +1550,31 @@ async fn the_tcp_endpoint_port_is_pinned_across_a_rebind() {
     );
     drop(client);
     let _ = tokio::time::timeout(Duration::from_secs(3), conn_task).await;
+}
+
+#[tokio::test]
+async fn a_stalled_endpoint_handshake_is_dropped_at_the_deadline() {
+    let mut config = BrokerConfig::default();
+    config.pg_handshake_timeout = Duration::from_millis(300);
+    let mut h = harness(config).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let info = h.issue_endpoint().await;
+    let dsn = info.tcp_dsn.expect("a pg endpoint serves a TCP DSN");
+    let addr = dsn
+        .rsplit('@')
+        .next()
+        .and_then(|rest| rest.split('/').next())
+        .expect("host:port in the endpoint DSN")
+        .to_string();
+
+    let mut stream = TcpStream::connect(&addr).await.unwrap();
+    let mut buf = [0u8; 1];
+    match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+        Ok(Ok(0)) => {}
+        Ok(Err(_)) => {}
+        Ok(Ok(_)) => panic!("the broker answered a client that sent no startup packet"),
+        Err(_) => panic!("a stalled endpoint handshake was not dropped within 5s"),
+    }
 }

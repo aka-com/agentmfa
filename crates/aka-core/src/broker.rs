@@ -2082,6 +2082,27 @@ impl Broker {
         }
     }
 
+    /// Stop and forget every endpoint listener, awaiting each accept loop so its
+    /// socket and TCP port are fully released, while leaving the persisted
+    /// registry and endpoint directories intact. This models the in-memory
+    /// state a process restart begins from for restart-simulation tests.
+    pub async fn stop_endpoint_listeners_for_restart(&self) {
+        let handles: Vec<_> = self
+            .endpoint_listeners
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+        for handle in handles {
+            handle.shutdown.notify_waiters();
+            handle.task.abort();
+            // Await the aborted task so its listener is dropped before a
+            // restart simulation attempts to reclaim the pinned address.
+            let _ = handle.task.await;
+        }
+    }
+
     /// Bind (or rebind) the listener for one endpoint and record its handle,
     /// stopping any prior listener for the same endpoint id.
     async fn bind_endpoint_listener(

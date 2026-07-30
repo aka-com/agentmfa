@@ -562,23 +562,15 @@ pub async fn bind_endpoint(
     std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
 
     // Reuse the pinned port when there is one, so a pasted TCP DSN survives a
-    // restart the way the HTTP endpoint's base URL does. A port another process
-    // has taken since falls back to a fresh one rather than failing the rebind
-    // and revoking a working endpoint.
+    // restart the way the HTTP endpoint's base URL does. A pinned port another
+    // process has taken since must fail the rebind — not fall back to a fresh
+    // one: `rebind_endpoints` revokes on bind failure precisely because a
+    // client whose DSN still names the old port would present the still-valid
+    // endpoint secret (in cleartext — the DSN pins sslmode=disable) to
+    // whatever process now owns it. Silently moving ports kept that secret
+    // live while the pasted address fed it to a stranger.
     let bind_addr = broker.data_plane_bind();
-    let tcp = match endpoint.port {
-        Some(pinned) => match tokio::net::TcpListener::bind((bind_addr, pinned)).await {
-            Ok(listener) => listener,
-            Err(e) => {
-                tracing::warn!(
-                    port = pinned,
-                    "pinned pg endpoint port unavailable ({e}); taking a fresh one"
-                );
-                tokio::net::TcpListener::bind((bind_addr, 0)).await?
-            }
-        },
-        None => tokio::net::TcpListener::bind((bind_addr, 0)).await?,
-    };
+    let tcp = tokio::net::TcpListener::bind((bind_addr, endpoint.port.unwrap_or(0))).await?;
     let port = tcp.local_addr()?.port();
 
     let state = Arc::new(ProxyState::new(broker));
@@ -639,14 +631,32 @@ where
 {
     let mut client = BufReader::new(stream);
 
-    let params = match read_startup_phase(&mut client, &state).await? {
+    // The same pre-auth posture as the ticket proxy: everything up to a
+    // verified endpoint secret is unauthenticated, so it runs under one
+    // admission permit and one deadline. This handler used to be reachable
+    // only over the owner-only Unix socket; the TCP listener makes it
+    // reachable by any local process — and, off-loopback, by any peer — so a
+    // client that connects and says nothing must not hold a task and an fd
+    // for as long as it likes.
+    let admission = state
+        .handshakes
+        .try_acquire()
+        .map_err(|_| io::Error::other("pg endpoint handshake admission exhausted"))?;
+    let deadline = tokio::time::Instant::now() + state.broker.config.pg_handshake_timeout;
+
+    let params = match tokio::time::timeout_at(deadline, read_startup_phase(&mut client, &state))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "pg startup phase timed out"))??
+    {
         StartupPhase::Startup(params) => params,
         StartupPhase::Cancelled => return Ok(()),
     };
 
     // The presented password IS the per-wiring endpoint secret.
     client.write_all(&frame(b'R', &3i32.to_be_bytes())).await?;
-    let (tag, payload) = read_message(&mut client).await?;
+    let (tag, payload) = tokio::time::timeout_at(deadline, read_message(&mut client))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "pg password message timed out"))??;
     if tag != b'p' {
         client
             .write_all(&error_response(
@@ -727,6 +737,11 @@ where
     }
 
     let approved_version = connection.updated_at;
+
+    // Authenticated: the pre-auth deadline and admission permit have done
+    // their job, and what follows (a confirmation prompt, an upstream dial)
+    // has budgets of its own.
+    drop(admission);
 
     // A direct endpoint is standing authority, so the confirmation is the
     // only thing standing between a pasted DSN and the database.
