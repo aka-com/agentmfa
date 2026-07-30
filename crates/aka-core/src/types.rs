@@ -341,6 +341,9 @@ pub struct OAuthSpec {
 pub enum HealthStatus {
     /// Last check reached the destination and the credential was accepted.
     Ok,
+    /// The connection worked, but under a degraded or advisory condition
+    /// that deserves attention (for example, a TLS fallback to plaintext).
+    Warning,
     /// Last check failed to reach the destination or errored.
     Failed,
     /// The destination answered but rejected the credential (HTTP 401/403,
@@ -353,6 +356,7 @@ impl HealthStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             HealthStatus::Ok => "ok",
+            HealthStatus::Warning => "warning",
             HealthStatus::Failed => "failed",
             HealthStatus::NeedsReconnect => "needs_reconnect",
         }

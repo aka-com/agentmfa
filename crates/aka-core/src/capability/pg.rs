@@ -433,12 +433,11 @@ fn audit_tls_downgrade(broker: &Broker, connection: &Connection) {
         .field("kind", "pg")
         .field("sslmode", "prefer"),
     );
-    // The connection *works*, so the status stays `Ok` and the detail carries
-    // the caveat: a downgrade is not a failure to fix by reconnecting, and
-    // there is no third status between "fine" and "broken" to put it in.
-    broker.health.record(
+    // The connection works, but not under the transport posture the user
+    // asked for. Keep that distinct from both green and a failed dial.
+    broker.health.record_if_changed(
         &connection.id,
-        crate::types::HealthStatus::Ok,
+        crate::types::HealthStatus::Warning,
         "Reached the database, but the server refused TLS — traffic is in clear text",
     );
 }
@@ -2462,10 +2461,15 @@ async fn verify_select_one(upstream: &mut UpstreamSession) -> Result<(), TestErr
 
 /// UI-initiated connectivity/credential test: dial and authenticate exactly
 /// as a brokered session would, then prove the database can execute a query.
+pub struct TestSuccess {
+    pub detail: String,
+    pub tls_downgraded: bool,
+}
+
 pub async fn test_upstream(
     store: &Arc<Store>,
     connection: &Connection,
-) -> Result<String, TestError> {
+) -> Result<TestSuccess, TestError> {
     let ConnectionConfig::Pg { dbname, user, .. } = &connection.config else {
         return Err("not a postgres connection".into());
     };
@@ -2473,11 +2477,18 @@ pub async fn test_upstream(
     verify_select_one(&mut upstream).await?;
     let _ = upstream.stream.write_all(&frame(b'X', &[])).await;
     let _ = upstream.stream.shutdown().await;
-    Ok(match upstream.server_version {
+    let mut detail = match upstream.server_version {
         Some(version) => {
             format!("Signed in to {dbname} as {user}; SELECT 1 succeeded (PostgreSQL {version})")
         }
         None => format!("Signed in to {dbname} as {user}; SELECT 1 succeeded"),
+    };
+    if upstream.tls_downgraded {
+        detail.push_str("; the server refused TLS, so traffic used plaintext");
+    }
+    Ok(TestSuccess {
+        detail,
+        tls_downgraded: upstream.tls_downgraded,
     })
 }
 

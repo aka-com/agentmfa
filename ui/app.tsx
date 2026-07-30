@@ -1171,6 +1171,11 @@ function connectionIssues(
         : undefined,
     });
   }
+  if (c.last_status === 'warning') {
+    issues.push({
+      text: c.last_detail || 'The last connection check completed with a warning.',
+    });
+  }
   // A test or check finished this session supersedes the broker's
   // recorded verdict: a fresh failure surfaces even when its message
   // matches the stored one, and a fresh success retires a stale recorded

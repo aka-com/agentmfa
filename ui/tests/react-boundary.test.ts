@@ -251,6 +251,15 @@ test('forms preserve credential-less edits without guessing from masked text', a
   assert.match(saveConnection, /d\.template !== existingConnection\?\.template/);
 });
 
+test('degraded connection health renders as an amber issue', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const types = await readFile(new URL('../src/types.ts', import.meta.url), 'utf8');
+
+  assert.match(types, /'ok' \| 'warning' \| 'failed' \| 'needs_reconnect'/);
+  assert.match(app, /if \(c\.last_status === 'warning'\)/);
+  assert.match(app, /text: c\.last_detail \|\| 'The last connection check completed with a warning\.'/);
+});
+
 test('the post-add banner stays a compact success message', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const readyCard = app.match(

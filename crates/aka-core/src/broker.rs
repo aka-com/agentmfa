@@ -1313,19 +1313,29 @@ impl Broker {
         let connection = connection;
         let test = async {
             match connection.config.kind() {
-                ConnectionKind::Api => {
-                    crate::capability::http::test_upstream(
-                        &self.store,
-                        &self.http_client,
-                        TEST_TIMEOUT,
-                        &connection,
-                    )
-                    .await
-                }
+                ConnectionKind::Api => crate::capability::http::test_upstream(
+                    &self.store,
+                    &self.http_client,
+                    TEST_TIMEOUT,
+                    &connection,
+                )
+                .await
+                .map(|detail| (detail, crate::types::HealthStatus::Ok)),
                 ConnectionKind::Pg => {
-                    crate::capability::pg::test_upstream(&self.store, &connection).await
+                    crate::capability::pg::test_upstream(&self.store, &connection)
+                        .await
+                        .map(|success| {
+                            let status = if success.tls_downgraded {
+                                crate::types::HealthStatus::Warning
+                            } else {
+                                crate::types::HealthStatus::Ok
+                            };
+                            (success.detail, status)
+                        })
                 }
-                ConnectionKind::Ssh => crate::capability::ssh::test_login(self, &connection).await,
+                ConnectionKind::Ssh => crate::capability::ssh::test_login(self, &connection)
+                    .await
+                    .map(|detail| (detail, crate::types::HealthStatus::Ok)),
             }
         };
         // Testing rides the same pre-authorization as the agent plane: any
@@ -1340,26 +1350,31 @@ impl Broker {
                 format!("No answer within {} seconds", TEST_TIMEOUT.as_secs()),
             )),
         };
-        let report = match outcome {
-            Ok(detail) => ConnectionTestReport {
-                ok: true,
-                detail,
-                kind: None,
-            },
-            Err(e) => ConnectionTestReport {
-                ok: false,
-                detail: e.detail,
-                kind: Some(e.kind),
-            },
+        let (report, status) = match outcome {
+            Ok((detail, status)) => (
+                ConnectionTestReport {
+                    ok: true,
+                    detail,
+                    kind: None,
+                },
+                status,
+            ),
+            Err(e) => {
+                let status = e.kind.health_status();
+                (
+                    ConnectionTestReport {
+                        ok: false,
+                        detail: e.detail,
+                        kind: Some(e.kind),
+                    },
+                    status,
+                )
+            }
         };
         // The test result is the connection's new last-known health, graded by
         // the same mapping the data planes use. It is authoritative — the user
         // asked for it — so it supersedes any half-accumulated evidence the
         // agent plane had gathered from rejections it saw in passing.
-        let status = match report.kind {
-            None => crate::types::HealthStatus::Ok,
-            Some(kind) => kind.health_status(),
-        };
         self.health.clear_rejection_streak(id);
         self.health.record(id, status, report.detail.clone());
         let mut entry = AuditEntry::new(

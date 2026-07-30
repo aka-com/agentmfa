@@ -413,8 +413,9 @@ pub struct ConnectionDto {
     /// Set when the credential is a BYO-app OAuth token set.
     #[serde(default)]
     pub oauth_spec: Option<OAuthDto>,
-    /// Last-known health: "ok" | "failed" | "needs_reconnect", with the
-    /// check's summary and timestamp. All absent while untested.
+    /// Last-known health: "ok" | "warning" | "failed" |
+    /// "needs_reconnect", with the check's summary and timestamp. All absent
+    /// while untested.
     #[serde(default)]
     pub last_status: Option<String>,
     #[serde(default)]

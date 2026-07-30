@@ -392,7 +392,9 @@ async fn test_pg(
     h: &Harness,
     connection: &aka_core::types::Connection,
 ) -> Result<String, TestError> {
-    pg::test_upstream(&h.broker.store, connection).await
+    pg::test_upstream(&h.broker.store, connection)
+        .await
+        .map(|success| success.detail)
 }
 
 /// One read from the proxy, bounded so a wedged assertion fails as a test
@@ -621,6 +623,29 @@ async fn prefer_falls_back_to_plaintext() {
     assert!(report.is_ok(), "prefer continues in clear text: {report:?}");
 }
 
+/// A successful Test action must preserve the same degraded verdict as a
+/// brokered session instead of repainting a plaintext fallback green.
+#[tokio::test]
+async fn testing_a_tls_downgrade_records_warning_health() {
+    let (chain, key) = self_signed_leaf("db.internal");
+    let port = fake_tls_pg(chain, key, SslAnswer::Refuse).await;
+    let h = harness(BrokerConfig::default()).await;
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None);
+
+    let report = h.broker.ui_test_connection(&conn.id).await.unwrap();
+    assert!(report.ok, "{report:?}");
+    assert!(
+        report.detail.contains("traffic used plaintext"),
+        "{report:?}"
+    );
+    let health = h.broker.health.get(&conn.id).expect("health recorded");
+    assert_eq!(health.status, aka_core::types::HealthStatus::Warning);
+    assert!(
+        health.detail.contains("traffic used plaintext"),
+        "{health:?}"
+    );
+}
+
 /// PG-19, on the path that audits: a brokered session over a downgraded
 /// connection writes a `TlsDowngraded` entry naming the connection.
 #[tokio::test]
@@ -665,6 +690,7 @@ async fn a_downgraded_session_writes_an_audit_entry() {
     // Health carries the caveat too, so the state is visible in the app and
     // not only in the log.
     let health = h.broker.health.get(&conn.id).expect("health recorded");
+    assert_eq!(health.status, aka_core::types::HealthStatus::Warning);
     assert!(health.detail.contains("clear text"), "{:?}", health.detail);
 }
 

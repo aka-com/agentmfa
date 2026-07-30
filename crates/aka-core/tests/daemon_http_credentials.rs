@@ -558,6 +558,28 @@ async fn response_caps_and_upstream_deadlines_are_enforced() {
         .await;
     assert_eq!(status, 504, "{body}");
     assert_eq!(body["reason"], "upstream_timeout");
+    let health = h.health_of("github").expect("the timeout is graded");
+    assert_eq!(health.status, HealthStatus::Failed, "{health:?}");
+}
+
+/// A destination that cannot be dialed is a connection failure, not an
+/// inconclusive broker error that leaves a stale green badge behind.
+#[tokio::test]
+async fn upstream_dial_errors_are_recorded_as_failed_health() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unused_port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let h = harness(BrokerConfig::default()).await;
+    api_connection(&h, "github", unused_port);
+
+    let (status, body) = h
+        .call("github", json!({ "method": "GET", "path": "/unreachable" }))
+        .await;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["reason"], "upstream_error");
+    let health = h.health_of("github").expect("the dial error is graded");
+    assert_eq!(health.status, HealthStatus::Failed, "{health:?}");
 }
 
 /// API-30: every advertised method crosses the JSON plane, including a body

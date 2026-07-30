@@ -355,6 +355,20 @@ async fn upstream() -> Upstream {
             "/unauthorized",
             get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "nope") }),
         )
+        .route(
+            "/forbidden",
+            get(|| async { (axum::http::StatusCode::FORBIDDEN, "business refusal") }),
+        )
+        .route(
+            "/forbidden-auth",
+            get(|| async {
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                    "credential refused",
+                )
+            }),
+        )
         // Comfortably past the 10 MB buffered cap, so the two relays disagree
         // about it and the test can say which is which.
         .route(
@@ -367,6 +381,33 @@ async fn upstream() -> Upstream {
         axum::serve(listener, app).await.unwrap();
     });
     Upstream { port, hits }
+}
+
+/// Answer with a valid response head and then close before the promised body
+/// length, forcing reqwest's body stream (rather than the initial dial) to
+/// report the network failure.
+async fn truncated_upstream() -> u16 {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 8192];
+                let _ = socket.read(&mut request).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 64\r\nConnection: close\r\n\r\nshort",
+                    )
+                    .await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    port
 }
 
 fn api_connection(harness: &Harness, name: &str, port: u16) {
@@ -1736,6 +1777,58 @@ async fn a_brokered_401_flips_connection_health_to_needs_reconnect() {
 }
 
 #[tokio::test]
+async fn a_business_403_does_not_claim_the_credential_needs_reconnecting() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let conn_id = h.broker.store.connection_by_name("github").unwrap().id;
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    for _ in 0..2 {
+        let (status, _) = uds_request(
+            &h.socket,
+            "POST",
+            "/v1/http",
+            &[("authorization", &auth)],
+            Some(json!({
+                "connection": "github",
+                "method": "GET",
+                "path": "/forbidden",
+            })),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    assert_eq!(
+        h.broker.health.get(&conn_id).unwrap().status,
+        aka_core::types::HealthStatus::Ok,
+        "a challenge-free 403 proves reachability, not credential rejection"
+    );
+
+    for _ in 0..2 {
+        let (status, _) = uds_request(
+            &h.socket,
+            "POST",
+            "/v1/http",
+            &[("authorization", &auth)],
+            Some(json!({
+                "connection": "github",
+                "method": "GET",
+                "path": "/forbidden-auth",
+            })),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    assert_eq!(
+        h.broker.health.get(&conn_id).unwrap().status,
+        aka_core::types::HealthStatus::NeedsReconnect,
+        "a challenged 403 follows the credential-rejection path"
+    );
+}
+
+#[tokio::test]
 async fn a_curated_wiring_refuses_tools_outside_its_subset() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
@@ -2800,6 +2893,75 @@ async fn a_streamed_body_is_redacted_across_chunk_boundaries() {
         !relayed.contains("ghp_test_secret_value"),
         "the credential must not survive the stream: {relayed}"
     );
+}
+
+/// Once a response head has gone out, a broken upstream body cannot change
+/// the wire status, but it must still retire the optimistic green health both
+/// on the SSE agent plane and the raw direct endpoint.
+#[tokio::test]
+async fn streamed_body_network_failures_record_failed_health() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let port = truncated_upstream().await;
+    api_connection(&h, "github", port);
+    let connection = h.broker.store.connection_by_name("github").unwrap();
+    let token = h.pair("agent").await;
+
+    let (status, _, body) = uds_request_raw(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &format!("Bearer {token}"))],
+        Some(json!({
+            "connection": "github",
+            "method": "GET",
+            "path": "/broken",
+            "stream": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let health = h
+        .broker
+        .health
+        .get(&connection.id)
+        .expect("SSE health recorded");
+    assert_eq!(health.status, aka_core::types::HealthStatus::Failed);
+
+    h.broker.health.record(
+        &connection.id,
+        aka_core::types::HealthStatus::Ok,
+        "reset between relay paths",
+    );
+    let (info, endpoint_port) = issue_http_endpoint(&h).await;
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", endpoint_port))
+        .await
+        .unwrap();
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(conn);
+    let response = sender
+        .send_request(
+            hyper::Request::builder()
+                .uri("/broken")
+                .header("host", "localhost")
+                .header("authorization", format!("Bearer {}", info.secret))
+                .body(String::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(
+        response.into_body().collect().await.is_err(),
+        "the incomplete direct response must surface as a body error"
+    );
+    tokio::task::yield_now().await;
+    let health = h
+        .broker
+        .health
+        .get(&connection.id)
+        .expect("endpoint health recorded");
+    assert_eq!(health.status, aka_core::types::HealthStatus::Failed);
 }
 
 /// API-3/API-25's other half: the buffered cap exists because the envelope

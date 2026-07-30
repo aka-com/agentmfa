@@ -466,6 +466,13 @@ impl Redactions {
     }
 }
 
+/// Why a streamed response stopped producing bytes.
+pub(crate) enum StreamFinish {
+    Complete,
+    UpstreamError(String),
+    ConsumerDropped,
+}
+
 /// Forward an upstream body chunk by chunk, scrubbing reflected credentials
 /// across chunk boundaries, and report the byte total when the stream ends.
 ///
@@ -476,15 +483,16 @@ impl Redactions {
 pub(crate) fn redacting_stream(
     response: reqwest::Response,
     redactions: Redactions,
-    on_finish: impl FnOnce(u64) + Send + 'static,
+    on_finish: impl FnOnce(u64, StreamFinish) + Send + 'static,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send {
     use futures::StreamExt as _;
 
-    struct Finish<F: FnOnce(u64)> {
+    struct Finish<F: FnOnce(u64, StreamFinish)> {
         callback: Option<F>,
         bytes: u64,
+        reason: StreamFinish,
     }
-    impl<F: FnOnce(u64)> Finish<F> {
+    impl<F: FnOnce(u64, StreamFinish)> Finish<F> {
         /// Counted through a method rather than by touching the field: a
         /// closure that only names `finish.bytes` captures that field alone,
         /// leaving the guard itself to drop here — firing the callback (and
@@ -493,10 +501,13 @@ pub(crate) fn redacting_stream(
             self.bytes = self.bytes.saturating_add(bytes as u64);
         }
     }
-    impl<F: FnOnce(u64)> Drop for Finish<F> {
+    impl<F: FnOnce(u64, StreamFinish)> Drop for Finish<F> {
         fn drop(&mut self) {
             if let Some(callback) = self.callback.take() {
-                callback(self.bytes);
+                callback(
+                    self.bytes,
+                    std::mem::replace(&mut self.reason, StreamFinish::ConsumerDropped),
+                );
             }
         }
     }
@@ -506,6 +517,7 @@ pub(crate) fn redacting_stream(
     let mut finish = Finish {
         callback: Some(on_finish),
         bytes: 0,
+        reason: StreamFinish::ConsumerDropped,
     };
     futures::stream::poll_fn(move |cx| {
         loop {
@@ -526,12 +538,13 @@ pub(crate) fn redacting_stream(
                 Some(Err(error)) => {
                     // The URL is stripped for the same reason the buffered
                     // path strips it: a query-form credential lives in it.
-                    return std::task::Poll::Ready(Some(Err(std::io::Error::other(
-                        error.without_url().to_string(),
-                    ))));
+                    let detail = error.without_url().to_string();
+                    finish.reason = StreamFinish::UpstreamError(detail.clone());
+                    return std::task::Poll::Ready(Some(Err(std::io::Error::other(detail))));
                 }
                 None => {
                     if carry.is_empty() {
+                        finish.reason = StreamFinish::Complete;
                         return std::task::Poll::Ready(None);
                     }
                     // End of stream: nothing more can complete a needle, so
@@ -559,9 +572,8 @@ pub struct HttpExecution {
     pub path: String,
     pub headers: HeaderMap,
     pub body: Arc<SpooledBody>,
-    /// When present, the outcome updates the connection's last-known health:
-    /// an upstream 401/403 flips it to needs-reconnect, a served response
-    /// upgrades it to ok.
+    /// When present, upstream responses and broker-side failures update the
+    /// connection's last-known health.
     pub health: Option<Arc<crate::health::HealthRegistry>>,
 }
 
@@ -740,6 +752,33 @@ fn broker_error(status: u16, reason: ErrorReason, detail: impl Into<String>) -> 
     }
 }
 
+/// Grade a response while its authentication challenge is still visible.
+/// A business/policy 403 is proof of reachability, not proof that the
+/// connection's credential died.
+fn record_relayed_health(
+    health: &crate::health::HealthRegistry,
+    id: &Uuid,
+    status: u16,
+    auth_challenge: bool,
+) {
+    if status == 401 || (status == 403 && auth_challenge) {
+        health.record_credential_rejection(
+            id,
+            format!("The destination answered but rejected the credential (HTTP {status})"),
+        );
+    } else {
+        health.record_ok_if_changed(id, "A brokered call reached the destination");
+    }
+}
+
+fn record_upstream_failure_health(
+    health: &crate::health::HealthRegistry,
+    id: &Uuid,
+    detail: impl Into<String>,
+) {
+    health.record_if_changed(id, crate::types::HealthStatus::Failed, detail.into());
+}
+
 impl HttpExecution {
     /// Perform the approved request: render the credential, drive the
     /// redirect loop, relay `{status, headers, body}`. Runs exactly once
@@ -768,7 +807,7 @@ impl HttpExecution {
             .and_then(|s| s.as_u64())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("broker:{}", outcome.status));
-        self.record_health(&outcome);
+        self.record_broker_failure_health(&outcome);
         let mut audit = AuditEntry::new(
             AuditKind::HttpExecuted,
             format!("{} {} via {}", self.method, self.path, self.connection.name),
@@ -805,75 +844,50 @@ impl HttpExecution {
         outcome
     }
 
-    /// Health bookkeeping from one outcome: a relayed upstream 401/403 means
-    /// the destination rejected the credential; any other relayed response
-    /// proves the connection works; broker-side errors are not conclusive.
-    ///
-    /// A rejection seen in passing needs a second one before it moves the
-    /// badge. The agent picks the path here, and a credential that is simply
-    /// unscoped for one route answers 401/403 there while working everywhere
-    /// else — telling the user to reconnect over that is a false alarm they
-    /// cannot act on. The Test button stays immediate: they asked.
-    fn record_health(&self, outcome: &ExecOutcome) {
+    /// Grade broker-side failures that never produced a usable upstream
+    /// status. Relayed statuses are graded before response headers are
+    /// contained, so a 403 can still be qualified by `WWW-Authenticate`.
+    fn record_broker_failure_health(&self, outcome: &ExecOutcome) {
         let Some(health) = &self.health else { return };
         let id = self.connection.id;
-        match outcome.body.get("status").and_then(|s| s.as_u64()) {
-            Some(status @ (401 | 403)) => {
-                health.record_credential_rejection(
-                    &id,
-                    format!("The destination answered but rejected the credential (HTTP {status})"),
-                );
-            }
-            Some(_) => health.record_ok_if_changed(&id, "A brokered call reached the destination"),
-            None => {
-                // A credential that cannot be rendered is conclusive about the
-                // connection whatever kind it is: a malformed template, a
-                // missing secret, or a failed vault read fails every call, not
-                // just this one. Gating this on `oauth` left a plain API
-                // connection returning 502 forever while the app showed `Ok`.
-                let reason = outcome.body.get("reason").and_then(|r| r.as_str());
-                // A refresh the *network* prevented is not conclusive: the
-                // credential is probably still good, so this reports a failure
-                // to reach the destination rather than telling the user to
-                // re-consent a working connection.
-                if reason == Some("credential_refresh_unavailable") {
-                    let detail = outcome
-                        .body
-                        .get("detail")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("The OAuth token could not be renewed just now");
-                    health.record_if_changed(
-                        &id,
-                        crate::types::HealthStatus::Failed,
-                        detail.to_string(),
-                    );
-                    return;
-                }
-                let render_failed = reason.is_some_and(|r| {
-                    r == "credential_render_failed" || r == "bad_connection_config"
-                });
-                if render_failed {
-                    let oauth = matches!(
-                        &self.connection.config,
-                        ConnectionConfig::Api { oauth: Some(_), .. }
-                    );
-                    let fallback = if oauth {
-                        "The OAuth token could not be refreshed"
-                    } else {
-                        "The saved credential could not be prepared for this call"
-                    };
-                    let detail = outcome
-                        .body
-                        .get("detail")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or(fallback);
-                    health.record(
-                        &id,
-                        crate::types::HealthStatus::NeedsReconnect,
-                        detail.to_string(),
-                    );
-                }
-            }
+        let reason = outcome.body.get("reason").and_then(|r| r.as_str());
+        let detail = || outcome.body.get("detail").and_then(|d| d.as_str());
+        if reason == Some("credential_refresh_unavailable") {
+            health.record_if_changed(
+                &id,
+                crate::types::HealthStatus::Failed,
+                detail()
+                    .unwrap_or("The OAuth token could not be renewed just now")
+                    .to_string(),
+            );
+            return;
+        }
+        if matches!(reason, Some("upstream_error" | "upstream_timeout")) {
+            record_upstream_failure_health(
+                health,
+                &id,
+                detail().unwrap_or("The destination could not be reached"),
+            );
+            return;
+        }
+        if matches!(
+            reason,
+            Some("credential_render_failed" | "bad_connection_config")
+        ) {
+            let oauth = matches!(
+                &self.connection.config,
+                ConnectionConfig::Api { oauth: Some(_), .. }
+            );
+            let fallback = if oauth {
+                "The OAuth token could not be refreshed"
+            } else {
+                "The saved credential could not be prepared for this call"
+            };
+            health.record_if_changed(
+                &id,
+                crate::types::HealthStatus::NeedsReconnect,
+                detail().unwrap_or(fallback).to_string(),
+            );
         }
     }
 
@@ -882,6 +896,17 @@ impl HttpExecution {
             Ok(dialed) => dialed,
             Err(outcome) => return outcome,
         };
+        if let Some(health) = &self.health {
+            record_relayed_health(
+                health,
+                &self.connection.id,
+                dialed.response.status().as_u16(),
+                dialed
+                    .response
+                    .headers()
+                    .contains_key(http::header::WWW_AUTHENTICATE),
+            );
+        }
         relay_response(
             dialed.response,
             &self.config,
@@ -909,12 +934,15 @@ impl HttpExecution {
         let (response, redactions) = match self.dial_for_streaming().await {
             Ok(dialed) => dialed,
             Err(outcome) => {
-                self.record_health(&outcome);
+                self.record_broker_failure_health(&outcome);
                 self.audit_streamed(started, &outcome_status_label(&outcome), None);
                 return outcome;
             }
         };
         let status = response.status().as_u16();
+        let auth_challenge = response
+            .headers()
+            .contains_key(http::header::WWW_AUTHENTICATE);
         let expose_response_credentials =
             self.access.expose_response_credentials(&self.connection.id);
         let mut headers = serde_json::Map::new();
@@ -931,22 +959,7 @@ impl HttpExecution {
             }
         }
         if let Some(health) = &self.health {
-            match status {
-                401 | 403 => {
-                    health.record_credential_rejection(
-                        &self.connection.id,
-                        format!(
-                            "The destination answered but rejected the credential (HTTP {status})"
-                        ),
-                    );
-                }
-                _ => {
-                    health.record_ok_if_changed(
-                        &self.connection.id,
-                        "A brokered call reached the destination",
-                    );
-                }
-            }
+            record_relayed_health(health, &self.connection.id, status, auth_challenge);
         }
         // Committing the head is what makes every later failure a truncation
         // rather than a refusal, so it is set before the first chunk can race
@@ -958,7 +971,7 @@ impl HttpExecution {
         })
         .await;
 
-        let mut body = std::pin::pin!(redacting_stream(response, redactions, |_| {}));
+        let mut body = std::pin::pin!(redacting_stream(response, redactions, |_, _| {}));
         let mut bytes = 0u64;
         let mut failure = None;
         // Kept only so the steps that run *after* the relay can still read the
@@ -984,12 +997,12 @@ impl HttpExecution {
                             // The caller hung up. Dropping the body stream
                             // here is what stops the broker paying for a
                             // transfer nobody is receiving.
-                            failure = Some("the caller closed the stream".to_string());
+                            failure = Some(("the caller closed the stream".to_string(), false));
                             break;
                         }
                     }
                     Err(error) => {
-                        failure = Some(error.to_string());
+                        failure = Some((error.to_string(), true));
                         break;
                     }
                 }
@@ -999,7 +1012,12 @@ impl HttpExecution {
             // A body that died mid-transfer cannot be un-sent, so it ends the
             // stream where it stopped. The activity log is where the caller
             // finds out it was short — the wire has no way left to say so.
-            Some(detail) => {
+            Some((detail, upstream_failed)) => {
+                if upstream_failed {
+                    if let Some(health) = &self.health {
+                        record_upstream_failure_health(health, &self.connection.id, detail.clone());
+                    }
+                }
                 self.audit_streamed(started, "stream_interrupted", Some(bytes));
                 broker_error(502, ErrorReason::UpstreamError, detail)
             }
@@ -2745,7 +2763,14 @@ async fn proxy_handler(
     };
     match dialed {
         Ok((response, redactions)) => {
-            record_streamed_health(broker, &connection, response.status().as_u16());
+            record_streamed_health(
+                broker,
+                &connection,
+                response.status().as_u16(),
+                response
+                    .headers()
+                    .contains_key(http::header::WWW_AUTHENTICATE),
+            );
             stream_response(
                 response,
                 redactions,
@@ -2753,11 +2778,14 @@ async fn proxy_handler(
                     .access
                     .expose_response_credentials(&endpoint.connection_id),
                 &method,
+                broker.health.clone(),
+                connection.id,
                 relay,
                 session,
             )
         }
         Err(outcome) => {
+            execution.record_broker_failure_health(&outcome);
             relay.finish(&outcome_status_label(&outcome), None);
             session.finish("request_failed");
             translate_outcome(
@@ -2775,18 +2803,13 @@ async fn proxy_handler(
 /// stream knows before its body has gone anywhere. Same rule as the buffered
 /// path: a rejection needs corroboration, anything else served is proof the
 /// credential works.
-fn record_streamed_health(broker: &Arc<Broker>, connection: &Connection, status: u16) {
-    match status {
-        401 | 403 => {
-            broker.health.record_credential_rejection(
-                &connection.id,
-                format!("The destination answered but rejected the credential (HTTP {status})"),
-            );
-        }
-        _ => broker
-            .health
-            .record_ok_if_changed(&connection.id, "A brokered call reached the destination"),
-    }
+fn record_streamed_health(
+    broker: &Arc<Broker>,
+    connection: &Connection,
+    status: u16,
+    auth_challenge: bool,
+) {
+    record_relayed_health(&broker.health, &connection.id, status, auth_challenge);
 }
 
 /// Forward an upstream response to the endpoint's client as it arrives.
@@ -2801,12 +2824,15 @@ fn stream_response(
     redactions: Redactions,
     expose_response_credentials: bool,
     request_method: &Method,
+    health: Arc<crate::health::HealthRegistry>,
+    connection_id: Uuid,
     relay: StreamAudit,
     session: crate::sessions::SessionHandle,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
 
-    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     // A HEAD or 304 carries the upstream's length without a body; everything
     // else is re-framed for this leg, since redaction changes the length.
     let preserve_content_length =
@@ -2830,9 +2856,20 @@ fn stream_response(
         }
     }
     let status_label = status.as_u16().to_string();
-    let body = redacting_stream(response, redactions, move |bytes| {
-        relay.finish(&status_label, Some(bytes));
-        session.finish("request_complete");
+    let body = redacting_stream(response, redactions, move |bytes, finish| match finish {
+        StreamFinish::Complete => {
+            relay.finish(&status_label, Some(bytes));
+            session.finish("request_complete");
+        }
+        StreamFinish::UpstreamError(detail) => {
+            record_upstream_failure_health(&health, &connection_id, detail);
+            relay.finish("stream_interrupted", Some(bytes));
+            session.finish("request_failed");
+        }
+        StreamFinish::ConsumerDropped => {
+            relay.finish("caller_disconnected", Some(bytes));
+            session.finish("client_closed");
+        }
     });
     builder
         .body(axum::body::Body::from_stream(body))

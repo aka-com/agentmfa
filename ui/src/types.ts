@@ -125,10 +125,10 @@ export interface ConnectionSummary {
   oauth_spec?: { auth_url: string; token_url: string; client_id: string; scopes: string[] } | null;
   /**
    * Last-known health, learned passively (brokered calls) and from tests
-   * and status checks: 'ok' | 'failed' | 'needs_reconnect'. All absent
-   * while untested.
+   * and status checks: 'ok' | 'warning' | 'failed' |
+   * 'needs_reconnect'. All absent while untested.
    */
-  last_status?: 'ok' | 'failed' | 'needs_reconnect' | null;
+  last_status?: 'ok' | 'warning' | 'failed' | 'needs_reconnect' | null;
   last_detail?: string | null;
   last_checked_at?: string | null;
 }
