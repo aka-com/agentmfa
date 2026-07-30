@@ -161,7 +161,16 @@ impl StateIntegrity {
                     None => {
                         // Version the already-authenticated legacy envelope
                         // immediately, without changing its payload format.
-                        self.write(path, payload)?;
+                        // Best-effort: the payload is already verified, so a
+                        // read-only or otherwise unwritable store must still
+                        // open — a failed re-seal only defers the version bump
+                        // rather than bricking the read.
+                        if let Err(error) = self.write(path, payload) {
+                            tracing::warn!(
+                                "could not re-version legacy state file {}: {error}",
+                                path.display()
+                            );
+                        }
                     }
                 }
                 Ok(Some(payload.to_vec()))
