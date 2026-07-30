@@ -21,6 +21,11 @@ import type {
   Settings,
   TestErrorKind,
 } from './types';
+import {
+  getBrokerQueryData,
+  removeBrokerQueryData,
+  setBrokerQueryData,
+} from './query-client';
 import { UiStore } from './ui-store';
 
 export const TABS = ['start', 'inbox', 'connections', 'secrets', 'activity'] as const;
@@ -323,3 +328,70 @@ function createInitialState(): AppState {
 
 export const uiStore = new UiStore(createInitialState());
 export const state = uiStore.state;
+
+const EMPTY_SECRETS: SecretSummary[] = [];
+const EMPTY_CONNECTIONS: ConnectionSummary[] = [];
+const EMPTY_SESSIONS: SessionSummary[] = [];
+const EMPTY_ELICITATIONS: ElicitationRequest[] = [];
+const EMPTY_APPROVALS: Approval[] = [];
+const EMPTY_REQUESTS: RequestRecord[] = [];
+
+function bindQueryBackedField<K extends keyof AppState>(
+  field: K,
+  read: () => AppState[K],
+  write: (value: AppState[K]) => void,
+): void {
+  Object.defineProperty(state, field, {
+    configurable: false,
+    enumerable: true,
+    get: read,
+    set: write,
+  });
+}
+
+// Broker-owned resources live canonically in TanStack Query. Keeping these
+// accessors on the existing state facade lets the action layer migrate
+// incrementally without maintaining a second copy of each server response.
+bindQueryBackedField(
+  'secrets',
+  () => getBrokerQueryData(state.broker, 'list_secrets') ?? EMPTY_SECRETS,
+  (value) => setBrokerQueryData(state.broker, 'list_secrets', value),
+);
+bindQueryBackedField(
+  'connections',
+  () => getBrokerQueryData(state.broker, 'list_connections') ?? EMPTY_CONNECTIONS,
+  (value) => setBrokerQueryData(state.broker, 'list_connections', value),
+);
+bindQueryBackedField(
+  'identity',
+  () => getBrokerQueryData(state.broker, 'get_identity') ?? null,
+  (value) => {
+    if (value === null) removeBrokerQueryData(state.broker, 'get_identity');
+    else setBrokerQueryData(state.broker, 'get_identity', value);
+  },
+);
+bindQueryBackedField(
+  'sessions',
+  () => getBrokerQueryData(state.broker, 'list_sessions') ?? EMPTY_SESSIONS,
+  (value) => setBrokerQueryData(state.broker, 'list_sessions', value),
+);
+bindQueryBackedField(
+  'elicitations',
+  () => getBrokerQueryData(state.broker, 'list_elicitations') ?? EMPTY_ELICITATIONS,
+  (value) => setBrokerQueryData(state.broker, 'list_elicitations', value),
+);
+bindQueryBackedField(
+  'approvals',
+  () => getBrokerQueryData(state.broker, 'list_approvals') ?? EMPTY_APPROVALS,
+  (value) => setBrokerQueryData(state.broker, 'list_approvals', value),
+);
+bindQueryBackedField(
+  'requests',
+  () => getBrokerQueryData(state.broker, 'list_requests') ?? EMPTY_REQUESTS,
+  (value) => setBrokerQueryData(state.broker, 'list_requests', value),
+);
+bindQueryBackedField(
+  'settings',
+  () => getBrokerQueryData(state.broker, 'get_settings') ?? DEFAULT_SETTINGS,
+  (value) => setBrokerQueryData(state.broker, 'get_settings', value),
+);

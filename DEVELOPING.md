@@ -56,8 +56,13 @@ Then open:
 
 React owns the main-window and dropdown shells in `ui/app.tsx`. Transient UI
 state and its schema live in `ui/src/app-state.ts`, backed by the small
-external store in `ui/src/ui-store.ts`; broker-owned reads go through the
-broker-scoped TanStack Query client in `ui/src/query-client.ts`.
+external store in `ui/src/ui-store.ts`. Broker-owned secrets, connections,
+identity, sessions, request queues, and settings live canonically in the
+broker-scoped TanStack Query cache in `ui/src/query-client.ts`; query-backed
+accessors on the shared state facade let the action layer migrate without
+copying those responses into a second store. Activity remains in the UI store
+because its stable paginated append flow needs an infinite-query migration,
+not a single-response cache entry.
 
 Feature views live under `ui/src/features/`. The shared direct-endpoint UI is
 in `endpoint-view.tsx`, and onboarding/agent guides are in

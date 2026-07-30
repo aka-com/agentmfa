@@ -78,6 +78,56 @@ test('feature views and state are kept outside the application shell', async () 
   assert.doesNotMatch(startView, /from ['"].*app(?:\.tsx)?['"]/);
 });
 
+test('broker-owned resources are canonical in the broker-scoped query cache', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const appState = await readFile(new URL('../src/app-state.ts', import.meta.url), 'utf8');
+  const queryClient = await readFile(
+    new URL('../src/query-client.ts', import.meta.url),
+    'utf8',
+  );
+
+  const resources = [
+    ['secrets', 'list_secrets'],
+    ['connections', 'list_connections'],
+    ['identity', 'get_identity'],
+    ['sessions', 'list_sessions'],
+    ['elicitations', 'list_elicitations'],
+    ['approvals', 'list_approvals'],
+    ['requests', 'list_requests'],
+    ['settings', 'get_settings'],
+  ];
+  for (const [field, command] of resources) {
+    assert.match(
+      appState,
+      new RegExp(
+        `bindQueryBackedField\\(\\s*'${field}',[\\s\\S]*?getBrokerQueryData\\(state\\.broker, '${command}'\\)[\\s\\S]*?setBrokerQueryData\\(state\\.broker, '${command}', value\\)`,
+      ),
+      `${field} must read and write the ${command} broker query`,
+    );
+  }
+
+  assert.match(queryClient, /brokerQueryKey\(broker, command, args\)/);
+  assert.match(queryClient, /queryClient\.getQueryData/);
+  assert.match(queryClient, /queryClient\.setQueryData/);
+  assert.match(app, /useBrokerQueryRevision\(\)/);
+
+  const clear = app.match(
+    /function clearBrokerOwnedState\(\): void \{([\s\S]*?)\n\}/,
+  )?.[1];
+  assert.ok(clear, 'broker reset function is present');
+  for (const [field] of resources) {
+    assert.doesNotMatch(
+      clear,
+      new RegExp(`state\\.${field}\\s*=`),
+      `${field} must be cleared by query namespace removal, not copied UI state`,
+    );
+  }
+  assert.match(
+    app,
+    /removeBrokerQueries\(state\.broker\);\s+clearBrokerOwnedState\(\);\s+\}\s+state\.broker = profile/,
+  );
+});
+
 test('window components reconcile in place rather than remounting per revision', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
 

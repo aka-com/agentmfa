@@ -24,7 +24,6 @@ import {
   connectionsForEntry, entryForConnection, mcpTemplateForConnection, visibleCatalog,
 } from '/src/catalog';
 import {
-  DEFAULT_SETTINGS,
   DROPDOWN_TABS,
   START_VIEWS,
   TABS,
@@ -78,10 +77,14 @@ import type {
   NotificationSettings,
   RequestRecord,
   SecretSummary,
-  SessionSummary,
   TestErrorKind,
 } from '/src/types';
-import { queryClient, refetchBrokerQuery, removeBrokerQueries } from '/src/query-client';
+import {
+  queryClient,
+  refetchBrokerQuery,
+  removeBrokerQueries,
+  useBrokerQueryRevision,
+} from '/src/query-client';
 import { useUiRevision } from '/src/ui-store';
 import { AppIcon } from '/src/icon';
 import type { IconDefinition } from '/src/icon';
@@ -139,21 +142,13 @@ function brokerEpochIsCurrent(epoch: number): boolean {
 
 function clearBrokerOwnedState(): void {
   if (state.sheet) releaseDropdownForm();
-  state.secrets = [];
-  state.connections = [];
-  state.identity = null;
-  state.sessions = [];
   state.activity = [];
   state.activityNextBefore = null;
   state.activityLoadingOlder = false;
   state.activityOlderError = null;
-  state.elicitations = [];
   state.elicitValues = {};
-  state.approvals = [];
-  state.requests = [];
   state.approvalAnswering = null;
   state.agentSetupInstructions = '';
-  state.settings = { ...DEFAULT_SETTINGS };
   state.loadStatus = defaultLoadStatus();
   state.reveal = {};
   state.epExpanded = {};
@@ -339,14 +334,13 @@ async function load<K extends CommandName>(
     const result: unknown = await refetchBrokerQuery(broker, cmd, args);
     if (!brokerEpochIsCurrent(epoch)) return false;
     switch (key) {
-      case 'secrets': state.secrets = result as SecretSummary[]; break;
+      case 'secrets': break;
       case 'connections':
-        state.connections = result as ConnectionSummary[];
         // Not awaited: the list paints immediately and the SSH addresses fill
         // in behind it. Each is a vault read, so this must not gate a refresh.
         void resolveSshEndpointSockets(broker, epoch);
         break;
-      case 'sessions': state.sessions = result as SessionSummary[]; break;
+      case 'sessions': break;
       case 'activity': {
         const page = result as ActivityPage;
         state.activity = page.entries;
@@ -416,9 +410,8 @@ async function loadSettings(): Promise<boolean> {
   const epoch = brokerEpoch;
   state.loadStatus.settings = { status: 'loading' };
   try {
-    const settings = await refetchBrokerQuery(broker, 'get_settings');
+    await refetchBrokerQuery(broker, 'get_settings');
     if (!brokerEpochIsCurrent(epoch)) return false;
-    state.settings = settings;
     state.loadStatus.settings = { status: 'ready' };
     return true;
   } catch (error) {
@@ -445,9 +438,8 @@ async function loadIdentity(): Promise<boolean> {
   const epoch = brokerEpoch;
   state.loadStatus.identity = { status: 'loading' };
   try {
-    const identity = await refetchBrokerQuery(broker, 'get_identity');
+    await refetchBrokerQuery(broker, 'get_identity');
     if (!brokerEpochIsCurrent(epoch)) return false;
-    state.identity = identity;
     state.loadStatus.identity = { status: 'ready' };
     return true;
   } catch (error) {
@@ -2548,6 +2540,7 @@ function AppRoot(): ReactNode {
   // Subscribes this root to store publications; the revision itself is not
   // used as a key — the windows reconcile in place rather than remounting.
   useUiRevision(uiStore);
+  useBrokerQueryRevision();
   useExternalAppEvents();
   const inboxVisible = booted && state.tab === 'inbox'
     && !brokerTakeover(state.broker, state.remoteSetup.open);
@@ -6056,7 +6049,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         const secs = Number(id);
         if (secs !== state.settings.presence_window_secs
             && await run(() => invoke('set_presence_window', { secs }))) {
-          state.settings.presence_window_secs = secs;
+          state.settings = { ...state.settings, presence_window_secs: secs };
           const label = secs === 15 * 60 ? '15 minutes' : secs === 60 * 60 ? '1 hour' : '2 hours';
           toast(`🔓 Stays unlocked for ${label} after confirming`);
         }
