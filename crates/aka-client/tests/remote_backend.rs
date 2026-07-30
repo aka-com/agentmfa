@@ -144,6 +144,11 @@ async fn the_remote_backend_manages_a_tcp_broker_end_to_end() {
     // One patch must not disturb the fields it did not name.
     assert!(!settings.reauth_on_read);
 
+    let snapshot = backend.approval_snapshot().await.unwrap();
+    assert!(snapshot.approvals.is_empty());
+    assert!(snapshot.elicitations.is_empty());
+    assert!(snapshot.version.split_once(':').is_some());
+
     assert!(!backend.activity(50).await.unwrap().is_empty());
 
     // BYO OAuth relays now; reconnecting a non-OAuth connection is the

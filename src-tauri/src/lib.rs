@@ -290,6 +290,7 @@ pub fn run() {
             // the rest of setup is still installing the windows and tray.
             let notification_settings = broker_mode::saved_notification_settings(&data_dir);
             app.manage(attention::RequestAttention::new(notification_settings));
+            attention::initialize_notification_delivery(&handle);
 
             // The saved mode decides what starts. Local failures are fatal
             // dialogs (the broker is the product); a remote broker that is
@@ -341,6 +342,7 @@ pub fn run() {
                         api.prevent_close();
                         let _ = windows::hide_dropdown(&handle);
                     }
+                    WindowEvent::Destroyed => windows::clear_dropdown_form_hold(),
                     _ => {}
                 });
             }

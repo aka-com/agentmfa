@@ -497,7 +497,9 @@ impl BrokerState {
                     // queue so replays do not duplicate native alerts.
                     let should_reconcile = matches!(
                         &event,
-                        aka_api::ManageEvent::ApprovalsChanged | aka_api::ManageEvent::Resync
+                        aka_api::ManageEvent::ApprovalsChanged
+                            | aka_api::ManageEvent::ElicitationsChanged
+                            | aka_api::ManageEvent::Resync
                     );
                     crate::events::emit_manage_event(&event_app, event);
                     if should_reconcile {
@@ -512,15 +514,15 @@ impl BrokerState {
                         tauri::async_runtime::spawn(async move {
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(5),
-                                backend.approvals(),
+                                backend.approval_snapshot(),
                             )
                             .await
                             {
-                                Ok(Ok(approvals)) => {
+                                Ok(Ok(snapshot)) => {
                                     crate::attention::reconcile_remote(
                                         &app,
                                         refresh_generation,
-                                        approvals,
+                                        snapshot,
                                     );
                                 }
                                 Ok(Err(error)) => {
@@ -528,7 +530,7 @@ impl BrokerState {
                                     // the authoritative follow-up fails,
                                     // prefer one unnecessary window over a
                                     // real prompt timing out unseen.
-                                    tracing::warn!(%error, "could not check the remote approval queue");
+                                    tracing::warn!(%error, "could not check the remote request queues");
                                     if crate::attention::remote_refresh_is_current(
                                         &app,
                                         refresh_generation,
@@ -538,7 +540,7 @@ impl BrokerState {
                                 }
                                 Err(_) => {
                                     tracing::warn!(
-                                        "remote approval queue check timed out; surfacing defensively"
+                                        "remote request queue check timed out; surfacing defensively"
                                     );
                                     if crate::attention::remote_refresh_is_current(
                                         &app,

@@ -459,6 +459,20 @@ pub struct ApprovalDto {
     pub window_secs: u64,
 }
 
+/// An authoritative approval queue paired with the manage event-bus position
+/// it was read against. Remote shells order snapshots by this broker-minted
+/// version instead of by local fetch timing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalSnapshotDto {
+    /// `<broker event epoch>:<head sequence>`.
+    pub version: String,
+    pub approvals: Vec<ApprovalDto>,
+    /// Included in the same versioned read so a remote request surface can
+    /// reconcile every kind of parked user work from one event.
+    #[serde(default)]
+    pub elicitations: Vec<ElicitationDto>,
+}
+
 /// A request's decision lifecycle. Unlike [`ApprovalDto`], terminal records
 /// remain available for the bounded Recent Inbox after traffic has resumed or
 /// been refused.

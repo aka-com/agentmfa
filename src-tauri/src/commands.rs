@@ -1387,9 +1387,19 @@ pub async fn set_presence_window(state: State<'_, AppState>, secs: u64) -> CmdRe
 /// the local/remote shell choice, never on the managed broker.
 #[tauri::command]
 pub fn get_notification_settings(
+    app: AppHandle,
     state: State<'_, AppState>,
-) -> crate::broker_mode::NotificationSettings {
-    state.brokers.notification_settings()
+) -> crate::attention::NotificationSettingsView {
+    let settings = state.brokers.notification_settings();
+    app.try_state::<crate::attention::RequestAttention>()
+        .map(|attention| attention.settings_view())
+        .unwrap_or(crate::attention::NotificationSettingsView {
+            mode: settings.mode,
+            show_context: settings.show_context,
+            available: false,
+            unavailable_reason: Some("notification coordinator is unavailable".into()),
+            can_open_system_settings: cfg!(target_os = "macos"),
+        })
 }
 
 #[tauri::command]
@@ -1397,13 +1407,39 @@ pub fn set_notification_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     settings: crate::broker_mode::NotificationSettings,
-) -> CmdResult<crate::broker_mode::NotificationSettings> {
+) -> CmdResult<crate::attention::NotificationSettingsView> {
     let saved = state.brokers.set_notification_settings(settings)?;
-    if let Some(attention) = app.try_state::<crate::attention::RequestAttention>() {
+    let view = if let Some(attention) = app.try_state::<crate::attention::RequestAttention>() {
         attention.set_settings(saved);
+        attention.settings_view()
+    } else {
+        crate::attention::NotificationSettingsView {
+            mode: saved.mode,
+            show_context: saved.show_context,
+            available: false,
+            unavailable_reason: Some("notification coordinator is unavailable".into()),
+            can_open_system_settings: cfg!(target_os = "macos"),
+        }
+    };
+    let _ = app.emit(EVT_NOTIFICATION_SETTINGS, view.clone());
+    Ok(view)
+}
+
+/// Open the operating system's notification settings. This is a fixed,
+/// user-invoked destination rather than the general URL launcher, whose
+/// scheme allowlist deliberately excludes system-preference links.
+#[tauri::command]
+pub fn open_notification_settings() -> CmdResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("could not open notification settings: {error}"));
     }
-    let _ = app.emit(EVT_NOTIFICATION_SETTINGS, saved);
-    Ok(saved)
+    #[cfg(not(target_os = "macos"))]
+    Err("opening notification settings is not supported on this platform".into())
 }
 
 /// Register every command with the Tauri builder.
@@ -1463,6 +1499,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_presence_window,
         get_notification_settings,
         set_notification_settings,
+        open_notification_settings,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,
         crate::windows::ui_hide_dropdown,

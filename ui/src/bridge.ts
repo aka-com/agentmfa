@@ -724,6 +724,9 @@ let mockBroker: import('./types').BrokerProfile = {
 let mockNotificationSettings: NotificationSettings = {
   mode: 'when_hidden',
   showContext: false,
+  available: false,
+  unavailableReason: 'Development build: native notifications are disabled',
+  canOpenSystemSettings: false,
 };
 
 function mockConnectRemote(url: string, token: string | null): unknown {
@@ -789,9 +792,13 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'get_settings': return { ...db.settings };
     case 'get_notification_settings': return { ...mockNotificationSettings };
     case 'set_notification_settings':
-      mockNotificationSettings = { ...args.settings };
+      mockNotificationSettings = {
+        ...mockNotificationSettings,
+        ...args.settings,
+      };
       emit('aka://notification-settings-changed', { ...mockNotificationSettings });
       return { ...mockNotificationSettings };
+    case 'open_notification_settings': return;
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
     case 'copy_agent_setup': return;
     case 'inspect_ssh_import':

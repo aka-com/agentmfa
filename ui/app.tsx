@@ -335,6 +335,8 @@ const DEFAULT_SETTINGS: Settings = {
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   mode: 'when_hidden',
   showContext: false,
+  available: true,
+  canOpenSystemSettings: false,
 };
 
 const initialState: AppState = {
@@ -416,6 +418,9 @@ let brokerEpoch = 0;
  * preferences. It prevents an older in-flight read from overwriting the
  * event's newer value. */
 let notificationSettingsEpoch = 0;
+/** A dropdown form holds a renewable native lease. The native side also
+ * expires it, so a webview crash or reload cannot strand the panel. */
+let dropdownFormHeartbeat: number | null = null;
 /** Pointer-drag preview state. The connection rows render this order through
  * React; drag handlers never move React-owned DOM nodes themselves. */
 let dragConnId: string | null = null;
@@ -4335,6 +4340,14 @@ function settingsSheet() {
         ${notificationModeBtn('when_hidden', 'When away')}
         ${notificationModeBtn('always', 'Always')}
       </div></div>`;
+  const notificationWarning = notifications.available ? ''
+    : `<div class="notification-warning" role="status">
+      <b>Native notifications are unavailable.</b>
+      <span>${esc(notifications.unavailableReason || 'Use the Request Inbox for waiting requests.')}</span>
+      ${notifications.canOpenSystemSettings
+        ? '<button class="cd-live-link" data-act="open-notification-settings">Open notification settings</button>'
+        : ''}
+    </div>`;
   const notificationPreviewRow = notifications.mode === 'off' ? ''
     : `<div class="set-row"><div class="set-txt"><div class="st-title">Show agent and tool names</div>
       <div class="st-sub">Include only those names in notifications. Targets, summaries, and arguments always stay in the Inbox.</div></div>
@@ -4365,7 +4378,7 @@ function settingsSheet() {
     : '';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${notificationRow}${notificationPreviewRow}${reauthRow}${presenceRow}${dockRow}
+    ${notificationRow}${notificationWarning}${notificationPreviewRow}${reauthRow}${presenceRow}${dockRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -4597,6 +4610,18 @@ async function holdDropdownFormOpen(): Promise<boolean> {
   if (mode !== 'dropdown') return true;
   try {
     await invoke('ui_set_dropdown_form_active', { active: true });
+    if (dropdownFormHeartbeat === null) {
+      dropdownFormHeartbeat = window.setInterval(() => {
+        void invoke('ui_set_dropdown_form_active', { active: true })
+          .catch((error) => {
+            console.error('could not renew menu-bar form lease', error);
+            if (dropdownFormHeartbeat !== null) {
+              window.clearInterval(dropdownFormHeartbeat);
+              dropdownFormHeartbeat = null;
+            }
+          });
+      }, 30_000);
+    }
     return true;
   } catch (error) {
     toast('⚠ Couldn’t keep this form open: ' + errorMessage(error));
@@ -4606,6 +4631,10 @@ async function holdDropdownFormOpen(): Promise<boolean> {
 
 function releaseDropdownForm(): void {
   if (mode !== 'dropdown') return;
+  if (dropdownFormHeartbeat !== null) {
+    window.clearInterval(dropdownFormHeartbeat);
+    dropdownFormHeartbeat = null;
+  }
   void invoke('ui_set_dropdown_form_active', { active: false })
     .catch((error) => toast('⚠ Couldn’t release the menu-bar form: ' + errorMessage(error)));
 }
@@ -5855,6 +5884,9 @@ document.addEventListener('click', async (e) => {
       break;
     case 'open-external-url':
       await run(() => invoke('open_url', { url: btn.dataset.url || '' }));
+      break;
+    case 'open-notification-settings':
+      await run(() => invoke('open_notification_settings'));
       break;
     case 'mcp-auth-cancel': {
       const auth = state.mcpAuth;

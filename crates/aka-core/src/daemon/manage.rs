@@ -176,6 +176,7 @@ pub fn router() -> Router<AppState> {
         .route("/identity/agent-key", get(agent_key))
         .route("/identity/rotate", post(rotate_key))
         .route("/approvals", get(approvals))
+        .route("/approvals/snapshot", get(approval_snapshot))
         .route("/approvals/{id}", post(respond_approval))
         .route("/elicitations", get(elicitations))
         .route("/elicitations/{id}", post(respond_elicitation))
@@ -582,6 +583,32 @@ async fn set_confirm_mode(
 
 async fn approvals(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
     respond(state.manage.approvals().await)
+}
+
+async fn approval_snapshot(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
+    // Capture the bus head first. A mutation racing the following queue read
+    // can make the data newer than its version (safe and self-correcting),
+    // but can never label stale data with a newer version.
+    let version = format!(
+        "{}:{}",
+        state.broker.manage_bus().epoch(),
+        state.broker.manage_bus().head_seq()
+    );
+    let result = match state.manage.approvals().await {
+        Ok(approvals) => {
+            state
+                .manage
+                .elicitations()
+                .await
+                .map(|elicitations| aka_api::ApprovalSnapshotDto {
+                    version,
+                    approvals,
+                    elicitations,
+                })
+        }
+        Err(error) => Err(error),
+    };
+    respond(result)
 }
 
 async fn elicitations(State(state): State<AppState>, _authed: ManageAuthed) -> Response {

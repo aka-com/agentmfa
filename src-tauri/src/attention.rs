@@ -6,16 +6,76 @@
 //! refetches from the broker.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{mpsc, Mutex};
+use std::time::{Duration, Instant};
 
-use aka_api::ApprovalDto;
-use tauri::{AppHandle, Manager as _};
+use aka_api::{ApprovalDto, ApprovalSnapshotDto, ElicitationDto};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter as _, Manager as _};
+use tauri_plugin_notification::{NotificationExt as _, PermissionState};
 
 use crate::broker_mode::{NotificationMode, NotificationSettings};
 
 const NOTIFICATION_DEBOUNCE: Duration = Duration::from_millis(400);
+const NOTIFICATION_DELIVERY_DEADLINE: Duration = Duration::from_secs(3);
+const NOTIFICATION_RESPONSE_DEADLINE: Duration = Duration::from_secs(5 * 60);
+const NOTIFICATION_QUEUE_DEPTH: usize = 2;
 const OPEN_INBOX_ACTION: &str = "open_request_inbox";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ElicitationSummary {
+    id: String,
+    agent: String,
+    connection: String,
+}
+
+impl From<ElicitationDto> for ElicitationSummary {
+    fn from(elicitation: ElicitationDto) -> Self {
+        Self {
+            id: elicitation.id,
+            agent: elicitation.agent,
+            connection: elicitation.connection,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemoteSnapshotVersion {
+    epoch: String,
+    seq: u64,
+}
+
+impl RemoteSnapshotVersion {
+    fn parse(value: &str) -> Option<Self> {
+        let (epoch, seq) = value.split_once(':')?;
+        if epoch.is_empty() {
+            return None;
+        }
+        Some(Self {
+            epoch: epoch.to_string(),
+            seq: seq.parse().ok()?,
+        })
+    }
+}
+
+struct NotificationJob {
+    app: AppHandle,
+    title: String,
+    body: String,
+}
+
+/// Preferences plus this process's delivery health. The health fields are
+/// intentionally not persisted: a relaunch probes the platform again.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationSettingsView {
+    pub mode: NotificationMode,
+    pub show_context: bool,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+    pub can_open_system_settings: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RequestSummary {
@@ -141,12 +201,15 @@ struct AttentionInner {
     flush_generation: u64,
     flush_scheduled: bool,
     /// Authoritative remote reads can complete out of order. Only the latest
-    /// event-triggered read may replace the active snapshot.
+    /// event-triggered read may establish a new broker epoch; within one
+    /// epoch, the broker's sequence orders snapshots by data freshness.
     remote_refresh_generation: u64,
-    /// Parked upstream elicitations, tracked only for the tray/inbox count.
-    /// They notify on their own path (a single distinct question, not folded
-    /// into the approval coalescing tracker) but still contribute to the badge.
-    elicitations: std::collections::HashSet<uuid::Uuid>,
+    last_remote_version: Option<RemoteSnapshotVersion>,
+    /// Parked upstream elicitations contribute to the badge and retain just
+    /// enough safe context for a genuinely-new remote id to notify.
+    elicitations: BTreeMap<String, ElicitationSummary>,
+    notifications_available: bool,
+    notification_unavailable_reason: Option<String>,
 }
 
 impl AttentionInner {
@@ -154,16 +217,32 @@ impl AttentionInner {
     fn total(&self) -> usize {
         self.tracker.active.len() + self.elicitations.len()
     }
+
+    fn accepts_remote_version(&self, generation: u64, version: &RemoteSnapshotVersion) -> bool {
+        match &self.last_remote_version {
+            Some(last) if last.epoch == version.epoch => version.seq > last.seq,
+            // A broker restart changes the epoch. A read dispatched before a
+            // later refresh cannot establish the new epoch, even if it
+            // happens to complete last.
+            Some(_) | None => generation == self.remote_refresh_generation,
+        }
+    }
 }
 
 /// Managed Tauri state shared by local broker callbacks and the remote SSE
 /// reconciliation path.
 pub struct RequestAttention {
     inner: Mutex<AttentionInner>,
+    notification_tx: mpsc::SyncSender<NotificationJob>,
 }
 
 impl RequestAttention {
     pub fn new(settings: NotificationSettings) -> Self {
+        let (notification_tx, notification_rx) = mpsc::sync_channel(NOTIFICATION_QUEUE_DEPTH);
+        std::thread::Builder::new()
+            .name("aka-notification-worker".into())
+            .spawn(move || notification_worker(notification_rx))
+            .expect("notification worker thread");
         Self {
             inner: Mutex::new(AttentionInner {
                 tracker: AttentionTracker::default(),
@@ -171,8 +250,12 @@ impl RequestAttention {
                 flush_generation: 0,
                 flush_scheduled: false,
                 remote_refresh_generation: 0,
-                elicitations: std::collections::HashSet::new(),
+                last_remote_version: None,
+                elicitations: BTreeMap::new(),
+                notifications_available: true,
+                notification_unavailable_reason: None,
             }),
+            notification_tx,
         }
     }
 
@@ -200,20 +283,26 @@ impl RequestAttention {
 
     /// Track a parked elicitation for the badge and push the new total. The
     /// notification itself is raised separately.
-    fn add_elicitation(&self, app: &AppHandle, id: uuid::Uuid) {
-        let total = {
+    fn add_elicitation(&self, app: &AppHandle, elicitation: ElicitationSummary) -> bool {
+        let (total, added) = {
             let mut inner = self.inner.lock().unwrap();
-            inner.elicitations.insert(id);
-            inner.total()
+            let added = !inner.elicitations.contains_key(&elicitation.id);
+            inner
+                .elicitations
+                .insert(elicitation.id.clone(), elicitation);
+            (inner.total(), added)
         };
-        crate::windows::update_request_count(app, total);
+        if added {
+            crate::windows::update_request_count(app, total);
+        }
+        added
     }
 
     /// Drop a resolved elicitation from the badge and push the new total.
-    fn remove_elicitation(&self, app: &AppHandle, id: uuid::Uuid) {
+    fn remove_elicitation(&self, app: &AppHandle, id: &str) {
         let (total, changed) = {
             let mut inner = self.inner.lock().unwrap();
-            let changed = inner.elicitations.remove(&id);
+            let changed = inner.elicitations.remove(id).is_some();
             (inner.total(), changed)
         };
         if changed {
@@ -230,6 +319,8 @@ impl RequestAttention {
                 inner.flush_generation = inner.flush_generation.wrapping_add(1);
                 inner.flush_scheduled = false;
                 inner.remote_refresh_generation = inner.remote_refresh_generation.wrapping_add(1);
+                inner.last_remote_version = None;
+                inner.elicitations.clear();
                 true
             }
         };
@@ -239,11 +330,19 @@ impl RequestAttention {
     }
 
     /// Adopt a just-attached broker's authoritative queues as the active set.
-    fn reseed(&self, app: &AppHandle, approvals: Vec<ApprovalDto>, elicitations: Vec<uuid::Uuid>) {
+    fn reseed(
+        &self,
+        app: &AppHandle,
+        approvals: Vec<ApprovalDto>,
+        elicitations: Vec<ElicitationSummary>,
+    ) {
         let total = {
             let mut inner = self.inner.lock().unwrap();
             let _ = inner.tracker.adopt(approvals);
-            inner.elicitations = elicitations.into_iter().collect();
+            inner.elicitations = elicitations
+                .into_iter()
+                .map(|elicitation| (elicitation.id.clone(), elicitation))
+                .collect();
             inner.total()
         };
         crate::windows::update_request_count(app, total);
@@ -251,6 +350,67 @@ impl RequestAttention {
 
     pub fn set_settings(&self, settings: NotificationSettings) {
         self.inner.lock().unwrap().settings = settings;
+    }
+
+    pub fn settings_view(&self) -> NotificationSettingsView {
+        let inner = self.inner.lock().unwrap();
+        NotificationSettingsView {
+            mode: inner.settings.mode,
+            show_context: inner.settings.show_context,
+            available: inner.notifications_available,
+            unavailable_reason: inner.notification_unavailable_reason.clone(),
+            can_open_system_settings: cfg!(target_os = "macos"),
+        }
+    }
+
+    fn mark_notifications_unavailable(&self, reason: String) -> Option<NotificationSettingsView> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.notifications_available
+            && inner.notification_unavailable_reason.as_deref() == Some(reason.as_str())
+        {
+            return None;
+        }
+        inner.notifications_available = false;
+        inner.notification_unavailable_reason = Some(reason);
+        Some(NotificationSettingsView {
+            mode: inner.settings.mode,
+            show_context: inner.settings.show_context,
+            available: false,
+            unavailable_reason: inner.notification_unavailable_reason.clone(),
+            can_open_system_settings: cfg!(target_os = "macos"),
+        })
+    }
+
+    fn enqueue_notification(
+        &self,
+        app: &AppHandle,
+        title: String,
+        body: String,
+    ) -> Result<(), String> {
+        {
+            let inner = self.inner.lock().unwrap();
+            if !inner.notifications_available {
+                return Err(inner
+                    .notification_unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "native notifications are unavailable".into()));
+            }
+        }
+        self.notification_tx
+            .try_send(NotificationJob {
+                app: app.clone(),
+                title,
+                body,
+            })
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => {
+                    "native notification queue is full; requests were coalesced into the Inbox"
+                        .into()
+                }
+                mpsc::TrySendError::Disconnected(_) => {
+                    "native notification worker is unavailable".into()
+                }
+            })
     }
 
     pub fn count(&self) -> usize {
@@ -263,18 +423,43 @@ impl RequestAttention {
         inner.remote_refresh_generation
     }
 
-    fn reconcile_remote(&self, app: &AppHandle, generation: u64, approvals: Vec<ApprovalDto>) {
-        let (change, flush_generation) = {
+    fn reconcile_remote(&self, app: &AppHandle, generation: u64, snapshot: ApprovalSnapshotDto) {
+        let Some(version) = RemoteSnapshotVersion::parse(&snapshot.version) else {
+            tracing::warn!(version = %snapshot.version, "ignored malformed remote queue version");
+            if self.remote_refresh_is_current(generation) {
+                crate::windows::surface_for_approval(app);
+            }
+            return;
+        };
+        let (change, flush_generation, new_elicitations) = {
             let mut inner = self.inner.lock().unwrap();
-            if generation != inner.remote_refresh_generation {
+            if !inner.accepts_remote_version(generation, &version) {
                 return;
             }
-            let mut change = inner.tracker.reconcile(approvals);
+            let old_total = inner.total();
+            inner.last_remote_version = Some(version);
+            let mut change = inner.tracker.reconcile(snapshot.approvals);
+            let next_elicitations = snapshot
+                .elicitations
+                .into_iter()
+                .map(ElicitationSummary::from)
+                .map(|elicitation| (elicitation.id.clone(), elicitation))
+                .collect::<BTreeMap<_, _>>();
+            let new_elicitations = next_elicitations
+                .iter()
+                .filter(|(id, _)| !inner.elicitations.contains_key(*id))
+                .map(|(_, elicitation)| elicitation.clone())
+                .collect::<Vec<_>>();
+            inner.elicitations = next_elicitations;
             change.count = inner.total();
+            change.count_changed = old_total != change.count;
             let flush_generation = schedule_generation(&mut inner, change.notification_added);
-            (change, flush_generation)
+            (change, flush_generation, new_elicitations)
         };
         apply_change(app, change, flush_generation);
+        for elicitation in new_elicitations {
+            notify_elicitation(app, &elicitation);
+        }
     }
 
     fn remote_refresh_is_current(&self, generation: u64) -> bool {
@@ -363,44 +548,172 @@ fn show_notification(
     deliver_notification(app, &title, &body)
 }
 
-/// Show one native notification whose activation opens the Request Inbox, and
-/// observe that activation off the main/async threads. Shared by the approval
-/// batch and the single-elicitation paths.
+/// Queue one native notification. One worker owns delivery and interaction
+/// observation for the process, so an unacknowledged banner cannot leak one
+/// blocked thread and one platform timer per request.
 fn deliver_notification(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
+    let attention = app
+        .try_state::<RequestAttention>()
+        .ok_or_else(|| "notification coordinator is unavailable".to_string())?;
+    attention.enqueue_notification(app, title.to_string(), body.to_string())
+}
+
+fn notification_worker(rx: mpsc::Receiver<NotificationJob>) {
+    while let Ok(job) = rx.recv() {
+        let Some(attention) = job.app.try_state::<RequestAttention>() else {
+            continue;
+        };
+        if !attention.inner.lock().unwrap().notifications_available {
+            continue;
+        }
+        deliver_notification_job(job);
+    }
+}
+
+fn deliver_notification_job(job: NotificationJob) {
     let mut notification = notify_rust::Notification::new();
     notification
-        .summary(title)
-        .body(body)
+        .summary(&job.title)
+        .body(&job.body)
         .action(OPEN_INBOX_ACTION, "Open Inbox")
         .auto_icon();
     // XDG servers only emit body activation when the special default action
     // is advertised; some desktops hide named buttons entirely.
     #[cfg(all(unix, not(target_os = "macos")))]
     notification.action("default", "Open Inbox");
-    configure_notification_identity(app, &mut notification)?;
-    let handle = notification.show().map_err(|error| error.to_string())?;
+    if let Err(error) = configure_notification_identity(&job.app, &mut notification) {
+        notification_delivery_failed(&job.app, error);
+        return;
+    }
+    let shown_at = Instant::now();
+    let handle = match notification.show() {
+        Ok(handle) => handle,
+        Err(error) => {
+            notification_delivery_failed(&job.app, error.to_string());
+            return;
+        }
+    };
 
-    // All supported desktop backends deliver activation through a blocking
-    // handle. Keep that wait off Tauri's main and async-runtime threads; the
-    // main run loop remains available for the platform callback itself.
-    let response_app = app.clone();
-    std::thread::Builder::new()
-        .name("aka-notification-action".into())
+    // The deprecated macOS backend can block forever after delivery. One
+    // short-lived watchdog guards the single worker; on timeout delivery is
+    // disabled for the session, so this worker is the only thread that can
+    // remain parked and no further platform timers are created.
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
+    let watchdog_app = job.app.clone();
+    let _ = std::thread::Builder::new()
+        .name("aka-notification-watchdog".into())
         .spawn(move || {
-            let fallback_app = response_app.clone();
-            if let Err(error) =
-                handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
-                    if notification_opens_inbox(response) {
-                        crate::windows::open_request_inbox(&response_app);
-                    }
-                })
+            if done_rx
+                .recv_timeout(NOTIFICATION_RESPONSE_DEADLINE)
+                .is_err()
             {
-                tracing::warn!(%error, "could not observe native notification interaction");
-                crate::windows::surface_for_approval(&fallback_app);
+                notification_delivery_failed(
+                    &watchdog_app,
+                    "native notification interaction timed out; using the Request Inbox instead"
+                        .into(),
+                );
             }
-        })
-        .map_err(|error| error.to_string())?;
-    Ok(())
+        });
+
+    let response_app = job.app.clone();
+    let result = handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
+        if notification_opens_inbox(response) {
+            crate::windows::open_request_inbox(&response_app);
+        }
+        if matches!(
+            response,
+            notify_rust::NotificationResponse::Closed(notify_rust::CloseReason::Expired)
+        ) && shown_at.elapsed() <= NOTIFICATION_DELIVERY_DEADLINE
+        {
+            notification_delivery_failed(
+                &response_app,
+                "Notifications appear to be blocked by the operating system".into(),
+            );
+        }
+    });
+    let _ = done_tx.try_send(());
+    if let Err(error) = result {
+        notification_delivery_failed(
+            &job.app,
+            format!("could not observe native notification delivery: {error}"),
+        );
+    }
+}
+
+fn notification_delivery_failed(app: &AppHandle, reason: String) {
+    tracing::warn!(%reason, "native request notifications unavailable");
+    mark_notifications_unavailable(app, reason);
+    crate::windows::surface_for_approval(app);
+}
+
+fn mark_notifications_unavailable(app: &AppHandle, reason: String) {
+    if let Some(attention) = app.try_state::<RequestAttention>() {
+        if let Some(view) = attention.mark_notifications_unavailable(reason) {
+            let _ = app.emit(crate::commands::EVT_NOTIFICATION_SETTINGS, view);
+        }
+    }
+}
+
+/// Establish the platform notification identity and probe authorization once,
+/// before either broker can park work on this surface.
+pub fn initialize_notification_delivery(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        if tauri::is_dev() {
+            mark_notifications_unavailable(
+                app,
+                "Development build: native notifications are disabled".into(),
+            );
+            return;
+        }
+        let expected = app.config().identifier.as_str();
+        #[allow(deprecated)]
+        let configured = notify_rust::set_application(expected);
+        let actual = main_bundle_identifier();
+        if let Err(error) = configured {
+            mark_notifications_unavailable(
+                app,
+                format!("Could not configure native notifications: {error}"),
+            );
+            return;
+        }
+        if actual.as_deref() != Some(expected) {
+            mark_notifications_unavailable(
+                app,
+                format!(
+                    "Native notification identity changed unexpectedly (expected {expected}, got {})",
+                    actual.as_deref().unwrap_or("no bundle identifier")
+                ),
+            );
+            return;
+        }
+    }
+
+    match app.notification().permission_state() {
+        Ok(PermissionState::Granted) => {}
+        Ok(PermissionState::Denied) => mark_notifications_unavailable(
+            app,
+            "Notifications are blocked in operating-system settings".into(),
+        ),
+        Ok(PermissionState::Prompt | PermissionState::PromptWithRationale) => {
+            mark_notifications_unavailable(
+                app,
+                "Notification permission has not been granted".into(),
+            )
+        }
+        Err(error) => mark_notifications_unavailable(
+            app,
+            format!("Could not check notification permission: {error}"),
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn main_bundle_identifier() -> Option<String> {
+    use objc2_foundation::NSBundle;
+    NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|identifier| identifier.to_string())
 }
 
 fn notification_opens_inbox(response: &notify_rust::NotificationResponse) -> bool {
@@ -417,15 +730,8 @@ fn configure_notification_identity(
     _app: &AppHandle,
     _notification: &mut notify_rust::Notification,
 ) -> Result<(), String> {
-    // Match the Tauri plugin's delivery identity. Development binaries are
-    // not installed application bundles, so Notification Center attributes
-    // them to Terminal; packaged builds use AKA's bundle identifier.
-    #[allow(deprecated)]
-    let _ = notify_rust::set_application(if tauri::is_dev() {
-        "com.apple.Terminal"
-    } else {
-        _app.config().identifier.as_str()
-    });
+    // Initialized exactly once during setup. Calling set_application here
+    // would process-wide swizzle NSBundle after a request was already parked.
     Ok(())
 }
 
@@ -531,7 +837,11 @@ pub fn adopt_local(app: &AppHandle, broker: &aka_core::broker::Broker) {
         broker
             .pending_elicitations()
             .iter()
-            .map(|pending| pending.id)
+            .map(|pending| ElicitationSummary {
+                id: pending.id.to_string(),
+                agent: pending.agent.clone(),
+                connection: pending.connection.clone(),
+            })
             .collect(),
     );
 }
@@ -567,8 +877,22 @@ pub fn elicitation_requested(
     let Some(attention) = app.try_state::<RequestAttention>() else {
         return;
     };
-    // Count it toward the tray/inbox badge (idempotent on repeat events).
-    attention.add_elicitation(app, pending.id);
+    let elicitation = ElicitationSummary {
+        id: pending.id.to_string(),
+        agent: pending.agent.clone(),
+        connection: pending.connection.clone(),
+    };
+    // Count and notify only on the first observation of this id.
+    if !attention.add_elicitation(app, elicitation.clone()) {
+        return;
+    }
+    notify_elicitation(app, &elicitation);
+}
+
+fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
+    let Some(attention) = app.try_state::<RequestAttention>() else {
+        return;
+    };
     let (mode, show_context) = {
         let inner = attention.inner.lock().unwrap();
         (inner.settings.mode, inner.settings.show_context)
@@ -599,7 +923,7 @@ pub fn elicitation_requested(
 /// it from the tray/inbox badge.
 pub fn elicitation_resolved(app: &AppHandle, id: &uuid::Uuid) {
     if let Some(attention) = app.try_state::<RequestAttention>() {
-        attention.remove_elicitation(app, *id);
+        attention.remove_elicitation(app, &id.to_string());
     }
 }
 
@@ -608,9 +932,9 @@ pub fn begin_remote_refresh(app: &AppHandle) -> Option<u64> {
         .map(|attention| attention.begin_remote_refresh())
 }
 
-pub fn reconcile_remote(app: &AppHandle, generation: u64, approvals: Vec<ApprovalDto>) {
+pub fn reconcile_remote(app: &AppHandle, generation: u64, snapshot: ApprovalSnapshotDto) {
     if let Some(attention) = app.try_state::<RequestAttention>() {
-        attention.reconcile_remote(app, generation, approvals);
+        attention.reconcile_remote(app, generation, snapshot);
     }
 }
 
@@ -714,6 +1038,74 @@ mod tests {
 
         assert!(!attention.remote_refresh_is_current(first));
         assert!(attention.remote_refresh_is_current(second));
+    }
+
+    #[test]
+    fn broker_sequence_not_fetch_start_orders_same_epoch_snapshots() {
+        let attention = RequestAttention::new(NotificationSettings::default());
+        let older_fetch = attention.begin_remote_refresh();
+        let newer_fetch = attention.begin_remote_refresh();
+        let mut inner = attention.inner.lock().unwrap();
+        inner.last_remote_version = Some(RemoteSnapshotVersion {
+            epoch: "broker-a".into(),
+            seq: 8,
+        });
+
+        assert!(inner.accepts_remote_version(
+            older_fetch,
+            &RemoteSnapshotVersion {
+                epoch: "broker-a".into(),
+                seq: 9,
+            },
+        ));
+        assert!(!inner.accepts_remote_version(
+            newer_fetch,
+            &RemoteSnapshotVersion {
+                epoch: "broker-a".into(),
+                seq: 7,
+            },
+        ));
+    }
+
+    #[test]
+    fn only_latest_fetch_can_establish_a_new_broker_epoch() {
+        let attention = RequestAttention::new(NotificationSettings::default());
+        let older_fetch = attention.begin_remote_refresh();
+        let latest_fetch = attention.begin_remote_refresh();
+        let mut inner = attention.inner.lock().unwrap();
+        inner.last_remote_version = Some(RemoteSnapshotVersion {
+            epoch: "broker-a".into(),
+            seq: 8,
+        });
+        let restarted = RemoteSnapshotVersion {
+            epoch: "broker-b".into(),
+            seq: 1,
+        };
+
+        assert!(!inner.accepts_remote_version(older_fetch, &restarted));
+        assert!(inner.accepts_remote_version(latest_fetch, &restarted));
+    }
+
+    #[test]
+    fn notification_failure_is_sticky_and_preserves_preferences() {
+        let attention = RequestAttention::new(NotificationSettings {
+            mode: NotificationMode::Always,
+            show_context: true,
+        });
+
+        let changed = attention
+            .mark_notifications_unavailable("blocked by settings".into())
+            .unwrap();
+        assert!(!changed.available);
+        assert_eq!(changed.mode, NotificationMode::Always);
+        assert!(changed.show_context);
+        assert_eq!(
+            changed.unavailable_reason.as_deref(),
+            Some("blocked by settings")
+        );
+        assert!(attention
+            .mark_notifications_unavailable("blocked by settings".into())
+            .is_none());
     }
 
     #[test]

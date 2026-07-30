@@ -17,8 +17,8 @@ pub mod credentials;
 pub mod events;
 
 use aka_api::{
-    ActivityDto, ApprovalDecisionDto, ApprovalDto, ConnectionDto, IdentityDto, IssuedEndpointDto,
-    ManageError, RequestDto, SecretDto, SessionDto, SettingsDto,
+    ActivityDto, ApprovalDecisionDto, ApprovalDto, ApprovalSnapshotDto, ConnectionDto, IdentityDto,
+    IssuedEndpointDto, ManageError, RequestDto, SecretDto, SessionDto, SettingsDto,
 };
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
@@ -407,6 +407,12 @@ impl RemoteBackend {
             Transport::Http { config, .. } => Some(config),
             Transport::Unix { .. } => None,
         }
+    }
+
+    /// Versioned queue snapshot used by the remote desktop's attention
+    /// reconciler. Ordinary UI reads keep using `ManagementBackend::approvals`.
+    pub async fn approval_snapshot(&self) -> ManageResult<ApprovalSnapshotDto> {
+        self.get("/v1/manage/approvals/snapshot").await
     }
 
     async fn send<T: DeserializeOwned>(

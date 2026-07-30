@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
@@ -39,8 +40,10 @@ const DROPDOWN_GAP: f64 = 6.0;
 static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
 /// A dropdown form may hold credentials that must survive native
 /// authentication and any error returned afterwards. While it is open, focus
-/// loss (including the Touch ID sheet becoming key) must not dismiss it.
-static DROPDOWN_FORM_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// loss (including the Touch ID sheet becoming key) must not dismiss it. The
+/// webview renews this lease; a crashed/reloaded form cannot strand the panel.
+static DROPDOWN_FORM_ACTIVE: Mutex<Option<Instant>> = Mutex::new(None);
+const DROPDOWN_FORM_TTL: Duration = Duration::from_secs(2 * 60);
 /// Tray navigation can happen before a webview installs its event listener.
 /// Keep one pending bit per request surface so the destination can drain it
 /// after boot instead of silently losing the user's click.
@@ -48,7 +51,20 @@ static MAIN_REQUESTS_PENDING: AtomicBool = AtomicBool::new(false);
 static DROPDOWN_REQUESTS_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn dropdown_hide_allowed() -> bool {
-    !DROPDOWN_FORM_ACTIVE.load(Ordering::SeqCst)
+    dropdown_hide_allowed_at(Instant::now())
+}
+
+fn dropdown_hide_allowed_at(now: Instant) -> bool {
+    let mut active = DROPDOWN_FORM_ACTIVE.lock().unwrap();
+    if active.is_some_and(|renewed| now.duration_since(renewed) < DROPDOWN_FORM_TTL) {
+        return false;
+    }
+    *active = None;
+    true
+}
+
+pub fn clear_dropdown_form_hold() {
+    *DROPDOWN_FORM_ACTIVE.lock().unwrap() = None;
 }
 
 #[cfg(target_os = "macos")]
@@ -459,7 +475,7 @@ pub fn ui_set_dropdown_form_active(
     if window.label() != DROPDOWN {
         return Err("only the menu-bar dropdown can hold its form open".into());
     }
-    DROPDOWN_FORM_ACTIVE.store(active, Ordering::SeqCst);
+    *DROPDOWN_FORM_ACTIVE.lock().unwrap() = active.then(Instant::now);
     Ok(())
 }
 
@@ -592,10 +608,11 @@ mod tests {
 
     #[test]
     fn active_form_blocks_dropdown_hiding() {
-        DROPDOWN_FORM_ACTIVE.store(true, Ordering::SeqCst);
-        assert!(!dropdown_hide_allowed());
-        DROPDOWN_FORM_ACTIVE.store(false, Ordering::SeqCst);
-        assert!(dropdown_hide_allowed());
+        let now = Instant::now();
+        *DROPDOWN_FORM_ACTIVE.lock().unwrap() = Some(now);
+        assert!(!dropdown_hide_allowed_at(now + Duration::from_secs(119)));
+        assert!(dropdown_hide_allowed_at(now + Duration::from_secs(120)));
+        assert!(DROPDOWN_FORM_ACTIVE.lock().unwrap().is_none());
     }
 
     #[test]

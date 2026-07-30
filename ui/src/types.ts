@@ -279,6 +279,10 @@ export interface NotificationSettings {
   mode: 'off' | 'when_hidden' | 'always';
   /** Include agent and connection names, never request summaries/details. */
   showContext: boolean;
+  /** Runtime platform health; preferences can still be edited when false. */
+  available: boolean;
+  unavailableReason?: string;
+  canOpenSystemSettings: boolean;
 }
 
 export interface HostKeyCandidate {
@@ -460,6 +464,7 @@ export interface CommandMap {
   set_notification_settings: CommandSpec<{
     settings: NotificationSettings;
   }, NotificationSettings>;
+  open_notification_settings: CommandSpec<undefined, void>;
   get_agent_setup: CommandSpec<undefined, string>;
   copy_agent_setup: CommandSpec<undefined, void>;
   inspect_ssh_import: CommandSpec<{ source: string }, SshImportPreview>;

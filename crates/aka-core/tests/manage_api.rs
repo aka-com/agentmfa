@@ -455,6 +455,17 @@ async fn request_history_round_trips_pending_and_terminal_lifecycles() {
     .expect("the approval should enter the management queue");
     let id = approval["id"].as_str().unwrap();
 
+    let (status, snapshot) = h.manage("GET", "/v1/manage/approvals/snapshot", None).await;
+    assert_eq!(status, 200, "{snapshot}");
+    assert_eq!(snapshot["approvals"][0]["id"], id);
+    assert_eq!(snapshot["elicitations"], json!([]));
+    let (epoch, sequence) = snapshot["version"]
+        .as_str()
+        .and_then(|version| version.split_once(':'))
+        .expect("snapshot version is <event epoch>:<head sequence>");
+    assert!(!epoch.is_empty());
+    assert!(sequence.parse::<u64>().is_ok());
+
     let (status, requests) = h.manage("GET", "/v1/manage/requests", None).await;
     assert_eq!(status, 200, "{requests}");
     assert_eq!(requests[0]["id"], id);
