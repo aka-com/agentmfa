@@ -117,7 +117,6 @@ async fn explicit_management_actions_do_not_consult_native_authentication() {
     assert!(!broker.ui_agent_key_for_copy().unwrap().is_empty());
     broker.ui_rotate_key().unwrap();
     broker.ui_clear_activity().unwrap();
-
 }
 
 #[tokio::test]

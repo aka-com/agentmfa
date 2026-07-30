@@ -736,7 +736,11 @@ fn forward_server_message(
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&message) else {
         return true;
     };
-    if value.get("method").and_then(serde_json::Value::as_str).is_none() {
+    if value
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
         return true;
     }
     out.send(message).is_ok()
@@ -771,7 +775,11 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
             let Some(line) = one_line(&message) else {
                 continue;
             };
-            if stdout.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+            if stdout
+                .write_all(format!("{line}\n").as_bytes())
+                .await
+                .is_err()
+            {
                 return;
             }
             if stdout.flush().await.is_err() {
@@ -1106,7 +1114,10 @@ mod tests {
         assert_eq!(bridge.session().as_deref(), Some("sess-1"));
 
         let Relay::Messages(none) = bridge
-            .post(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, &out)
+            .post(
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                &out,
+            )
             .await
             .unwrap()
         else {
@@ -1131,7 +1142,9 @@ mod tests {
         // MCP-U6. The notification went out on its own, before the answer —
         // collecting both and emitting them together delivered every
         // "37% done" at the same instant as "done".
-        let live = live.try_recv().expect("the progress notification is forwarded live");
+        let live = live
+            .try_recv()
+            .expect("the progress notification is forwarded live");
         let live: serde_json::Value = serde_json::from_str(&live).unwrap();
         assert_eq!(live["method"], "notifications/progress");
         assert!(live.get("id").is_none());

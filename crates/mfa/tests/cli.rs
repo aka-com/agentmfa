@@ -273,18 +273,16 @@ fn broker_url_environment_cannot_bypass_local_only_root_guards() {
     let parent = tempfile::tempdir().unwrap();
     let missing = parent.path().join("typo");
     let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
-        .args([
-            "manage",
-            "token",
-            "--root",
-            missing.to_str().unwrap(),
-        ])
+        .args(["manage", "token", "--root", missing.to_str().unwrap()])
         .env("AKA_BROKER_URL", "https://broker.example.test")
         .output()
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not an existing broker root"));
-    assert!(!missing.exists(), "the local-only command created a typoed root");
+    assert!(
+        !missing.exists(),
+        "the local-only command created a typoed root"
+    );
 }
 
 #[test]
@@ -299,12 +297,7 @@ fn broker_url_environment_applies_to_agent_key_reads() {
         },
     ]);
     let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
-        .args([
-            "--json",
-            "key",
-            "--root",
-            root.path().to_str().unwrap(),
-        ])
+        .args(["--json", "key", "--root", root.path().to_str().unwrap()])
         .env("AKA_MANAGE_TOKEN", "akamgr_test")
         .env("AKA_BROKER_URL", &url)
         .output()

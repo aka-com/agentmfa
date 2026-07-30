@@ -349,10 +349,7 @@ async fn upstream() -> Upstream {
         )
         // Comfortably past the 10 MB buffered cap, so the two relays disagree
         // about it and the test can say which is which.
-        .route(
-            "/large",
-            get(|| async { "z".repeat(12 * 1024 * 1024) }),
-        );
+        .route("/large", get(|| async { "z".repeat(12 * 1024 * 1024) }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -2686,10 +2683,9 @@ async fn http_direct_endpoint_rejects_client_supplied_custom_credential_header()
     assert_eq!(status, 400, "response: {body}");
     assert_eq!(body["reason"], "reserved_header");
     assert!(
-        body["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("omit its native credential header")
-                && detail.contains("Authorization: Bearer")),
+        body["detail"].as_str().is_some_and(|detail| detail
+            .contains("omit its native credential header")
+            && detail.contains("Authorization: Bearer")),
         "response: {body}"
     );
     assert_eq!(up.hits.load(Ordering::SeqCst), 0);
@@ -2777,7 +2773,10 @@ async fn a_streamed_call_reports_its_head_and_body_as_they_arrive() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert!(content_type.starts_with("text/event-stream"), "{content_type}");
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "{content_type}"
+    );
 
     let frames = sse_frames(&body);
     let names: Vec<&str> = frames.iter().map(|(event, _)| event.as_str()).collect();
@@ -3027,7 +3026,10 @@ async fn a_refused_stream_carries_one_error_frame_and_no_head() {
     // The refusal predates the stream, so it is an ordinary JSON error rather
     // than an event-stream carrying one frame.
     assert_eq!(status, 403, "{body}");
-    assert!(!content_type.starts_with("text/event-stream"), "{content_type}");
+    assert!(
+        !content_type.starts_with("text/event-stream"),
+        "{content_type}"
+    );
     assert_eq!(up.hits.load(Ordering::SeqCst), 0);
 }
 
@@ -3057,7 +3059,10 @@ async fn a_stream_cannot_also_ask_to_be_coalesced() {
     .await;
     assert_eq!(status, 400, "{body}");
     assert!(
-        body["detail"].as_str().unwrap_or_default().contains("replaying"),
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("replaying"),
         "the refusal should say why: {body}"
     );
     assert_eq!(up.hits.load(Ordering::SeqCst), 0);

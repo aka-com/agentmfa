@@ -838,11 +838,7 @@ enum EndpointAction {
     Revoke,
 }
 
-fn endpoint_action(
-    issue: bool,
-    renew: bool,
-    revoke: bool,
-) -> Result<EndpointAction, &'static str> {
+fn endpoint_action(issue: bool, renew: bool, revoke: bool) -> Result<EndpointAction, &'static str> {
     match (issue, renew, revoke) {
         (false, false, false) => Ok(EndpointAction::Read),
         (true, false, false) => Ok(EndpointAction::Issue),
@@ -2077,7 +2073,10 @@ fn cmd_settings_get(root: Option<PathBuf>, url: Option<String>, json: bool) {
         print_json(&settings);
     } else {
         println!("menu bar hides Dock: {}", settings.menu_bar_hides_dock);
-        println!("confirm new SSH host keys: {}", settings.confirm_ssh_host_keys);
+        println!(
+            "confirm new SSH host keys: {}",
+            settings.confirm_ssh_host_keys
+        );
     }
 }
 
@@ -2110,7 +2109,10 @@ fn cmd_settings_set(
     } else {
         eprintln!("settings updated");
         println!("menu bar hides Dock: {}", settings.menu_bar_hides_dock);
-        println!("confirm new SSH host keys: {}", settings.confirm_ssh_host_keys);
+        println!(
+            "confirm new SSH host keys: {}",
+            settings.confirm_ssh_host_keys
+        );
     }
 }
 
@@ -2374,7 +2376,10 @@ fn cmd_conn_audit_statements(
     if dto.kind != "pg" {
         die_with(
             ExitCode::Usage,
-            format!("{name} is a {} connection; statement recording applies to Postgres", dto.kind),
+            format!(
+                "{name} is a {} connection; statement recording applies to Postgres",
+                dto.kind
+            ),
         );
     }
     let requested = match (on, off, default) {
@@ -2400,7 +2405,11 @@ fn cmd_conn_audit_statements(
         );
         return;
     };
-    let changed = managed.run(managed.backend.set_audit_statements(dto_id(&dto.id), requested));
+    let changed = managed.run(
+        managed
+            .backend
+            .set_audit_statements(dto_id(&dto.id), requested),
+    );
     let updated = conn_dto(&managed, &name);
     let state = if updated.agent_access.audit_statements_effective {
         "on"
@@ -2410,7 +2419,9 @@ fn cmd_conn_audit_statements(
     if changed {
         eprintln!("statement recording {state} for {name}");
         if updated.agent_access.audit_statements_effective {
-            eprintln!("  statement text can carry credentials and personal data into the activity log");
+            eprintln!(
+                "  statement text can carry credentials and personal data into the activity log"
+            );
         }
     } else {
         eprintln!("statement recording was already {state} for {name}");
@@ -3059,11 +3070,7 @@ fn ssh_open_hints(
 
 /// A `~/.ssh/config` stanza pointing `IdentityAgent` at the issued socket,
 /// carrying the same options as the one-liner above.
-fn ssh_config_block(
-    body: &serde_json::Value,
-    auth_sock: &str,
-    destination: &str,
-) -> Vec<String> {
+fn ssh_config_block(body: &serde_json::Value, auth_sock: &str, destination: &str) -> Vec<String> {
     // An alias with whitespace is not a legal Host pattern; the destination is
     // already the alias when one was imported.
     let alias = destination
@@ -3826,14 +3833,11 @@ fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<Str
             die(format!("activity log integrity check failed: {error}"));
         }
     }
-    let audit = match aka_core::audit::AuditLog::open_sealed(
-        file,
-        paths.audit_seal_file(),
-        integrity,
-    ) {
-        Ok(audit) => audit,
-        Err(e) => die(format!("could not open the activity log: {e}")),
-    };
+    let audit =
+        match aka_core::audit::AuditLog::open_sealed(file, paths.audit_seal_file(), integrity) {
+            Ok(audit) => audit,
+            Err(e) => die(format!("could not open the activity log: {e}")),
+        };
     let verification = audit.verify();
     match &verification {
         aka_core::audit::AuditIntegrity::Tampered { .. } => die(verification.summary()),
@@ -3847,10 +3851,7 @@ fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<Str
     }
     let mut entries = audit.recent(if limit == 0 { usize::MAX } else { limit });
     entries.reverse();
-    let entries = entries
-        .iter()
-        .map(activity_dto)
-        .collect::<Vec<_>>();
+    let entries = entries.iter().map(activity_dto).collect::<Vec<_>>();
     print_activity(&entries, json);
 }
 
@@ -4549,16 +4550,31 @@ mod tests {
         assert_eq!(endpoint_require_auth(false, true), Some(false));
 
         assert!(Cli::try_parse_from([
-            "mfa", "conn", "endpoint", "production", "--require-auth", "--no-require-auth",
+            "mfa",
+            "conn",
+            "endpoint",
+            "production",
+            "--require-auth",
+            "--no-require-auth",
         ])
         .is_err());
         // Revocation removes the endpoint, so a posture for it is nonsense.
         assert!(Cli::try_parse_from([
-            "mfa", "conn", "endpoint", "production", "--revoke", "--require-auth",
+            "mfa",
+            "conn",
+            "endpoint",
+            "production",
+            "--revoke",
+            "--require-auth",
         ])
         .is_err());
         assert!(Cli::try_parse_from([
-            "mfa", "conn", "endpoint", "production", "--issue", "--require-auth",
+            "mfa",
+            "conn",
+            "endpoint",
+            "production",
+            "--issue",
+            "--require-auth",
         ])
         .is_ok());
     }
@@ -4568,8 +4584,16 @@ mod tests {
     #[test]
     fn the_ssh_agent_forwarder_passes_its_command_through_untouched() {
         let cli = Cli::try_parse_from([
-            "mfa", "ssh-agent", "production", "--socket", "/tmp/a.sock",
-            "--", "ssh", "-o", "IdentitiesOnly=no", "prod",
+            "mfa",
+            "ssh-agent",
+            "production",
+            "--socket",
+            "/tmp/a.sock",
+            "--",
+            "ssh",
+            "-o",
+            "IdentitiesOnly=no",
+            "prod",
         ])
         .expect("a command after -- parses");
         let Command::SshAgent {
@@ -4589,7 +4613,10 @@ mod tests {
         let Command::SshAgent { command, .. } = cli.command else {
             panic!("expected the ssh-agent command");
         };
-        assert!(command.is_empty(), "no command means serve in the foreground");
+        assert!(
+            command.is_empty(),
+            "no command means serve in the foreground"
+        );
     }
 
     #[test]

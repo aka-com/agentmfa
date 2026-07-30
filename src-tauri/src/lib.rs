@@ -243,14 +243,16 @@ fn fatal_startup(app: &tauri::App, e: CoreError) -> ! {
     // Exit through the normal path either way — the dialog already told the
     // user what happened. 0 for the informational already-running case, 1
     // for real failures; neither raises a crash report.
-    std::process::exit(if matches!(
-        e,
-        CoreError::BrokerAlreadyRunning(_) | CoreError::BrokerStateBusy(_)
-    ) {
-        0
-    } else {
-        1
-    });
+    std::process::exit(
+        if matches!(
+            e,
+            CoreError::BrokerAlreadyRunning(_) | CoreError::BrokerStateBusy(_)
+        ) {
+            0
+        } else {
+            1
+        },
+    );
 }
 
 pub fn run() {

@@ -625,7 +625,8 @@ mod tests {
         let (t, _dir) = table();
         let conn = Uuid::new_v4();
         t.set_enabled(conn, false).unwrap();
-        t.set_allowed_tools(conn, Some(vec!["search".into()])).unwrap();
+        t.set_allowed_tools(conn, Some(vec!["search".into()]))
+            .unwrap();
 
         t.set_audit_statements(conn, Some(true)).unwrap();
         assert!(!t.allows(&conn));

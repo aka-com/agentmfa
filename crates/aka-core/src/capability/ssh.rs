@@ -1701,13 +1701,14 @@ async fn handle_endpoint_conn(
     // Close the establishment race with disable/revoke: either teardown sees
     // the registered session, or this post-registration check sees that the
     // endpoint or access disappeared before the protocol is served.
-    let endpoint_still_valid = state
-        .broker
-        .endpoints
-        .get(&ctx.endpoint_id)
-        .is_some_and(|endpoint| {
-            endpoint.connection_id == ctx.connection_id && !endpoint.is_expired()
-        });
+    let endpoint_still_valid =
+        state
+            .broker
+            .endpoints
+            .get(&ctx.endpoint_id)
+            .is_some_and(|endpoint| {
+                endpoint.connection_id == ctx.connection_id && !endpoint.is_expired()
+            });
     if !endpoint_still_valid || !state.broker.access.allows(&ctx.connection_id) {
         session.finish("access_revoked");
         let _ = stream.shutdown().await;
@@ -1954,7 +1955,10 @@ fn authenticate_extension(
         state.broker.audit.append(
             AuditEntry::new(
                 AuditKind::Denied,
-                format!("SSH endpoint authentication refused: {}", state.connection_name),
+                format!(
+                    "SSH endpoint authentication refused: {}",
+                    state.connection_name
+                ),
             )
             .agent(state.agent.clone())
             .connection(state.connection_name.clone())
@@ -2145,17 +2149,16 @@ async fn confirm_host_key(state: &Arc<AgentState>, observed: &Fingerprint) -> Op
 /// was ever asked to sign here. The client sees only a closed socket, so without
 /// this the reason existed nowhere.
 fn audit_refused_connection(state: &AgentState, outcome: &str, detail: &str) {
-    let mut entry =
-        AuditEntry::new(
-            AuditKind::Denied,
-            format!("SSH agent connection refused: {}", state.connection_name),
-        )
-        .agent(state.agent.clone())
-        .connection(state.connection_name.clone())
-        .detail(detail.to_string())
-        .outcome(outcome.to_string())
-        .field("kind", "ssh")
-        .field("reason", outcome);
+    let mut entry = AuditEntry::new(
+        AuditKind::Denied,
+        format!("SSH agent connection refused: {}", state.connection_name),
+    )
+    .agent(state.agent.clone())
+    .connection(state.connection_name.clone())
+    .detail(detail.to_string())
+    .outcome(outcome.to_string())
+    .field("kind", "ssh")
+    .field("reason", outcome);
     if let Some(endpoint_id) = state.endpoint_id {
         entry = entry
             .field("via", "endpoint")
@@ -2401,8 +2404,14 @@ mod tests {
     /// the signer now agree, and both cover exactly the curves compiled in.
     #[test]
     fn ecdsa_keys_on_supported_curves_import_and_sign() {
-        for curve in [Algorithm::Ecdsa { curve: ssh_key::EcdsaCurve::NistP256 },
-                      Algorithm::Ecdsa { curve: ssh_key::EcdsaCurve::NistP384 }] {
+        for curve in [
+            Algorithm::Ecdsa {
+                curve: ssh_key::EcdsaCurve::NistP256,
+            },
+            Algorithm::Ecdsa {
+                curve: ssh_key::EcdsaCurve::NistP384,
+            },
+        ] {
             let key = PrivateKey::random(&mut OsRng, curve.clone()).unwrap();
             let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
 
@@ -2430,7 +2439,9 @@ mod tests {
     fn an_unsignable_curve_is_refused_at_import() {
         let key = PrivateKey::random(
             &mut OsRng,
-            Algorithm::Ecdsa { curve: ssh_key::EcdsaCurve::NistP521 },
+            Algorithm::Ecdsa {
+                curve: ssh_key::EcdsaCurve::NistP521,
+            },
         );
         // The build may not even be able to generate it; either way it must
         // never reach the vault as a usable key.
@@ -2786,10 +2797,7 @@ mod tests {
 
     #[test]
     fn socket_paths_are_rejected_before_bind_at_the_platform_limit() {
-        let too_long = PathBuf::from(format!(
-            "/tmp/{}.sock",
-            "x".repeat(UNIX_SOCKET_PATH_MAX)
-        ));
+        let too_long = PathBuf::from(format!("/tmp/{}.sock", "x".repeat(UNIX_SOCKET_PATH_MAX)));
         let error = validate_unix_socket_path(&too_long).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         let detail = error.to_string();

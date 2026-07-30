@@ -199,10 +199,7 @@ impl Store {
         // load rather than a repeat of the same warning.
         let migrated_pg_ca = migrate_legacy_pg_ca_bundle(&mut state);
         let migrated_oauth_tokens = migrate_oauth_token_secret_ids(&mut state);
-        if migrated_pg_ca
-            || migrated_oauth_tokens
-            || !retired_connections_dropped.is_empty()
-        {
+        if migrated_pg_ca || migrated_oauth_tokens || !retired_connections_dropped.is_empty() {
             integrity.write(&paths.index_file(), &serde_json::to_vec_pretty(&state)?)?;
         }
         Ok(Self {
@@ -948,7 +945,6 @@ impl Store {
         next.settings = Some(settings);
         self.commit(&mut state, next)
     }
-
 }
 
 impl crate::policy::AccessGenerationStore for Store {

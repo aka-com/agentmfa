@@ -1857,10 +1857,7 @@ impl Broker {
                     // the forwarder: an address that looks usable and is not
                     // is worse than no address at all.
                     example: if endpoint.require_auth {
-                        format!(
-                            "mfa ssh-agent {} -- {target}",
-                            shell_word(&connection.name)
-                        )
+                        format!("mfa ssh-agent {} -- {target}", shell_word(&connection.name))
                     } else {
                         format!("SSH_AUTH_SOCK=\"{sock}\" {target}")
                     },
@@ -2069,7 +2066,8 @@ impl Broker {
         }
         let changed = {
             let _gate = self.config_gate.lock().unwrap();
-            self.endpoints.set_require_auth(&endpoint.id, require_auth)?
+            self.endpoints
+                .set_require_auth(&endpoint.id, require_auth)?
         };
         if !changed {
             return Ok(false);
@@ -2089,7 +2087,11 @@ impl Broker {
                 AuditKind::Wired,
                 format!(
                     "SSH endpoint authentication {} for {}",
-                    if require_auth { "required" } else { "no longer required" },
+                    if require_auth {
+                        "required"
+                    } else {
+                        "no longer required"
+                    },
                     connection.name
                 ),
             )
@@ -2616,8 +2618,7 @@ impl Broker {
             .await;
         }
         let connection = self.store.connection_by_id(id)?;
-        let live =
-            crate::mcp::list_tools(&self.store, &self.http_client, &connection).await;
+        let live = crate::mcp::list_tools(&self.store, &self.http_client, &connection).await;
         match live {
             Ok(listing) => {
                 // Remember the last good listing so a later open can still

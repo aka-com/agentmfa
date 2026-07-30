@@ -910,8 +910,7 @@ async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
             if let Some(entry) = h.broker.audit.recent(20).into_iter().find(|entry| {
                 entry.kind == aka_core::audit::AuditKind::Denied
                     && entry.outcome.as_deref() == Some("denied_by_policy")
-                    && entry.fields.get("via").and_then(|value| value.as_str())
-                        == Some("endpoint")
+                    && entry.fields.get("via").and_then(|value| value.as_str()) == Some("endpoint")
             }) {
                 break entry;
             }
@@ -1787,7 +1786,10 @@ async fn a_connection_that_guesses_wrong_stops_answering() {
     let secret = require_endpoint_auth(&h).await;
 
     let mut s = UnixStream::connect(&info.dsn).await.unwrap();
-    assert_eq!(authenticate(&mut s, "guess-one").await, SSH_AGENT_EXTENSION_FAILURE);
+    assert_eq!(
+        authenticate(&mut s, "guess-one").await,
+        SSH_AGENT_EXTENSION_FAILURE
+    );
     // Even the correct secret cannot rescue this connection.
     assert_eq!(
         authenticate(&mut s, &secret).await,

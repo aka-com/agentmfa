@@ -372,10 +372,7 @@ impl ProxyState {
                 broker.config.per_identity_per_min,
                 Duration::from_secs(60),
             ),
-            endpoint_auth_failures: crate::ratelimit::KeyedLimiter::new(
-                5,
-                Duration::from_secs(60),
-            ),
+            endpoint_auth_failures: crate::ratelimit::KeyedLimiter::new(5, Duration::from_secs(60)),
             endpoint_auth_floods: Mutex::new(HashSet::new()),
             cancels: broker.pg_cancels.clone(),
             broker,
@@ -596,8 +593,7 @@ pub async fn start_proxy(broker: Arc<Broker>) -> io::Result<(u16, tokio::task::J
                         break;
                     }
                     tokio::time::sleep(accept_backoff).await;
-                    accept_backoff =
-                        (accept_backoff * 2).min(ACCEPT_ERROR_BACKOFF_MAX);
+                    accept_backoff = (accept_backoff * 2).min(ACCEPT_ERROR_BACKOFF_MAX);
                 }
             }
         }
@@ -3327,12 +3323,9 @@ mod tests {
         assert_eq!(database.reason, "database_mismatch");
         assert!(database.detail.contains("app_prod"), "{}", database.detail);
 
-        let user = startup_identity_mismatch(
-            &connection,
-            &[("user".into(), "postgres".into())],
-            None,
-        )
-        .expect("user mismatch");
+        let user =
+            startup_identity_mismatch(&connection, &[("user".into(), "postgres".into())], None)
+                .expect("user mismatch");
         assert_eq!(user.sqlstate, "28000");
         assert_eq!(user.reason, "user_mismatch");
         assert!(user.detail.contains("\"app\""), "{}", user.detail);
@@ -3576,7 +3569,9 @@ mod tests {
         // listener has — resolves a key the first one minted.
         let elsewhere = registry.clone();
         let (pid, key) = first.key;
-        let found = elsewhere.resolve(pid, key).expect("resolved cross-listener");
+        let found = elsewhere
+            .resolve(pid, key)
+            .expect("resolved cross-listener");
         assert_eq!(found.backend_pid, 4242);
         assert_eq!(found.host, "db.example");
 

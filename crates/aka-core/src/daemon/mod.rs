@@ -1707,7 +1707,10 @@ mod mcp_curation_tests {
             .as_deref(),
             Some("vault://one")
         );
-        assert_eq!(curated_mcp_resource_read(br#"{"method":"resources/list"}"#), None);
+        assert_eq!(
+            curated_mcp_resource_read(br#"{"method":"resources/list"}"#),
+            None
+        );
     }
 
     #[test]
@@ -1984,7 +1987,9 @@ fn approval_for_call(
                 methods.join(", "),
             )
         };
-        return Some(request(summary).maybe_detail((!body.is_empty()).then(|| preview_bytes(body))));
+        return Some(
+            request(summary).maybe_detail((!body.is_empty()).then(|| preview_bytes(body))),
+        );
     }
     if rpc.get("jsonrpc").and_then(|value| value.as_str()) != Some("2.0") {
         return Some(generic());
@@ -2047,7 +2052,12 @@ fn sse_response(body: axum::body::Body) -> Response {
         .header(http::header::CACHE_CONTROL, "no-store, no-transform")
         .header("x-accel-buffering", "no")
         .body(body)
-        .unwrap_or_else(|_| err(StatusCode::INTERNAL_SERVER_ERROR, ErrorReason::BrokerShutdown))
+        .unwrap_or_else(|_| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorReason::BrokerShutdown,
+            )
+        })
 }
 
 /// Shared capability tail: an enabled connection executes immediately

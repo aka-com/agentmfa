@@ -29,11 +29,10 @@ use zeroize::Zeroizing;
 use super::{bearer_token, err_missing_token, request_peer, ApiJson, AppState};
 use crate::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, AuditStatementsBody, ConfirmBody,
-    ConnectionAddBody, EndpointRequireAuthBody,
-    ConnectionConfigPatchBody, ConnectionRenameBody, ConnectionUpdateBody, ConnectionsReorderBody,
-    DraftTestBody, ElicitationResponseBody, ManagementBackend, McpAuthDeliverBody,
-    McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody,
-    ResponseCredentialsBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
+    ConnectionAddBody, ConnectionConfigPatchBody, ConnectionRenameBody, ConnectionUpdateBody,
+    ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody, EndpointRequireAuthBody,
+    ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody,
+    OAuthStartBody, ResponseCredentialsBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
 
 /// Bearer authentication against the management token.

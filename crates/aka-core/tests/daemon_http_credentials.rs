@@ -13,12 +13,12 @@ use std::sync::Arc;
 
 use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
+use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{ConnectionConfig, ConnectionHealth, HealthStatus, OAuthSpec};
 use aka_core::vault::MemoryVault;
-use aka_core::daemon;
 use axum::routing::{any, get, post};
 use axum::Router;
 use rustls_pki_types::PrivateKeyDer;

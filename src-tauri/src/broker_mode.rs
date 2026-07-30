@@ -367,10 +367,7 @@ impl BrokerState {
             RemoteBackend::new(config).with_opener(Arc::new(crate::events::open_consent_url)),
         );
         let epoch = self.begin_transition();
-        backend
-            .whoami()
-            .await
-            .map_err(|error| error.to_string())?;
+        backend.whoami().await.map_err(|error| error.to_string())?;
         // The probe succeeded: persist, swap, and (re)arm the link — unless
         // another transition began while the probe was in flight (the user
         // switched to this Mac, retried, or connected elsewhere); the later

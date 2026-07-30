@@ -623,7 +623,10 @@ async fn identity_settings_and_activity_surface_over_the_manage_api() {
         .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["menu_bar_hides_dock"], true);
-    assert_eq!(body["confirm_ssh_host_keys"], false, "untouched fields stay");
+    assert_eq!(
+        body["confirm_ssh_host_keys"], false,
+        "untouched fields stay"
+    );
 
     // Rotating the agent key works over the manage API and leaves the
     // manage token itself valid (they are independent credentials).

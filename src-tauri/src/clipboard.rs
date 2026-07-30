@@ -151,11 +151,7 @@ fn clear_digest_if_unchanged(app: &AppHandle, expected: PendingClipboard) -> Res
 /// exit hooks run before the application callback, so cleanup at `RunEvent::Exit`
 /// is too late. Keeping the event loop alive also lets Linux clipboard reads
 /// happen on this worker rather than deadlocking the main thread.
-pub fn defer_exit_cleanup(
-    app: &AppHandle,
-    code: Option<i32>,
-    api: &tauri::ExitRequestApi,
-) {
+pub fn defer_exit_cleanup(app: &AppHandle, code: Option<i32>, api: &tauri::ExitRequestApi) {
     let has_pending = PENDING_CLEAR.lock().unwrap().is_some();
     match EXIT_CLEANUP.action(has_pending) {
         ExitCleanupAction::Proceed => {}

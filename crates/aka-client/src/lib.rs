@@ -24,13 +24,11 @@ use aka_api::{
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, AuditStatementsBody, BackendProfile,
-    ConfirmBody,
-    ConnectionAddBody, ConnectionConfigPatch, ConnectionConfigPatchBody, ConnectionRenameBody,
-    ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody,
-    EndpointRequireAuthBody,
-    ManageResult, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody,
-    OAuthReconnectBody, OAuthStartBody, ResponseCredentialsBody, SecretAddBody, SecretEditBody,
-    SettingsPatchBody,
+    ConfirmBody, ConnectionAddBody, ConnectionConfigPatch, ConnectionConfigPatchBody,
+    ConnectionRenameBody, ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody,
+    ElicitationResponseBody, EndpointRequireAuthBody, ManageResult, ManagementBackend,
+    McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody,
+    ResponseCredentialsBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
 use aka_core::store::ConnectionSpec;
 use aka_core::types::SecretValue;

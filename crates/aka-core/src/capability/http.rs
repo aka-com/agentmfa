@@ -1948,9 +1948,7 @@ impl StreamSink {
 /// format survives the proxies a JSON-envelope plane is expected to sit
 /// behind. Bodies ride base64 so an arbitrary upstream byte string cannot
 /// break the framing.
-pub(crate) fn stream_events_body(
-    rx: tokio::sync::mpsc::Receiver<StreamEvent>,
-) -> axum::body::Body {
+pub(crate) fn stream_events_body(rx: tokio::sync::mpsc::Receiver<StreamEvent>) -> axum::body::Body {
     let stream = futures::stream::unfold(rx, |mut rx| async move {
         let event = rx.recv().await?;
         Some((Ok::<_, std::io::Error>(stream_frame(event)), rx))
@@ -1963,7 +1961,10 @@ pub(crate) fn stream_frame(event: StreamEvent) -> bytes::Bytes {
     use base64::Engine as _;
     let frame = match event {
         StreamEvent::Waiting => {
-            format!("event: waiting\ndata: {}\n\n", json!({ "reason": "approval" }))
+            format!(
+                "event: waiting\ndata: {}\n\n",
+                json!({ "reason": "approval" })
+            )
         }
         StreamEvent::Head { status, headers } => format!(
             "event: head\ndata: {}\n\n",
@@ -2591,9 +2592,7 @@ async fn proxy_handler(
             );
         }
     };
-    session
-        .bytes_up
-        .fetch_add(spooled.len(), Ordering::Relaxed);
+    session.bytes_up.fetch_add(spooled.len(), Ordering::Relaxed);
     // These permits bound only concurrently received uploads. Once the body
     // is safely spooled, the registered data-plane session is the independent
     // bound on the upstream leg; holding upload permits through a slow
@@ -2917,8 +2916,8 @@ async fn run_coalesced(
     request_id: String,
     execution: HttpExecution,
 ) -> Result<ExecOutcome, axum::response::Response> {
-    use axum::http::StatusCode;
     use crate::executions::{ExecError, ExecRequest, Execution};
+    use axum::http::StatusCode;
 
     let wire_headers: Vec<(String, String)> = headers
         .iter()
@@ -3028,11 +3027,7 @@ fn outcome_body_len(outcome: &ExecOutcome) -> u64 {
     let Some(body) = outcome.body.get("body").and_then(Value::as_str) else {
         return 0;
     };
-    match outcome
-        .body
-        .get("body_encoding")
-        .and_then(Value::as_str)
-    {
+    match outcome.body.get("body_encoding").and_then(Value::as_str) {
         Some("base64") => {
             use base64::Engine as _;
             base64::engine::general_purpose::STANDARD
@@ -3363,8 +3358,7 @@ mod tests {
             }
             emitted.extend_from_slice(&redactions.apply_to_bytes(&carry));
             assert_eq!(
-                emitted,
-                expected,
+                emitted, expected,
                 "a credential split at byte {split} escaped the stream"
             );
         }

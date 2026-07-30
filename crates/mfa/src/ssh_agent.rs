@@ -286,7 +286,10 @@ mod tests {
     async fn fake_endpoint(
         path: PathBuf,
         reply: u8,
-    ) -> (tokio::task::JoinHandle<Vec<u8>>, tokio::sync::oneshot::Sender<()>) {
+    ) -> (
+        tokio::task::JoinHandle<Vec<u8>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
         let listener = UnixListener::bind(&path).unwrap();
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(async move {
@@ -328,9 +331,13 @@ mod tests {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         let serving = tokio::spawn(async move {
             socket
-                .serve(upstream, Some(Arc::new(Zeroizing::new("s3cret".to_string()))), async {
-                    let _ = done_rx.await;
-                })
+                .serve(
+                    upstream,
+                    Some(Arc::new(Zeroizing::new("s3cret".to_string()))),
+                    async {
+                        let _ = done_rx.await;
+                    },
+                )
                 .await;
         });
 

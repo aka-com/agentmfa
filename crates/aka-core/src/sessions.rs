@@ -375,11 +375,7 @@ impl DataPlane {
     /// deleting a connection has to reach both, or "turn it off" leaves an
     /// authenticated upstream connection running against the credential the
     /// user just revoked.
-    pub fn close_connection_sessions(
-        &self,
-        connection_id: &Uuid,
-        reason: &'static str,
-    ) -> usize {
+    pub fn close_connection_sessions(&self, connection_id: &Uuid, reason: &'static str) -> usize {
         let mut state = self.inner.state.lock().unwrap();
         for ticket in state.tickets.values_mut() {
             if ticket.connection.id != *connection_id {
