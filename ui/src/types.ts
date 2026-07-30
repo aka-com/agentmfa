@@ -255,8 +255,9 @@ export type ApprovalDecision = 'approve_window' | 'approve_all' | 'deny';
 
 /**
  * Which broker this app manages and the state of the link to it. Local
- * mode is always connected (the broker runs in-process); remote mode
- * reflects the manage-API link.
+ * Local mode normally runs in-process, but `connected` still reflects
+ * whether its command surface answered. Remote mode reflects the manage-API
+ * link.
  */
 export interface BrokerProfile {
   mode: 'local' | 'remote';
@@ -500,6 +501,7 @@ export interface CommandMap {
   respond_approval: CommandSpec<{ id: string; decision: ApprovalDecision }, boolean>;
   issue_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
   get_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint | null>;
+  copy_endpoint_text: CommandSpec<{ connectionId: string; format: string }, void>;
   revoke_endpoint: CommandSpec<{ endpointId: string }, boolean>;
   rotate_key: CommandSpec<undefined, void>;
   copy_key: CommandSpec<undefined, void>;

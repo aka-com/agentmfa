@@ -6,6 +6,7 @@ export interface StructuredFormError {
   code?: string;
   field?: string;
   message: string;
+  detail?: string;
 }
 
 function isStructuredFormError(error: unknown): error is StructuredFormError {
@@ -42,6 +43,17 @@ export function formErrorMessage(error: unknown): string {
   if (parsed) return sentenceCase(parsed.message);
   if (error instanceof Error) return sentenceCase(error.message);
   return sentenceCase(String(error || 'Couldn’t save your changes'));
+}
+
+export function formErrorDetail(error: unknown): string | null {
+  const detail = structuredError(error)?.detail;
+  return typeof detail === 'string' && detail ? sentenceCase(detail) : null;
+}
+
+export function formErrorToast(error: unknown): string {
+  const message = formErrorMessage(error);
+  const detail = formErrorDetail(error);
+  return detail ? `${message} — ${detail}` : message;
 }
 
 export function formErrorKind(error: unknown): string | null {

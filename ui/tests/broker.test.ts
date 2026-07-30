@@ -32,15 +32,23 @@ test('the switcher labels local mode and remote hosts', () => {
 
 test('the status dot follows the link state', () => {
   assert.equal(brokerTone(LOCAL_BROKER), 'local');
+  assert.equal(
+    brokerTone({ ...LOCAL_BROKER, connected: false, error: 'broker stopped' }),
+    'error',
+  );
   assert.equal(brokerTone(remote()), 'ok');
   assert.equal(brokerTone(remote({ connected: false })), 'pending');
   assert.equal(brokerTone(remote({ connected: false, error: 'refused' })), 'error');
 });
 
-test('the takeover pane renders exactly when the remote link is unusable', () => {
-  // Local mode and a healthy remote link: normal tabs.
+test('the takeover pane renders exactly when the active broker is unusable', () => {
+  // Healthy local and remote brokers show normal tabs.
   assert.equal(brokerTakeover(LOCAL_BROKER, false), null);
   assert.equal(brokerTakeover(remote(), false), null);
+  assert.equal(
+    brokerTakeover({ ...LOCAL_BROKER, connected: false, error: 'broker stopped' }, false),
+    'error',
+  );
   // The user opened the configuration form (from any mode).
   assert.equal(brokerTakeover(LOCAL_BROKER, true), 'setup');
   assert.equal(brokerTakeover(remote(), true), 'setup');

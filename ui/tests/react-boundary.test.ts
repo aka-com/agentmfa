@@ -264,3 +264,38 @@ test('connection-string credentials are masked with asterisks', async () => {
   assert.match(masker, /\$1\*{6}/);
   assert.doesNotMatch(masker, /•/);
 });
+
+test('endpoint credentials use the native hygienic copy command', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const endpointCopy = app.match(
+    /case 'copy-endpoint-dsn':([\s\S]*?)case 'open-settings'/,
+  )?.[1];
+
+  assert.ok(endpointCopy, 'endpoint copy handlers are present');
+  assert.match(endpointCopy, /invoke\('copy_endpoint_text'/);
+  assert.doesNotMatch(endpointCopy, /navigator\.clipboard\.writeText/);
+  assert.doesNotMatch(app, /data-act="copy-endpoint-dsn"[^>]*data-text=/);
+});
+
+test('failed broker reads stay visible and never trigger empty-vault onboarding', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  assert.match(app, /loadStatus: Record<LoadKey, LoadStatus>/);
+  assert.match(app, /<LoadFailureBand \/>/);
+  assert.match(
+    app,
+    /state\.loadStatus\.connections\.status === 'ready'[\s\S]*?!state\.connections\.length/,
+  );
+});
+
+test('dropdown approval and elicitation dialogs hold the native form lease', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const protectedSheets = app.match(
+    /function isProtectedFormSheet[\s\S]*?\n\}/,
+  )?.[0] ?? '';
+
+  assert.match(protectedSheets, /sheet\?\.kind === 'approval'/);
+  assert.match(protectedSheets, /sheet\?\.kind === 'elicitation'/);
+  assert.match(app, /case 'elicit-open': \{\s*if \(!await holdDropdownFormOpen\(\)\)/);
+  assert.match(app, /case 'approval-open': \{\s*if \(!await holdDropdownFormOpen\(\)\)/);
+});

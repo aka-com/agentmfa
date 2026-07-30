@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  formErrorKind, formErrorMessage, inlineFormError, sentenceCase,
+  formErrorDetail, formErrorKind, formErrorMessage, formErrorToast, inlineFormError, sentenceCase,
 } from '../src/form-errors';
 
 test('routes validation and conflict failures to their fields', () => {
@@ -28,4 +28,19 @@ test('capitalizes complete user-facing error messages', () => {
   assert.equal(sentenceCase('the server did not answer'), 'The server did not answer');
   assert.equal(sentenceCase('Already capitalized'), 'Already capitalized');
   assert.equal(sentenceCase(''), '');
+});
+
+test('preserves structured diagnostic detail for sheets and toasts', () => {
+  const error = {
+    kind: 'system',
+    code: 'keychain_unavailable',
+    message: 'Couldn’t save to macOS Keychain',
+    detail: 'the data protection keychain is unavailable',
+  };
+  assert.equal(formErrorMessage(error), 'Couldn’t save to macOS Keychain');
+  assert.equal(formErrorDetail(error), 'The data protection keychain is unavailable');
+  assert.equal(
+    formErrorToast(error),
+    'Couldn’t save to macOS Keychain — The data protection keychain is unavailable',
+  );
 });

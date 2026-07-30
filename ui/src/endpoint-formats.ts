@@ -14,16 +14,15 @@ export interface EndpointFormat {
   title: string;
   /**
    * True when the copied text embeds the endpoint's retained secret, which
-   * connection summaries never carry — the click handler reads it back from
-   * the broker before building.
+   * connection summaries never carry — the native copy command reads it
+   * back and renders the format without returning the text to this webview.
    */
   needsSecret?: boolean;
   /**
    * True when this format copies the endpoint's *second* address rather than
    * the one the field shows — the Postgres TCP DSN, which only the broker
-   * knows (it carries the pinned port). The handler reads it back and passes
-   * it as `address`; the button is skipped when the endpoint has no second
-   * address.
+   * knows (it carries the pinned port). The native copy command reads it
+   * back; the button is skipped when the endpoint has no second address.
    */
   needsAltAddress?: boolean;
   /** The copyable string, or null when the summary lacks the parts. */

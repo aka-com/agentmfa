@@ -28,7 +28,7 @@ export type BrokerTone = 'local' | 'ok' | 'pending' | 'error';
 
 /** The status dot next to the switcher label. */
 export function brokerTone(profile: BrokerProfile): BrokerTone {
-  if (profile.mode === 'local') return 'local';
+  if (profile.mode === 'local' && profile.connected) return 'local';
   if (profile.connected) return 'ok';
   return profile.error ? 'error' : 'pending';
 }
@@ -38,16 +38,17 @@ export type BrokerTakeover = 'setup' | 'connecting' | 'error' | null;
 /**
  * Which full-pane takeover the main content shows. `setupOpen` is the
  * user-driven "configure a remote broker" form; the others derive from the
- * link state: a remote broker that is not connected owns the whole content
- * pane (and disables the nav) until it connects or the user switches back.
+ * link state: an unavailable broker owns the whole content pane (and
+ * disables the nav) until it responds or the user switches brokers.
  */
 export function brokerTakeover(
   profile: BrokerProfile,
   setupOpen: boolean,
 ): BrokerTakeover {
   if (setupOpen) return 'setup';
-  if (profile.mode !== 'remote' || profile.connected) return null;
-  if (!profile.has_saved_token) return 'setup';
+  if (profile.connected) return null;
+  if (profile.mode === 'local') return 'error';
+  if (profile.mode === 'remote' && !profile.has_saved_token) return 'setup';
   return profile.error ? 'error' : 'connecting';
 }
 

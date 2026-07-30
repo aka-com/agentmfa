@@ -334,6 +334,16 @@
   .dw-side.disabled .dw-nav .nav-item,
   .dw-side.disabled .gear-btn{ opacity: .45; pointer-events: none; }
   .dw-side.disabled .dw-brand{ opacity: .7; }
+  .load-failure{
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin: 10px 18px 0; padding: 9px 11px;
+    border: 1px solid var(--danger-border); border-radius: 8px;
+    background: var(--danger-wash); color: var(--danger-ink);
+    font-size: 12.5px; line-height: 1.4;
+  }
+  .load-failure > div{ display: flex; flex-direction: column; min-width: 0; }
+  .load-failure span{ color: var(--ink-2); overflow-wrap: anywhere; }
+  .dropdown-surface > .load-failure{ margin: 8px 10px 0; }
   /* ---- settings popover (gear, sidebar bottom) ------------------------- */
 /* The sidebar footer pairs the appearance toggle with the settings gear. */
 .dw-settings{ position: relative; display: flex; align-items: center; gap: 2px; }
@@ -924,6 +934,13 @@
   box-shadow: 0 0 0 3px var(--amber-wash);
 }
   .field-warning{ margin-top: 4px; color: var(--amber-ink); font-size: 12.5px; font-weight: 400; }
+  .form-global-error{
+    display: flex; flex-direction: column; gap: 2px; margin-top: 10px;
+    padding: 9px 11px; border: 1px solid var(--danger-border);
+    border-radius: 8px; background: var(--danger-wash); color: var(--danger);
+    font-size: 12.5px; line-height: 1.4;
+  }
+  .form-global-error span{ color: var(--ink-2); overflow-wrap: anywhere; }
   .adv-collapse{ margin: 2px 0 8px; }
   .adv-toggle{
   display: inline-flex; align-items: center; gap: 3px;
@@ -995,7 +1012,7 @@
   }
   .external-doc-link:hover { color: color-mix(in srgb, var(--muted) 75%, var(--ink)); }
   /* ---- settings --------------------------------------------------------- */
-.set-row{ display: flex; align-items: flex-start; gap: 12px; padding: 10px 2px; border-bottom: 1px solid var(--line-soft); }
+  .set-row{ display: flex; align-items: flex-start; gap: 12px; padding: 10px 2px; border-bottom: 1px solid var(--line-soft); }
   .set-txt{ flex: 1; }
   .set-txt .st-title{ font-size: 14px; font-weight: 600; }
   .set-txt .st-sub{ font-size: 12.5px; color: var(--muted); line-height: 1.45; margin-top: 2px; }

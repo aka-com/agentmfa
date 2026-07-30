@@ -1016,6 +1016,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return report;
     }
     case 'open_url': return;
+    case 'copy_endpoint_text': return;
     case 'set_tool_access': {
       const connection = db.connections.find((c) => c.id === args.connectionId);
       if (!connection) return false;

@@ -43,8 +43,10 @@ import {
   isLoopbackHost, parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
-import { ENDPOINT_FORMATS, endpointFormatByKey } from '/src/endpoint-formats';
-import { formErrorKind, formErrorMessage, inlineFormError, sentenceCase } from '/src/form-errors';
+import { ENDPOINT_FORMATS } from '/src/endpoint-formats';
+import {
+  formErrorDetail, formErrorKind, formErrorMessage, formErrorToast, inlineFormError, sentenceCase,
+} from '/src/form-errors';
 import {
   LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
 } from '/src/broker';
@@ -196,6 +198,13 @@ interface ConnMenuPoint {
   y: number;
 }
 
+type LoadKey = 'secrets' | 'connections' | 'identity' | 'sessions' | 'activity' |
+  'settings' | 'elicitations' | 'approvals' | 'requests';
+interface LoadStatus {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  error?: string;
+}
+
 interface AppState {
   tab: Tab;
   /** Which broker the app manages and its link state. */
@@ -224,6 +233,8 @@ interface AppState {
   settings: Settings;
   /** Native request notifications for this desktop shell, not the broker. */
   notificationSettings: NotificationSettings;
+  /** Per-resource read health. Failed reads must never masquerade as empty data. */
+  loadStatus: Record<LoadKey, LoadStatus>;
   reveal: Record<string, string>;
   /** Direct-endpoint fields expanded from their masked one-liner, by connection id. */
   epExpanded: Record<string, boolean>;
@@ -338,6 +349,17 @@ const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   available: true,
   canOpenSystemSettings: false,
 };
+const DEFAULT_LOAD_STATUS = (): Record<LoadKey, LoadStatus> => ({
+  secrets: { status: 'idle' },
+  connections: { status: 'idle' },
+  identity: { status: 'idle' },
+  sessions: { status: 'idle' },
+  activity: { status: 'idle' },
+  settings: { status: 'idle' },
+  elicitations: { status: 'idle' },
+  approvals: { status: 'idle' },
+  requests: { status: 'idle' },
+});
 
 const initialState: AppState = {
   tab: 'connections',
@@ -358,6 +380,7 @@ const initialState: AppState = {
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
   settings: { ...DEFAULT_SETTINGS },
   notificationSettings: { ...DEFAULT_NOTIFICATION_SETTINGS },
+  loadStatus: DEFAULT_LOAD_STATUS(),
   reveal: {},            // secretId -> prefix string (transient)
   epExpanded: {},        // connId -> endpoint field expanded (transient)
   sshSockets: {},        // connId -> issued SSH agent socket path (read back)
@@ -447,6 +470,7 @@ function clearBrokerOwnedState(): void {
   state.approvalAnswering = null;
   state.agentSetupInstructions = '';
   state.settings = { ...DEFAULT_SETTINGS };
+  state.loadStatus = DEFAULT_LOAD_STATUS();
   state.reveal = {};
   state.epExpanded = {};
   state.sshSockets = {};
@@ -531,7 +555,15 @@ function resetScroll(): void {
   }
 }
 
+function clearSensitivePresentation(): boolean {
+  const changed = Object.keys(state.reveal).length > 0 || Object.keys(state.epExpanded).length > 0;
+  state.reveal = {};
+  state.epExpanded = {};
+  return changed;
+}
+
 function showRequestInbox(): void {
+  clearSensitivePresentation();
   state.tab = 'inbox';
   state.confirm = null;
   state.menuOpen = false;
@@ -569,11 +601,18 @@ const overlays = (): HTMLElement => {
 /* ------------------------------ data loading ----------------------------- */
 type RefreshTarget = 'all' | 'secrets' | 'connections' | 'identity' | 'sessions' |
   'activity' | 'settings' | 'elicitations' | 'approvals' | 'requests';
-type LoadKey = 'secrets' | 'connections' | 'sessions' | 'activity' |
-  'elicitations' | 'approvals' | 'requests';
 
-async function refresh(which: RefreshTarget = 'all'): Promise<void> {
-  const jobs: Promise<void>[] = [];
+function markLocalBrokerUnavailable(): void {
+  if (state.broker.mode !== 'local') return;
+  setBrokerProfile({
+    ...state.broker,
+    connected: false,
+    error: 'The local broker did not answer. Your stored data has not been replaced or cleared.',
+  });
+}
+
+async function refresh(which: RefreshTarget = 'all'): Promise<boolean> {
+  const jobs: Promise<boolean>[] = [];
   if (which === 'all' || which === 'secrets') jobs.push(load('secrets', 'list_secrets'));
   if (which === 'all' || which === 'connections') jobs.push(load('connections', 'list_connections'));
   if (which === 'all' || which === 'identity') jobs.push(loadIdentity());
@@ -585,19 +624,24 @@ async function refresh(which: RefreshTarget = 'all'): Promise<void> {
     jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT }));
   }
   if (which === 'all' || which === 'settings') jobs.push(loadSettings());
-  await Promise.all(jobs);
+  const succeeded = (await Promise.all(jobs)).every(Boolean);
+  if (which === 'all' && succeeded && state.broker.mode === 'local' && !state.broker.connected) {
+    setBrokerProfile({ ...state.broker, connected: true, error: null });
+  }
   render();
+  return succeeded;
 }
 async function load<K extends CommandName>(
   key: LoadKey,
   cmd: K,
   args?: CommandArgs<K>,
-): Promise<void> {
+): Promise<boolean> {
   const broker = state.broker;
   const epoch = brokerEpoch;
+  state.loadStatus[key] = { status: 'loading' };
   try {
     const result: unknown = await refetchBrokerQuery(broker, cmd, args);
-    if (!brokerEpochIsCurrent(epoch)) return;
+    if (!brokerEpochIsCurrent(epoch)) return false;
     switch (key) {
       case 'secrets': state.secrets = result as SecretSummary[]; break;
       case 'connections':
@@ -616,8 +660,14 @@ async function load<K extends CommandName>(
       case 'approvals': state.approvals = anchorExpiry(result as Approval[]); break;
       case 'requests': state.requests = anchorExpiry(result as RequestRecord[]); break;
     }
+    state.loadStatus[key] = { status: 'ready' };
+    return true;
   } catch (error) {
     console.error(cmd, error);
+    if (!brokerEpochIsCurrent(epoch)) return false;
+    state.loadStatus[key] = { status: 'error', error: errorMessage(error) };
+    markLocalBrokerUnavailable();
+    return false;
   }
 }
 /**
@@ -677,14 +727,23 @@ async function sshEndpointSocket(conn: ConnectionSummary): Promise<string | null
     return null;
   }
 }
-async function loadSettings(): Promise<void> {
+async function loadSettings(): Promise<boolean> {
   const broker = state.broker;
   const epoch = brokerEpoch;
+  state.loadStatus.settings = { status: 'loading' };
   try {
     const settings = await refetchBrokerQuery(broker, 'get_settings');
-    if (brokerEpochIsCurrent(epoch)) state.settings = settings;
+    if (!brokerEpochIsCurrent(epoch)) return false;
+    state.settings = settings;
+    state.loadStatus.settings = { status: 'ready' };
+    return true;
+  } catch (error) {
+    console.error(error);
+    if (!brokerEpochIsCurrent(epoch)) return false;
+    state.loadStatus.settings = { status: 'error', error: errorMessage(error) };
+    markLocalBrokerUnavailable();
+    return false;
   }
-  catch (e) { console.error(e); }
 }
 async function loadNotificationSettings(): Promise<void> {
   const epoch = notificationSettingsEpoch;
@@ -698,14 +757,23 @@ async function loadLocalUsername(): Promise<void> {
   try { state.localUsername = await invoke('get_local_username'); }
   catch (e) { console.error('get_local_username', e); }
 }
-async function loadIdentity(): Promise<void> {
+async function loadIdentity(): Promise<boolean> {
   const broker = state.broker;
   const epoch = brokerEpoch;
+  state.loadStatus.identity = { status: 'loading' };
   try {
     const identity = await refetchBrokerQuery(broker, 'get_identity');
-    if (brokerEpochIsCurrent(epoch)) state.identity = identity;
+    if (!brokerEpochIsCurrent(epoch)) return false;
+    state.identity = identity;
+    state.loadStatus.identity = { status: 'ready' };
+    return true;
+  } catch (error) {
+    console.error('get_identity', error);
+    if (!brokerEpochIsCurrent(epoch)) return false;
+    state.loadStatus.identity = { status: 'error', error: errorMessage(error) };
+    markLocalBrokerUnavailable();
+    return false;
   }
-  catch (e) { console.error('get_identity', e); }
 }
 async function loadAgentSetup(): Promise<void> {
   const broker = state.broker;
@@ -1181,7 +1249,7 @@ function breakableAddress(address: string): string {
 // a hairline footer that owns issue → live badge → reissue/revoke. The
 // SSH renders the socket assignment together with its configured `ssh`
 // invocation so the copied value connects immediately.
-function endpointStripHTML(c: ConnectionSummary, runnableSsh = false, withFormats = false): string {
+function endpointStripHTML(c: ConnectionSummary, withFormats = false): string {
   if (!c.agent_access.enabled || !ENDPOINTABLE[c.type]) return '';
   const endpoint = c.agent_access.endpoint ?? null;
   if (!endpoint) {
@@ -1197,10 +1265,10 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false, withFormat
   //
   // In the detail pane the field starts as a masked one-liner (credential
   // replaced with asterisks, address ellipsized) — Copy still carries the complete DSN;
-  // clicking the line expands it. The connect guides keep the full address:
-  // there it is the deliverable being read, not shoulder-surfable chrome.
+  // clicking the line expands it. Losing focus or leaving the tab collapses
+  // the full capability again.
   const copied = state.copied === `ep:${c.id}`;
-  const expanded = runnableSsh || Boolean(state.epExpanded[c.id]);
+  const expanded = Boolean(state.epExpanded[c.id]);
   const endpointAddress = directEndpointAddress(c.type, endpoint, state.sshSockets[c.id]);
   const endpointText = endpointAddress
     ? c.type === 'ssh'
@@ -1213,7 +1281,7 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false, withFormat
   const copyBtn = endpointText
     ? `<button class="btn sm ep-copy" title="${copyTitle}"
         aria-label="${copyTitle} for ${escAttr(c.name)}" data-act="copy-endpoint-dsn"
-        data-conn="${c.id}" data-text="${escAttr(endpointText)}">${
+        data-conn="${c.id}">${
         copied ? `${ICONS.check} Copied` : `${ICONS.copy} Copy`}</button>`
     : '';
   const address = endpointText
@@ -1241,9 +1309,9 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false, withFormat
 
 // One button per common client rendering of the issued endpoint (psql,
 // libpq keywords, .env, ssh config, …). Each copies a string derived from
-// the same summary + address the field shows; formats that embed the
-// retained secret (HTTP) read it back from the broker at click time, so
-// none of these put a secret in more DOM attributes than the field does.
+// the same summary + address the field shows. The click invokes a native
+// command that reads the retained endpoint and renders the selected format
+// without putting the credential-bearing copy text in a DOM attribute.
 function endpointFormatRowHTML(c: ConnectionSummary, address: string): string {
   const buttons = ENDPOINT_FORMATS[c.type]
     .filter(
@@ -1676,7 +1744,7 @@ function connDetailHTML(c: ConnectionSummary): string {
   })();
   const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
     ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>${connectTitle}</span></div>
-        ${endpointStripHTML(c, false, true)}
+        ${endpointStripHTML(c, true)}
       </div>`
     : '';
   // MCP tools combine their filter and direct endpoint into one section:
@@ -2406,7 +2474,7 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
       const lead = conn.type === 'pg'
         ? 'Tell your agent to connect directly to this database.'
         : 'Tell your agent to connect directly to this server.';
-      return `<p>${lead}</p>${endpointStripHTML(conn, true)}`;
+      return `<p>${lead}</p>${endpointStripHTML(conn)}`;
     }
   }
 
@@ -2668,16 +2736,18 @@ function BrokerPane({ kind }: { kind: 'setup' | 'connecting' | 'error' }): React
       </div>
     );
   }
+  const local = state.broker.mode === 'local';
   return (
     <div className="broker-pane broker-pane-error" role="alert">
       <div className="bp-icon bp-icon-error"><Icon markup={ICONS.circleX} /></div>
-      <h2>Can’t reach the remote broker</h2>
-      <p className="bp-lead"><code>{state.broker.url ?? ''}</code></p>
+      <h2>{local ? 'The local broker isn’t responding' : 'Can’t reach the remote broker'}</h2>
+      {!local && <p className="bp-lead"><code>{state.broker.url ?? ''}</code></p>}
       {state.broker.error && <p className="bp-detail">{state.broker.error}</p>}
       <div className="bp-actions">
-        <button className="btn primary" data-act="broker-retry">Retry</button>
-        <button className="btn" data-act="broker-edit">Edit connection…</button>
-        <button className="btn ghost" data-act="broker-pick-local">Use this Mac</button>
+        <button className="btn primary" data-act={local ? 'local-broker-retry' : 'broker-retry'}>
+          Retry</button>
+        {!local && <button className="btn" data-act="broker-edit">Edit connection…</button>}
+        {!local && <button className="btn ghost" data-act="broker-pick-local">Use this Mac</button>}
       </div>
     </div>
   );
@@ -2700,6 +2770,30 @@ function ThemeButton({ className }: { className: string }): ReactNode {
     <button className={className} data-act="toggle-theme" title={label} aria-label={label}>
       <Icon markup={dark ? ICONS.sun : ICONS.moon} />
     </button>
+  );
+}
+
+function viewLoadKeys(tab: Tab): LoadKey[] {
+  switch (tab) {
+    case 'start': return ['connections', 'identity', 'settings'];
+    case 'connections': return ['connections'];
+    case 'secrets': return ['secrets'];
+    case 'activity': return ['activity', 'sessions'];
+    case 'inbox': return ['approvals', 'elicitations', 'requests'];
+  }
+}
+
+function LoadFailureBand(): ReactNode {
+  const failures = viewLoadKeys(state.tab)
+    .map((key) => [key, state.loadStatus[key]] as const)
+    .filter(([, status]) => status.status === 'error');
+  if (!failures.length) return null;
+  const detail = failures.map(([, status]) => status.error).filter(Boolean).join(' · ');
+  return (
+    <div className="load-failure" role="alert">
+      <div><b>Couldn’t load this view.</b>{detail ? <span>{detail}</span> : null}</div>
+      <button className="btn sm" data-act="retry-view-loads">Retry</button>
+    </div>
   );
 }
 
@@ -2796,6 +2890,7 @@ function MainWindow(): ReactNode {
                     </div>
                   )}
                   <SafeMarkup markup={state.tab === 'start' ? '' : globalSectionsHTML()} />
+                  <LoadFailureBand />
                   <div className="content"><TabContent /></div>
                 </>}
           </div>
@@ -2850,6 +2945,7 @@ function DropdownWindow(): ReactNode {
           ))}
         </div>
         <SafeMarkup markup={state.tab === 'start' ? '' : globalSectionsHTML()} />
+        <LoadFailureBand />
         <div className="content dd-content"><TabContent /></div>
       </div>
       <><Sheets /><SafeMarkup markup={endpointConfirmHTML() + deleteConnConfirmHTML()} /></>
@@ -3416,6 +3512,17 @@ function FieldError({ k }: { k: string }): ReactNode {
   return state.sheetErrors[k] ? <div className="field-error">{state.sheetErrors[k]}</div> : null;
 }
 
+function FormGlobalError(): ReactNode {
+  const message = state.sheetErrors._global;
+  if (!message) return null;
+  return (
+    <div className="form-global-error" role="alert">
+      <b>{message}</b>
+      {state.sheetErrors._detail ? <span>{state.sheetErrors._detail}</span> : null}
+    </div>
+  );
+}
+
 /** Any add-form edit makes the last failed connection test stale. */
 function disarmDraftTestOverride(): void {
   if (state.sheet?.kind === 'add-conn' && state.draftTestOverride) {
@@ -3429,6 +3536,8 @@ function disarmDraftTestOverride(): void {
 function setDraftField(key: keyof ConnectionDraft & string, errKey: string, value: string): void {
   (state.draft as Record<string, unknown>)[key] = value;
   if (state.sheetErrors[errKey]) delete state.sheetErrors[errKey];
+  delete state.sheetErrors._global;
+  delete state.sheetErrors._detail;
   disarmDraftTestOverride();
   render();
 }
@@ -3455,6 +3564,7 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
             onChange={(e) => setDraftField('value', 'value', e.currentTarget.value)} />
           <FieldError k="value" />
         </div>
+        <FormGlobalError />
         <div className="sheet-actions">
           <button className="btn" data-act="sheet-cancel">Cancel</button>
           <button className="btn primary" data-act="save-secret">Save</button>
@@ -4166,6 +4276,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       <div className="sheet wide">
         <h3>{title}</h3>
         {fields}
+        <FormGlobalError />
         {draftTest}
         <div className="sheet-actions">
           {editing && conn && (
@@ -4482,7 +4593,16 @@ function showFormError(error: unknown): void {
   const inline = inlineFormError(error);
   if (!inline) {
     const prefix = formErrorKind(error) === 'cancelled' ? '' : '⚠ ';
-    toast(prefix + formErrorMessage(error));
+    const detail = formErrorDetail(error);
+    if (state.sheet) {
+      state.sheetErrors = {
+        ...state.sheetErrors,
+        _global: formErrorMessage(error),
+        _detail: detail ?? '',
+      };
+      render();
+    }
+    toast(prefix + formErrorToast(error));
     return;
   }
   state.sheetErrors = { ...state.sheetErrors, [inline.field]: inline.message };
@@ -4507,7 +4627,7 @@ function selectEditSecretMask() {
 
 /* --------------------------------- actions ------------------------------- */
 function errorMessage(error: unknown): string {
-  return sentenceCase(error instanceof Error ? error.message : String(error));
+  return formErrorToast(error);
 }
 
 async function run(fn: () => Promise<unknown>): Promise<boolean> {
@@ -4565,7 +4685,8 @@ async function answerApproval(
 function isProtectedFormSheet(sheet: SheetState | null = state.sheet): boolean {
   return sheet?.kind === 'add-secret' || sheet?.kind === 'edit-secret'
     || sheet?.kind === 'add-conn' || sheet?.kind === 'edit-conn'
-    || sheet?.kind === 'mcp-auth';
+    || sheet?.kind === 'mcp-auth' || sheet?.kind === 'approval'
+    || sheet?.kind === 'elicitation';
 }
 
 // Test a connection broker-side and pin the result to its catalog row.
@@ -5028,7 +5149,7 @@ async function saveConn(): Promise<void> {
           try {
             const info = await invoke('issue_endpoint', { connectionId: saved.id });
             if (!brokerEpochIsCurrent(epoch)) return;
-            setSheet({ kind: 'endpoint-issued', endpoint: info });
+            setSheet({ kind: 'endpoint-issued', id: saved.id, endpoint: info });
             await refresh('all');
           } catch {
             // The row still offers "Issue direct endpoint…" as the fallback.
@@ -5127,6 +5248,9 @@ function positionConnContextMenu(): void {
 // broker last saw unhealthy, so a fixed credential clears its badge
 // without a manual test. Throttled so window-switching stays free.
 let lastFocusRecheck = 0;
+window.addEventListener('blur', () => {
+  if (clearSensitivePresentation()) render();
+});
 window.addEventListener('focus', () => {
   if (Date.now() - lastFocusRecheck < 60_000) return;
   lastFocusRecheck = Date.now();
@@ -5199,6 +5323,7 @@ document.addEventListener('click', async (e) => {
   switch (act) {
     case 'tab': {
       const tab = btn.dataset.tab;
+      clearSensitivePresentation();
       if (tab && TABS.includes(tab as Tab)) state.tab = tab as Tab;
       state.confirm = null;
       state.agentMenuOpen = null;
@@ -5212,6 +5337,9 @@ document.addEventListener('click', async (e) => {
       resetScroll();
       break;
     }
+    case 'retry-view-loads':
+      await refresh('all');
+      break;
     case 'open-inbox':
       showRequestInbox();
       break;
@@ -5228,6 +5356,14 @@ document.addEventListener('click', async (e) => {
         toast('Managing this Mac’s broker');
       } catch (error) {
         toast(`Couldn’t start the local broker: ${String(error)}`);
+      }
+      render();
+      break;
+    }
+    case 'local-broker-retry': {
+      await refresh('all');
+      if (state.broker.connected) {
+        try { await loadAgentSetup(); } catch { /* view remains usable */ }
       }
       render();
       break;
@@ -5313,7 +5449,10 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     case 'copy-key':
-      if (await run(() => invoke('copy_key'))) flashCopied('shared-key');
+      if (await run(() => invoke('copy_key'))) {
+        toast('📋 Copied for 30s');
+        flashCopied('shared-key');
+      }
       break;
     case 'toggle-agent-menu':
       state.agentMenuOpen = state.agentMenuOpen === id ? null : id;
@@ -5333,7 +5472,7 @@ document.addEventListener('click', async (e) => {
       try {
         const info = await invoke('issue_endpoint', { connectionId });
         if (!brokerEpochIsCurrent(epoch)) break;
-        setSheet({ kind: 'endpoint-issued', endpoint: info });
+        setSheet({ kind: 'endpoint-issued', id: connectionId, endpoint: info });
         await refresh('all');
       } catch (error) {
         if (!brokerEpochIsCurrent(epoch)) break;
@@ -5373,73 +5512,35 @@ document.addEventListener('click', async (e) => {
     }
     case 'copy-endpoint-dsn': {
       const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
-      const sock = conn?.type === 'ssh' ? await sshEndpointSocket(conn) : null;
-      const address = conn
-        ? directEndpointAddress(conn.type, conn.agent_access.endpoint, sock)
-        : null;
-      if (conn && address) {
-        try {
-          await navigator.clipboard.writeText(
-            btn.dataset.text
-              ?? (conn.type === 'ssh' ? sshDirectCommand(address, conn) : address),
-          );
-          flashCopied(`ep:${conn.id}`);
-        } catch {
-          toast('⚠ Copy failed — select the text and copy it manually');
-        }
+      if (conn && await run(() => invoke('copy_endpoint_text', {
+        connectionId: conn.id,
+        format: 'direct',
+      }))) {
+        toast('📋 Copied for 30s');
+        flashCopied(`ep:${conn.id}`);
       }
       break;
     }
     case 'copy-endpoint-format': {
       const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
-      const format = conn ? endpointFormatByKey(conn.type, btn.dataset.format ?? '') : null;
-      const sock = conn?.type === 'ssh' ? await sshEndpointSocket(conn) : null;
-      const address = conn
-        ? directEndpointAddress(conn.type, conn.agent_access.endpoint, sock)
-        : null;
-      if (!conn || !format || !address) break;
-      // HTTP formats embed the retained endpoint secret, which summaries
-      // never carry — read it back from the broker (no gate: it re-reads
-      // already-surfaced state). A failed read copies the placeholder form.
-      let secret: string | null = null;
-      let built = address;
-      if (format.needsSecret || format.needsAltAddress) {
-        let issued: Awaited<ReturnType<typeof invoke<'get_endpoint'>>> = null;
-        try {
-          issued = await invoke('get_endpoint', { connectionId: conn.id });
-        } catch { /* placeholder */ }
-        secret = issued?.secret || null;
-        if (format.needsAltAddress) {
-          // No second address means nothing to copy; the button is only shown
-          // when the broker reported one.
-          if (!issued?.tcp_dsn) {
-            toast('⚠ This endpoint has no TCP address');
-            break;
-          }
-          built = issued.tcp_dsn;
-        }
-      }
-      const text = format.build(conn, built, secret);
-      if (!text) break;
-      try {
-        await navigator.clipboard.writeText(text);
-        flashCopied(`epf:${conn.id}:${format.key}`);
-      } catch {
-        toast('⚠ Copy failed — select the text and copy it manually');
+      const format = btn.dataset.format ?? '';
+      if (conn && format && await run(() => invoke('copy_endpoint_text', {
+        connectionId: conn.id,
+        format,
+      }))) {
+        toast('📋 Copied for 30s');
+        flashCopied(`epf:${conn.id}:${format}`);
       }
       break;
     }
     case 'copy-endpoint': {
-      const info = state.sheet?.endpoint;
-      const key = btn.dataset.field;
-      if (info) {
-        const text = key === 'secret' ? info.secret : key === 'dsn' ? info.dsn : info.example;
-        try {
-          await navigator.clipboard.writeText(text);
-          toast('📋 Copied');
-        } catch {
-          toast('⚠ Copy failed — select the text and copy it manually');
-        }
+      const connectionId = state.sheet?.id;
+      const format = btn.dataset.field ?? '';
+      if (connectionId && format && await run(() => invoke('copy_endpoint_text', {
+        connectionId,
+        format,
+      }))) {
+        toast('📋 Copied for 30s');
       }
       break;
     }
@@ -5964,6 +6065,7 @@ document.addEventListener('click', async (e) => {
     // cleared again by closeSheet so answers (possibly secrets) don't
     // outlive the dialog.
     case 'elicit-open': {
+      if (!await holdDropdownFormOpen()) break;
       state.elicitValues = {};
       const request = state.elicitations.find((r) => r.id === id);
       // A dropdown shows its first choice selected; seed that as the value so
@@ -6007,6 +6109,7 @@ document.addEventListener('click', async (e) => {
     // the broker's native authentication on the way through, because it
     // turns the tool's switch off.
     case 'approval-open': {
+      if (!await holdDropdownFormOpen()) break;
       setSheet({ kind: 'approval', id });
       render();
       // The triggering queue row disappears behind a modal. Put keyboard
@@ -6386,7 +6489,16 @@ async function boot() {
     if (booted) render();
   });
   // Which broker this app manages decides everything else about boot.
-  try { setBrokerProfile(await invoke('get_broker_profile')); } catch (e) { console.error(e); }
+  try {
+    setBrokerProfile(await invoke('get_broker_profile'));
+  } catch (error) {
+    console.error('get_broker_profile', error);
+    setBrokerProfile({
+      ...LOCAL_BROKER,
+      connected: false,
+      error: `Couldn’t read local broker status: ${errorMessage(error)}`,
+    });
+  }
   // Choose the landing tab before the first paint: nothing configured yet
   // means the walkthrough is the useful screen.
   await Promise.all([
@@ -6395,7 +6507,9 @@ async function boot() {
     load('connections', 'list_connections'),
     loadIdentity(),
   ]);
-  if (mode !== 'dropdown' && !state.connections.length) {
+  if (mode !== 'dropdown'
+      && state.loadStatus.connections.status === 'ready'
+      && !state.connections.length) {
     state.tab = 'start';
   }
   // The landing tab is decided; the next render is the first real paint.

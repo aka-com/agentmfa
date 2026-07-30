@@ -45,6 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize = "1"
 glob = "0.3"
 shell-words = "1"
+url = "2"
 # "encryption" so a passphrase-protected identity file can be decrypted once,
 # at import, instead of being refused (the vault seals the cleartext form).
 ssh-key = { version = "0.6", features = ["encryption"] }

@@ -176,6 +176,12 @@ impl FormError {
                 "That tool name is already in use",
             )
             .with_kind("conflict"),
+            ManageError::ConnectionTargetTaken { name } => Self::validation(
+                "connection_target_taken",
+                "name",
+                format!("An equivalent target is already saved as {name}"),
+            )
+            .with_kind("conflict"),
             ManageError::InvalidSecretName { .. } => {
                 let field = match context {
                     FormContext::Secret => "name",
@@ -273,6 +279,18 @@ impl FormError {
                 "connection_not_found",
                 "This tool was removed elsewhere",
                 None,
+            ),
+            ManageError::EndpointRequiresWiring => Self::global(
+                "conflict",
+                "endpoint_requires_wiring",
+                "Enable this tool for agents before issuing a direct endpoint",
+                None,
+            ),
+            ManageError::EndpointLimit { max } => Self::global(
+                "conflict",
+                "endpoint_limit",
+                format!("This broker already has its limit of {max} direct endpoints"),
+                Some("Revoke an existing endpoint, then try again.".into()),
             ),
             ManageError::ApprovalConnectionChanged => Self::global(
                 "conflict",
@@ -1296,6 +1314,232 @@ pub async fn get_endpoint(
         .map_err(|e| e.to_string())
 }
 
+/// Copy a direct-endpoint rendering without sending the credential-bearing
+/// text through the webview. `format` is a small, closed vocabulary shared
+/// with the UI's copy buttons.
+#[tauri::command]
+pub async fn copy_endpoint_text(
+    state: State<'_, AppState>,
+    connection_id: String,
+    format: String,
+) -> CmdResult<()> {
+    let connection_id = parse_id(&connection_id)?;
+    let backend = state.brokers.backend();
+    let endpoint = backend
+        .get_endpoint(connection_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "this tool has no direct endpoint".to_string())?;
+    let connection = backend
+        .list_connections()
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|connection| connection.id == connection_id.to_string())
+        .ok_or_else(|| "this tool no longer exists".to_string())?;
+    let text = endpoint_copy_text(&connection, &endpoint, &format)?;
+    crate::clipboard::copy_with_hygiene(Zeroizing::new(text))
+}
+
+fn endpoint_copy_text(
+    connection: &aka_api::ConnectionDto,
+    endpoint: &IssuedEndpointDto,
+    format: &str,
+) -> CmdResult<String> {
+    match (endpoint.kind.as_str(), format) {
+        ("pg", "direct" | "dsn") => Ok(endpoint.dsn.clone()),
+        ("pg", "example" | "env") => Ok(format!("DATABASE_URL=\"{}\"", endpoint.dsn)),
+        ("pg", "psql") => Ok(format!("psql {}", shell_quoted(&endpoint.dsn))),
+        ("pg", "libpq") => pg_libpq_keywords(&endpoint.dsn)
+            .ok_or_else(|| "could not render this Postgres endpoint".into()),
+        ("pg", "tcp") => endpoint
+            .tcp_dsn
+            .clone()
+            .ok_or_else(|| "this endpoint has no TCP address".into()),
+        ("ssh", "direct" | "example" | "ssh") => Ok(endpoint.example.clone()),
+        ("ssh", "dsn") => Ok(endpoint.dsn.clone()),
+        ("ssh", "scp") => Ok(ssh_scp_command(connection, &endpoint.dsn)),
+        ("ssh", "ssh-config") => ssh_config_block(connection, &endpoint.dsn)
+            .ok_or_else(|| "this SSH tool has no usable destination".into()),
+        ("api", "direct" | "dsn") => Ok(endpoint.dsn.clone()),
+        ("api", "secret") => Ok(endpoint.secret.clone()),
+        ("api", "example" | "curl") => Ok(format!(
+            "curl -H \"Authorization: Bearer {}\" {}/",
+            endpoint.secret,
+            endpoint.dsn.trim_end_matches('/')
+        )),
+        ("api", "env") => Ok(format!(
+            "API_BASE_URL={}\nAPI_TOKEN={}",
+            endpoint.dsn, endpoint.secret
+        )),
+        (_, "secret") => Ok(endpoint.secret.clone()),
+        (_, _) => Err("unknown endpoint copy format".into()),
+    }
+}
+
+fn shell_quoted(value: &str) -> String {
+    let escaped = value.chars().fold(String::new(), |mut escaped, character| {
+        if matches!(character, '\\' | '"' | '`' | '$') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+        escaped
+    });
+    format!("\"{escaped}\"")
+}
+
+fn ssh_destination(connection: &aka_api::ConnectionDto) -> Option<String> {
+    connection
+        .destination
+        .as_deref()
+        .map(str::trim)
+        .filter(|destination| !destination.is_empty())
+        .map(str::to_string)
+        .or_else(|| match (&connection.user, &connection.host) {
+            (Some(user), Some(host)) => Some(format!("{user}@{host}")),
+            _ if !connection.target.trim().is_empty() => Some(connection.target.clone()),
+            _ => None,
+        })
+}
+
+fn ssh_flags() -> String {
+    aka_core::capability::ssh::SSH_BROKER_OPTIONS
+        .iter()
+        .map(|option| format!("-o {option}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn ssh_scp_command(connection: &aka_api::ConnectionDto, socket: &str) -> String {
+    let destination = ssh_destination(connection).unwrap_or_else(|| connection.target.clone());
+    let port = connection
+        .port
+        .filter(|port| *port != 22)
+        .map(|port| format!(" -P {port}"))
+        .unwrap_or_default();
+    format!(
+        "SSH_AUTH_SOCK={} scp{port} {} <file> {destination}:",
+        shell_quoted(socket),
+        ssh_flags()
+    )
+}
+
+fn ssh_config_block(connection: &aka_api::ConnectionDto, socket: &str) -> Option<String> {
+    let destination;
+    let (user, host) = if let Some(host) = connection.host.as_deref() {
+        (connection.user.as_deref(), host)
+    } else {
+        destination = ssh_destination(connection)?;
+        destination
+            .rsplit_once('@')
+            .map_or((None, destination.as_str()), |(user, host)| {
+                (Some(user), host)
+            })
+    };
+    let alias = connection
+        .name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
+    let mut lines = vec![format!("Host {alias}"), format!("  HostName {host}")];
+    if let Some(port) = connection.port.filter(|port| *port != 22) {
+        lines.push(format!("  Port {port}"));
+    }
+    if let Some(user) = user {
+        lines.push(format!("  User {user}"));
+    }
+    lines.push(format!("  IdentityAgent {}", shell_quoted(socket)));
+    lines.extend(
+        aka_core::capability::ssh::SSH_BROKER_OPTIONS
+            .iter()
+            .map(|option| {
+                let (key, value) = option.split_once('=').unwrap_or((option, ""));
+                format!("  {key} {value}")
+            }),
+    );
+    Some(lines.join("\n"))
+}
+
+fn pg_libpq_keywords(dsn: &str) -> Option<String> {
+    let body = dsn
+        .strip_prefix("postgresql://")
+        .or_else(|| dsn.strip_prefix("postgres://"))?;
+    let (body, raw_query) = body.split_once('?').unwrap_or((body, ""));
+    let (auth, target) = body.rsplit_once('@').unwrap_or(("", body));
+    let (authority, dbname) = target.split_once('/').unwrap_or((target, ""));
+    let (user, password) = auth.split_once(':').unwrap_or((auth, ""));
+    let (authority_host, authority_port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, suffix) = bracketed.split_once(']')?;
+        (host, suffix.strip_prefix(':').unwrap_or(""))
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        (host, port)
+    } else {
+        (authority, "")
+    };
+    let query = url::form_urlencoded::parse(raw_query.as_bytes()).collect::<Vec<_>>();
+    let query_value = |wanted: &str| {
+        query
+            .iter()
+            .find(|(key, _)| key == wanted)
+            .map(|(_, value)| value.to_string())
+    };
+    let mut pairs = Vec::<(String, String)>::new();
+    let mut put = |key: &str, value: Option<String>| {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            pairs.push((key.to_string(), value));
+        }
+    };
+    put(
+        "host",
+        query_value("host").or_else(|| Some(authority_host.to_string())),
+    );
+    put(
+        "port",
+        query_value("port").or_else(|| Some(authority_port.to_string())),
+    );
+    put("dbname", Some(decode_url_component(dbname)));
+    put("user", Some(decode_url_component(user)));
+    put("password", Some(decode_url_component(password)));
+    for (key, value) in query {
+        if key != "host" && key != "port" {
+            put(&key, Some(value.into_owned()));
+        }
+    }
+    Some(
+        pairs
+            .into_iter()
+            .map(|(key, value)| format!("{key}={}", libpq_value(&value)))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn decode_url_component(value: &str) -> String {
+    let encoded = format!("value={value}");
+    url::form_urlencoded::parse(encoded.as_bytes())
+        .next()
+        .map(|(_, value)| value.into_owned())
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn libpq_value(value: &str) -> String {
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || matches!(character, '\'' | '\\'))
+    {
+        let escaped = value.chars().fold(String::new(), |mut escaped, character| {
+            if matches!(character, '\\' | '\'') {
+                escaped.push('\\');
+            }
+            escaped.push(character);
+            escaped
+        });
+        format!("'{escaped}'")
+    } else {
+        value.to_string()
+    }
+}
+
 /// Revoke a direct endpoint: stop its listener and close its live sessions.
 #[tauri::command]
 pub async fn revoke_endpoint(state: State<'_, AppState>, endpoint_id: String) -> CmdResult<bool> {
@@ -1327,16 +1571,14 @@ pub async fn rotate_key(state: State<'_, AppState>) -> CmdResult<()> {
 /// the clipboard write happens here, like a secret copy. Most setups never
 /// need it — agents read the token file themselves.
 #[tauri::command]
-pub async fn copy_key(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn copy_key(state: State<'_, AppState>) -> CmdResult<()> {
     let token = state
         .brokers
         .backend()
         .agent_key()
         .await
         .map_err(|e| e.to_string())?;
-    app.clipboard()
-        .write_text(token)
-        .map_err(|error| error.to_string())
+    crate::clipboard::copy_with_hygiene(Zeroizing::new(token))
 }
 
 /* ------------------------------ sessions --------------------------------- */
@@ -1490,6 +1732,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         list_mcp_tools,
         issue_endpoint,
         get_endpoint,
+        copy_endpoint_text,
         revoke_endpoint,
         rotate_key,
         copy_key,
@@ -1680,6 +1923,51 @@ mod tests {
         assert_eq!(
             error.message,
             "Enter an OpenSSH SHA-256 or SHA-512 fingerprint"
+        );
+    }
+
+    #[test]
+    fn form_errors_map_target_and_endpoint_conflicts_explicitly() {
+        let target = FormError::from_manage(
+            ManageError::ConnectionTargetTaken {
+                name: "production".into(),
+            },
+            FormContext::Connection {
+                kind: "pg",
+                includes_new_secret: false,
+            },
+        );
+        assert_eq!(target.kind, "conflict");
+        assert_eq!(target.code, "connection_target_taken");
+        assert_eq!(target.field, Some("name"));
+        assert!(target.message.contains("production"));
+
+        let wiring =
+            FormError::from_manage(ManageError::EndpointRequiresWiring, FormContext::Secret);
+        assert_eq!(wiring.code, "endpoint_requires_wiring");
+        let limit =
+            FormError::from_manage(ManageError::EndpointLimit { max: 8 }, FormContext::Secret);
+        assert_eq!(limit.code, "endpoint_limit");
+        assert_eq!(
+            limit.detail.as_deref(),
+            Some("Revoke an existing endpoint, then try again.")
+        );
+    }
+
+    #[test]
+    fn endpoint_copy_renderers_preserve_credentials_and_shell_quoting() {
+        let dsn =
+            "postgresql://deploy:end_test@/app?host=/tmp/AKA Endpoints&port=5432&sslmode=disable";
+        assert_eq!(
+            pg_libpq_keywords(dsn).as_deref(),
+            Some(
+                "host='/tmp/AKA Endpoints' port=5432 dbname=app user=deploy \
+                 password=end_test sslmode=disable"
+            )
+        );
+        assert_eq!(
+            shell_quoted("/tmp/a \"quoted\" $socket"),
+            "\"/tmp/a \\\"quoted\\\" \\$socket\""
         );
     }
 
