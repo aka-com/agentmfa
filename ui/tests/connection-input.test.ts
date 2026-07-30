@@ -5,6 +5,7 @@ import {
   apiOriginFromParts,
   authTemplate,
   defaultConnectionName,
+  initialSecretSource,
   insecureNonLoopbackHttp,
   isLoopbackHost,
   parseConnectionImport,
@@ -14,6 +15,29 @@ import {
   sshImportFromPreview,
   suggestedSecretName,
 } from '../src/connection-input';
+
+test('credential defaults distinguish branded APIs, token MCP, OAuth MCP, and infrastructure', () => {
+  const base = {
+    explicit: undefined,
+    imported: false,
+    brandedApi: false,
+  };
+  assert.equal(initialSecretSource({ ...base, type: 'api', mcp: false, brandedApi: true }), 'new');
+  assert.equal(
+    initialSecretSource({ ...base, type: 'api', mcp: true, authMode: 'bearer' }),
+    'new',
+  );
+  assert.equal(
+    initialSecretSource({ ...base, type: 'api', mcp: true, authMode: 'oauth' }),
+    'none',
+  );
+  assert.equal(initialSecretSource({ ...base, type: 'pg', mcp: false }), 'none');
+  assert.equal(initialSecretSource({ ...base, type: 'ssh', mcp: false }), 'none');
+  assert.equal(
+    initialSecretSource({ ...base, type: 'api', mcp: true, authMode: 'oauth', explicit: 'new' }),
+    'new',
+  );
+});
 
 test('provides a quick-setup placeholder for every connection type', () => {
   assert.equal(quickSetupPlaceholder('pg'), 'postgresql://app@db.example.com/production');

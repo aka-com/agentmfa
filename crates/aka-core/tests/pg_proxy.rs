@@ -1193,6 +1193,42 @@ async fn wrong_ticket_is_rejected_with_invalid_password() {
 }
 
 #[tokio::test]
+async fn a_ticket_refuses_client_database_and_user_overrides_before_dialing() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    let token = h.pair().await;
+    let (_dsn, ticket) = h.open_pg(&token).await;
+
+    let wrong_database = h
+        .pg_conn_str(&ticket)
+        .replace("dbname=app_production", "dbname=app_staging");
+    let error = match tokio_postgres::connect(&wrong_database, NoTls).await {
+        Ok(_) => panic!("a mismatched database must be refused"),
+        Err(error) => error,
+    };
+    let db = error.as_db_error().expect("expected a database error");
+    assert_eq!(db.code().code(), "3D000");
+    assert!(db.message().contains("app_production"), "{}", db.message());
+
+    let wrong_user = h
+        .pg_conn_str(&ticket)
+        .replace("user=ticket", "user=somebody_else");
+    let error = match tokio_postgres::connect(&wrong_user, NoTls).await {
+        Ok(_) => panic!("a mismatched downstream user must be refused"),
+        Err(error) => error,
+    };
+    let db = error.as_db_error().expect("expected a database error");
+    assert_eq!(db.code().code(), "28000");
+    assert!(db.message().contains("\"ticket\""), "{}", db.message());
+
+    assert!(
+        fake.state.startups.lock().unwrap().is_empty(),
+        "identity mismatches must not reach the upstream"
+    );
+}
+
+#[tokio::test]
 async fn one_ticket_allows_concurrent_clients() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;

@@ -239,6 +239,59 @@ fn parse_startup_params(mut rest: &[u8]) -> io::Result<Vec<(String, String)>> {
     }
 }
 
+struct StartupIdentityMismatch {
+    sqlstate: &'static str,
+    reason: &'static str,
+    detail: String,
+}
+
+/// A direct or ticket DSN pins the database identity. Refuse an explicit
+/// client override instead of silently connecting that client somewhere else.
+fn startup_identity_mismatch(
+    connection: &Connection,
+    params: &[(String, String)],
+    advertised_user: Option<&str>,
+) -> Option<StartupIdentityMismatch> {
+    let ConnectionConfig::Pg { dbname, user, .. } = &connection.config else {
+        return None;
+    };
+    if let Some(requested) = params
+        .iter()
+        .find_map(|(name, value)| (name == "database").then_some(value))
+        .filter(|requested| *requested != dbname)
+    {
+        return Some(StartupIdentityMismatch {
+            sqlstate: "3D000",
+            reason: "database_mismatch",
+            detail: format!(
+                "AKA: requested database {requested:?} does not match this connection; \
+                 use the pinned database {dbname:?}"
+            ),
+        });
+    }
+    let expected_user = advertised_user.unwrap_or(user);
+    params
+        .iter()
+        .find_map(|(name, value)| (name == "user").then_some(value))
+        .filter(|requested| *requested != expected_user)
+        .map(|requested| StartupIdentityMismatch {
+            sqlstate: "28000",
+            reason: "user_mismatch",
+            detail: if expected_user == user {
+                format!(
+                    "AKA: requested user {requested:?} does not match this connection; \
+                     use the pinned user {user:?}"
+                )
+            } else {
+                format!(
+                    "AKA: requested user {requested:?} does not match this ticket DSN; \
+                     use the advertised user {expected_user:?} (the upstream user is pinned to \
+                     {user:?})"
+                )
+            },
+        })
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -750,6 +803,22 @@ where
                 "FATAL",
                 "08P01",
                 "AKA: connection is no longer Postgres",
+            ))
+            .await?;
+        return Ok(());
+    }
+    if let Some(mismatch) = startup_identity_mismatch(&connection, &params, None) {
+        audit_refusal(
+            &state.broker,
+            Some(&connection.name),
+            mismatch.reason,
+            &mismatch.detail,
+        );
+        client
+            .write_all(&error_response(
+                "FATAL",
+                mismatch.sqlstate,
+                &mismatch.detail,
             ))
             .await?;
         return Ok(());
@@ -1336,6 +1405,22 @@ async fn handle_conn(
         );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    }
+    if let Some(mismatch) = startup_identity_mismatch(&connection, &params, Some("ticket")) {
+        audit_refusal(
+            &state.broker,
+            Some(&connection.name),
+            mismatch.reason,
+            &mismatch.detail,
+        );
+        client
+            .write_all(&error_response(
+                "FATAL",
+                mismatch.sqlstate,
+                &mismatch.detail,
+            ))
             .await?;
         return Ok(());
     }
@@ -2880,6 +2965,27 @@ async fn splice<C>(
 mod tests {
     use super::*;
 
+    fn pinned_connection() -> Connection {
+        let now = chrono::Utc::now();
+        Connection {
+            id: uuid::Uuid::new_v4(),
+            name: "production".into(),
+            config: ConnectionConfig::Pg {
+                host: "db.example".into(),
+                port: 5432,
+                dbname: "app_prod".into(),
+                user: "app".into(),
+                sslmode: PgSslMode::VerifyFull,
+                trusted_ca_bundle_path: None,
+            },
+            secrets: vec![],
+            account: None,
+            oauth: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     #[test]
     fn effective_tls_mode_distinguishes_encryption_from_peer_verification() {
         assert_eq!(
@@ -2929,6 +3035,47 @@ mod tests {
                 ("application_name".to_string(), "psql".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn startup_identity_must_match_the_pinned_database_and_user() {
+        let connection = pinned_connection();
+        assert!(startup_identity_mismatch(
+            &connection,
+            &[
+                ("database".into(), "app_prod".into()),
+                ("user".into(), "app".into()),
+            ],
+            None,
+        )
+        .is_none());
+
+        let database = startup_identity_mismatch(
+            &connection,
+            &[("database".into(), "app_staging".into())],
+            None,
+        )
+        .expect("database mismatch");
+        assert_eq!(database.sqlstate, "3D000");
+        assert_eq!(database.reason, "database_mismatch");
+        assert!(database.detail.contains("app_prod"), "{}", database.detail);
+
+        let user = startup_identity_mismatch(
+            &connection,
+            &[("user".into(), "postgres".into())],
+            None,
+        )
+        .expect("user mismatch");
+        assert_eq!(user.sqlstate, "28000");
+        assert_eq!(user.reason, "user_mismatch");
+        assert!(user.detail.contains("\"app\""), "{}", user.detail);
+
+        assert!(startup_identity_mismatch(
+            &connection,
+            &[("user".into(), "ticket".into())],
+            Some("ticket"),
+        )
+        .is_none());
     }
 
     #[test]

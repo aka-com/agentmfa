@@ -43,7 +43,7 @@ import {
 } from '/src/util';
 import {
   apiOriginFromParts, authTemplate, defaultConnectionName, parseApiOrigin, parseConnectionImport,
-  insecureNonLoopbackHttp, isLoopbackHost, parseMcpServerUrl,
+  insecureNonLoopbackHttp, initialSecretSource, isLoopbackHost, parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
 import {
@@ -3484,7 +3484,10 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
         <input id="f-value" className={fieldCls('value')} type="password"
           placeholder={editing ? '' : 'Your secret (saved in Keychain)'}
           value={d.value ?? ''}
-          onChange={(e) => setDraftField('value', 'value', e.currentTarget.value)} />
+          onChange={(e) => {
+            if (editing) state.draft.secretValueModified = true;
+            setDraftField('value', 'value', e.currentTarget.value);
+          }} />
         <FieldError k="value" />
       </div>
       <FormGlobalError />
@@ -3501,24 +3504,22 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
 const NEW_CREDENTIAL_OPTION = '__new__';
 const NO_CREDENTIAL_OPTION = '__none__';
 
-/** Types that may be connected without any stored credential. MCP servers
- *  are stored as `api` connections, so this covers them too. */
-function secretAllowsNone(type: ConnectionType): boolean {
-  return type === 'pg' || type === 'ssh' || type === 'api';
-}
-
 /** The credential source to assume when the draft has not chosen one yet.
- *  Defaults to "none" wherever None is offered; an imported credential still
- *  forces "new". Kept in one place so the chooser and validation agree. */
+ *  Branded API presets exist to inject a key, so they start at "new";
+ *  manual-token MCP does likewise, while credential-optional infrastructure
+ *  and MCP OAuth stay at "none". */
 function defaultSecretSource(
   type: ConnectionType,
   draft: ConnectionDraft,
-  allowNew: boolean,
 ): 'existing' | 'new' | 'none' {
-  if (draft.secretSource) return draft.secretSource;
-  if (draft.importedCredential || draft.sshImportId) return 'new';
-  if (secretAllowsNone(type)) return 'none';
-  return allowNew && !state.secrets.length ? 'new' : 'existing';
+  return initialSecretSource({
+    type,
+    explicit: draft.secretSource,
+    imported: Boolean(draft.importedCredential || draft.sshImportId),
+    mcp: isMcpDraft(draft),
+    authMode: draft.authMode,
+    brandedApi: Boolean(state.connPreset),
+  });
 }
 
 function credentialNameIsTaken(name: string): boolean {
@@ -3545,8 +3546,8 @@ function CredentialChooser({ type, allowNew = true, valueHint }: {
   valueHint?: string;
 }): ReactNode {
   const draft = state.draft;
-  const allowNone = secretAllowsNone(type);
-  const source = defaultSecretSource(type, draft, allowNew);
+  const allowNone = type === 'pg' || type === 'ssh' || type === 'api';
+  const source = defaultSecretSource(type, draft);
   const secretLabel = type === 'pg' ? 'Database password'
     : type === 'ssh' ? 'SSH private key'
     : 'Token or API key';
@@ -4942,7 +4943,7 @@ async function saveSecret(): Promise<void> {
     if (!brokerEpochIsCurrent(epoch)) return;
     toast('🔑 Saved to macOS Keychain');
   } else {
-    if (value !== EDIT_SECRET_MASK && (!value || value.includes('•'))) {
+    if (state.draft.secretValueModified && !value) {
       state.sheetErrors = { value: 'Invalid value' };
       render();
       return;
@@ -4955,7 +4956,7 @@ async function saveSecret(): Promise<void> {
       await invoke('edit_secret', {
         id: sheet.id ?? '',
         newName: name,
-        newValue: value === EDIT_SECRET_MASK ? null : value,
+        newValue: state.draft.secretValueModified ? value : null,
       });
     } catch (error) {
       if (brokerEpochIsCurrent(epoch)) showFormError(error);
@@ -4990,6 +4991,9 @@ async function saveConn(): Promise<void> {
   // what the next submission will save.
   if (usesLocalUser && !(d.user || '').trim() && user) d.user = user;
   const adding = sheet.kind === 'add-conn';
+  const existingConnection = adding
+    ? null
+    : state.connections.find((connection) => connection.id === sheet.id) ?? null;
   const toolNameTaken = adding && toolNameIsTaken(name);
   const mcpAdd = adding && t === 'api' && isMcpDraft(d);
   const authMode = d.authMode || (mcpAdd ? 'oauth' : 'bearer');
@@ -5046,7 +5050,7 @@ async function saveConn(): Promise<void> {
     (adding && !(t === 'api' && authMode === 'advanced')) ||
     (!adding && t !== 'api'));
   const secretSource = adding
-    ? defaultSecretSource(t, d, true)
+    ? defaultSecretSource(t, d)
     : (d.secretSource || 'existing');
   let selectedSecret: SecretSummary | null = null;
   let newSecretName: string | null = null;
@@ -5071,7 +5075,9 @@ async function saveConn(): Promise<void> {
     catch (error) { errs.authDetail = errorMessage(error); }
   } else if (t === 'api' && authMode === 'advanced' && !injectionTemplate) {
     errs.template = 'Credential template is required';
-  } else if (!adding && t === 'api' && !injectionTemplate) {
+  } else if (!adding && t === 'api' && !injectionTemplate
+      && (Boolean(existingConnection?.secret_names.length)
+        || d.template !== existingConnection?.template)) {
     errs.template = 'Credential template is required';
   }
   if (Object.keys(errs).length || toolNameTaken || newSecretNameTaken) {

@@ -233,6 +233,24 @@ test('creating a credential does not auto-trigger the endpoint confirmation gate
   );
 });
 
+test('forms preserve credential-less edits without guessing from masked text', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const appState = await readFile(new URL('../src/app-state.ts', import.meta.url), 'utf8');
+  const saveSecret = app.match(
+    /async function saveSecret\(\): Promise<void> \{([\s\S]*?)\n\}/,
+  )?.[0] ?? '';
+  const saveConnection = app.match(
+    /async function saveConn\(\): Promise<void> \{([\s\S]*?)\n\}/,
+  )?.[0] ?? '';
+
+  assert.match(app, /return initialSecretSource\(\{/);
+  assert.match(appState, /secretValueModified\?: boolean/);
+  assert.match(saveSecret, /state\.draft\.secretValueModified \? value : null/);
+  assert.doesNotMatch(saveSecret, /includes\('•'\)/);
+  assert.match(saveConnection, /existingConnection\?\.secret_names\.length/);
+  assert.match(saveConnection, /d\.template !== existingConnection\?\.template/);
+});
+
 test('the post-add banner stays a compact success message', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const readyCard = app.match(

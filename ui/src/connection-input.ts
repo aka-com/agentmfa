@@ -2,6 +2,27 @@
 // relevant normalization rules can be exercised without a browser/Tauri.
 
 export type ConnectionType = 'api' | 'pg' | 'ssh';
+export type SecretSource = 'existing' | 'new' | 'none';
+
+/** Initial credential selection for a connection form. MCP OAuth mints its
+ * own credential, while branded REST and manual-token MCP flows exist to
+ * collect one. Infrastructure remains intentionally credential-optional. */
+export function initialSecretSource(input: {
+  type: ConnectionType;
+  explicit?: SecretSource;
+  imported: boolean;
+  mcp: boolean;
+  authMode?: string;
+  brandedApi: boolean;
+}): SecretSource {
+  if (input.explicit) return input.explicit;
+  if (input.imported) return 'new';
+  if (input.type === 'api' && input.mcp) {
+    return input.authMode === 'oauth' ? 'none' : 'new';
+  }
+  if (input.type === 'api' && input.brandedApi) return 'new';
+  return 'none';
+}
 
 const QUICK_SETUP_PLACEHOLDERS: Record<ConnectionType, string> = {
   pg: 'postgresql://app@db.example.com/production',

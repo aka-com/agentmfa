@@ -3005,9 +3005,16 @@ fn translate_outcome(
     let body_bytes: Vec<u8> = match env.get("body_encoding").and_then(|e| e.as_str()) {
         Some("base64") => {
             use base64::Engine as _;
-            base64::engine::general_purpose::STANDARD
-                .decode(body_str)
-                .unwrap_or_default()
+            match base64::engine::general_purpose::STANDARD.decode(body_str) {
+                Ok(body) => body,
+                Err(_) => {
+                    return endpoint_error(
+                        StatusCode::BAD_GATEWAY,
+                        ErrorReason::UpstreamError,
+                        "the cached upstream response body was not valid base64",
+                    )
+                }
+            }
         }
         _ => body_str.as_bytes().to_vec(),
     };
@@ -3373,6 +3380,27 @@ mod tests {
             cookies,
             vec!["session=one; Path=/; HttpOnly", "csrf=two; Path=/; Secure"]
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_cached_base64_is_an_upstream_error() {
+        let response = translate_outcome(
+            ExecOutcome {
+                status: 200,
+                body: json!({
+                    "status": 200,
+                    "headers": {},
+                    "body": "not base64!",
+                    "body_encoding": "base64",
+                }),
+            },
+            &Method::GET,
+            false,
+        );
+        assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["reason"], ErrorReason::UpstreamError.as_str());
     }
 
     #[test]

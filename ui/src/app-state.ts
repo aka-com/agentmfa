@@ -51,6 +51,8 @@ export interface ConnectionDraft {
   name?: string;
   nameIsAutomatic?: boolean;
   value?: string;
+  /** Whether the masked value in an edit-secret sheet was actually changed. */
+  secretValueModified?: boolean;
   importWarnings?: string[];
   origin?: string | null;
   isMcp?: boolean;
