@@ -575,6 +575,15 @@ fn verify_session_bind(payload: &[u8], expected: Fingerprint) -> Result<SessionB
 
 /* -------------------------------- listener -------------------------------- */
 
+/// Extension of the transient name a socket is bound under before being
+/// tightened and renamed into place. Deliberately the same byte length as
+/// `sock` so the staging path can never exceed `sun_path` where the final
+/// `.sock` path would have fit — a longer staging name (e.g. `binding`) would
+/// fail to bind near the length limit even though the real socket is legal.
+/// `sweep_stale_sockets` reaps orphans of this extension too, since a crash
+/// between `bind` and `rename` leaves one behind under a name never reused.
+const SOCKET_STAGING_EXT: &str = "bind";
+
 /// Bind a Unix socket that is never observable with looser permissions than
 /// 0600.
 ///
@@ -587,7 +596,7 @@ fn verify_session_bind(payload: &[u8], expected: Fingerprint) -> Result<SessionB
 /// listener keeps its own fd.
 fn bind_private_socket(path: &Path) -> std::io::Result<UnixListener> {
     use std::os::unix::fs::PermissionsExt;
-    let staging = path.with_extension("binding");
+    let staging = path.with_extension(SOCKET_STAGING_EXT);
     // A crash could have left either name behind; bind fails on an existing
     // path even when nothing is listening.
     let _ = std::fs::remove_file(&staging);
@@ -1007,7 +1016,10 @@ fn grade_login(
         // rather than observes: the test (and every emitted invocation) sets
         // `ProxyJump=none`, since the agent cannot authenticate a jump hop.
         let jump_hint = if destination.is_some() {
-            " If this destination is only reachable through a ProxyJump host,              AgentMFA cannot broker it: the jump hop is a separate SSH login              against the jump host, and a tool pins one host key. Import the              jump host as its own tool and connect in two hops."
+            " If this destination is only reachable through a ProxyJump host, \
+             AgentMFA cannot broker it: the jump hop is a separate SSH login \
+             against the jump host, and a tool pins one host key. Import the \
+             jump host as its own tool and connect in two hops."
         } else {
             ""
         };
@@ -2077,7 +2089,8 @@ pub fn sweep_stale_sockets(dir: &Path) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+        let ext = path.extension().and_then(|e| e.to_str());
+        if ext != Some("sock") && ext != Some(SOCKET_STAGING_EXT) {
             continue;
         }
         // No liveness probe. Connecting to an agent socket *is* a redemption:
