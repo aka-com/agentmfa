@@ -33,7 +33,9 @@ the data planes, or the approval path. See
 ### Frontend-only mode
 
 You can run the UI standalone in a browser, against a self-contained dev
-mock (`ui/src/bridge.ts`). This is useful for rapidly iterating on the UI,
+mock (`ui/src/mock-bridge.ts`). The production bridge loads it only through a
+compile-time development branch, so fixtures do not ship in the desktop
+bundle. This is useful for rapidly iterating on the UI,
 or if you're an AI agent, previewing design changes when it isn't possible
 to build a Tauri application.
 

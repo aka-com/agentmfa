@@ -51,7 +51,7 @@ test('activity identity treats absent optional metadata consistently', () => {
 test('a view read does not ask for more of the log than the broker will return', async () => {
   const [app, mock, command, route] = await Promise.all([
     readFile(new URL('../app.tsx', import.meta.url), 'utf8'),
-    readFile(new URL('../src/bridge.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/mock-bridge.ts', import.meta.url), 'utf8'),
     readFile(new URL('../../src-tauri/src/commands.rs', import.meta.url), 'utf8'),
     readFile(new URL('../../crates/aka-core/src/daemon/manage.rs', import.meta.url), 'utf8'),
   ]);
