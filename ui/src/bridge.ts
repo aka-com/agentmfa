@@ -376,7 +376,10 @@ function seedFixtures() {
     connection: 'notion',
     tool: 'agentmfa_notion_search',
     prompt: 'Notion needs to know where to search: which workspace should this query run against?',
-    fields: [{ name: 'workspace', label: 'Workspace' }],
+    fields: [
+      { name: 'workspace', label: 'Workspace', required: true },
+      { name: 'section', label: 'Section', required: false },
+    ],
     requested_at: t(1),
     expires_at: new Date(Date.now() + 9 * 60000).toISOString(),
   };
@@ -746,6 +749,7 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
 // are reviewable in a plain browser.
 let mockBroker: import('./types').BrokerProfile = {
   mode: 'local', url: null, connected: true, error: null, has_saved_token: false,
+  native_authentication: true,
 };
 let mockNotificationSettings: NotificationSettings = {
   mode: 'when_hidden',
@@ -768,7 +772,10 @@ function mockConnectRemote(url: string, token: string | null): unknown {
   if (token?.includes('badtoken')) {
     throw 'the broker rejected the management token; re-issue it with `mfa manage token` and enter the new one';
   }
-  mockBroker = { mode: 'remote', url: trimmed, connected: true, error: null, has_saved_token: true };
+  mockBroker = {
+    mode: 'remote', url: trimmed, connected: true, error: null, has_saved_token: true,
+    native_authentication: false,
+  };
   emit('aka://broker-changed', mockBroker);
   // A "flaky" broker connects, then drops the link shortly after — the
   // full-pane error state is reviewable in a plain browser this way.
@@ -823,7 +830,10 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return { ...mockBroker };
     }
     case 'switch_broker_local': {
-      mockBroker = { mode: 'local', url: mockBroker.url, connected: true, error: null, has_saved_token: mockBroker.has_saved_token };
+      mockBroker = {
+        mode: 'local', url: mockBroker.url, connected: true, error: null,
+        has_saved_token: mockBroker.has_saved_token, native_authentication: true,
+      };
       emit('aka://broker-changed', mockBroker);
       return { ...mockBroker };
     }

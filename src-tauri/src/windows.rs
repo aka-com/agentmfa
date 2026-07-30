@@ -15,10 +15,10 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect};
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{tauri_panel, ManagerExt as _, WebviewWindowExt as _};
 
-#[cfg(test)]
+#[cfg(any(test, target_os = "windows"))]
 use tauri::image::Image;
 
-#[cfg(test)]
+#[cfg(any(test, target_os = "windows"))]
 const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray.png");
 #[cfg(test)]
 const APP_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
@@ -35,6 +35,34 @@ const TRAY_OPEN_ID: &str = "tray-open";
 const TRAY_REQUESTS_ID: &str = "tray-requests";
 const TRAY_SETTINGS_ID: &str = "tray-settings";
 const TRAY_QUIT_ID: &str = "tray-quit";
+
+/// Windows does not render tray titles, so pending work needs an icon-level
+/// state change. The tooltip and menu continue to carry the exact count.
+#[cfg(any(test, target_os = "windows"))]
+fn request_tray_icon(waiting: bool) -> tauri::Result<Image<'static>> {
+    let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
+    if !waiting {
+        return Ok(icon);
+    }
+
+    let width = icon.width();
+    let height = icon.height();
+    let mut rgba = icon.rgba().to_vec();
+    let radius = (width.min(height) / 5).max(2) as i32;
+    let center_x = width as i32 - radius - 1;
+    let center_y = radius + 1;
+    for y in 0..height as i32 {
+        for x in 0..width as i32 {
+            let dx = x - center_x;
+            let dy = y - center_y;
+            if dx * dx + dy * dy <= radius * radius {
+                let offset = ((y as u32 * width + x as u32) * 4) as usize;
+                rgba[offset..offset + 4].copy_from_slice(&[232, 82, 70, 255]);
+            }
+        }
+    }
+    Ok(Image::new_owned(rgba, width, height))
+}
 
 const DROPDOWN_GAP: f64 = 6.0;
 static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
@@ -294,8 +322,18 @@ pub fn update_request_count(app: &AppHandle, request_count: usize) {
             )
         };
         let _ = tray.set_tooltip(Some(tooltip));
-        let title = (request_count > 0).then(|| request_count.to_string());
-        let _ = tray.set_title(title.as_deref());
+        #[cfg(target_os = "windows")]
+        match request_tray_icon(request_count > 0) {
+            Ok(icon) => {
+                let _ = tray.set_icon(Some(icon));
+            }
+            Err(error) => tracing::warn!(%error, "could not update the tray request icon"),
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let title = (request_count > 0).then(|| request_count.to_string());
+            let _ = tray.set_title(title.as_deref());
+        }
     });
 }
 
@@ -681,6 +719,21 @@ mod tests {
             visible > pixel_count / 10,
             "tray icon needs a substantial visible shape"
         );
+    }
+
+    #[test]
+    fn pending_request_tray_icon_has_a_visible_badge() {
+        let ordinary = request_tray_icon(false).unwrap();
+        let pending = request_tray_icon(true).unwrap();
+        assert_eq!(
+            (ordinary.width(), ordinary.height()),
+            (pending.width(), pending.height())
+        );
+        assert_ne!(ordinary.rgba(), pending.rgba());
+        assert!(pending
+            .rgba()
+            .chunks_exact(4)
+            .any(|pixel| pixel == [232, 82, 70, 255]));
     }
 
     #[test]

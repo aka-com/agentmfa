@@ -22,6 +22,11 @@ pub const APPROVAL_SURFACE_V1: &str = "request-inbox-v1";
 /// Entry in `/v1/manage/whoami.capabilities` that distinguishes a legacy
 /// broker from a proxy that removed the surface-negotiation response.
 pub const APPROVAL_SURFACE_CAPABILITY: &str = "request_surface_v1";
+/// Entry in `/v1/manage/whoami.capabilities` when the managing shell can
+/// prove fresh user presence with a native operating-system authentication
+/// prompt. Remote clients use this instead of assuming the broker host has
+/// the same authentication facilities as the client.
+pub const NATIVE_AUTHENTICATION_CAPABILITY: &str = "native_authentication_v1";
 /// Response header acknowledging how a manage-event stream was classified.
 pub const APPROVAL_SURFACE_STATUS_HEADER: &str = "x-aka-approval-surface-status";
 pub const APPROVAL_SURFACE_STATUS_ACTIVE: &str = "active";
@@ -547,6 +552,12 @@ pub struct RequestDto {
 pub struct ElicitationFieldDto {
     pub name: String,
     pub label: String,
+    /// Whether the field appears in the schema object's `required` array.
+    /// Always serialized (an omitted flag is indistinguishable from a broker
+    /// that predates it, and consumers fail closed on absence by requiring
+    /// the field); defaulted on deserialization for those older brokers.
+    #[serde(default)]
+    pub required: bool,
     /// A JSON Schema `boolean`: render a toggle; the answer rides upstream as a
     /// real JSON boolean rather than a string.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

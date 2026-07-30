@@ -1283,8 +1283,13 @@ fn matching_sse_response_end(bytes: &[u8], expected_id: &Value) -> Option<usize>
 }
 
 /// Idempotency-key payload hash: the full normalized request, a genuine
-/// retry matches byte-for-byte.
+/// retry matches byte-for-byte. The self-reported client label is part of
+/// the hashed material: every label on a machine shares one authenticated
+/// identity (and so one coalesce namespace), and folding the label in here
+/// turns another label's reuse of a request id into a refusal instead of
+/// silently handing it the first label's cached outcome.
 pub fn payload_hash(
+    client: &str,
     connection_id: &Uuid,
     method: &Method,
     path: &str,
@@ -1293,6 +1298,8 @@ pub fn payload_hash(
 ) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
+    hasher.update(client.as_bytes());
+    hasher.update([0]);
     hasher.update(connection_id.as_bytes());
     hasher.update([0]);
     hasher.update(method.as_str().as_bytes());
@@ -2406,6 +2413,7 @@ mod tests {
     fn payload_hash_normalizes_headers() {
         let conn = Uuid::new_v4();
         let a = payload_hash(
+            "claude-code",
             &conn,
             &Method::POST,
             "/x",
@@ -2413,6 +2421,7 @@ mod tests {
             b"body",
         );
         let b = payload_hash(
+            "claude-code",
             &conn,
             &Method::POST,
             "/x",
@@ -2420,10 +2429,22 @@ mod tests {
             b"body",
         );
         assert_eq!(a, b);
-        let c = payload_hash(&conn, &Method::POST, "/x", &[], b"other");
+        let c = payload_hash("claude-code", &conn, &Method::POST, "/x", &[], b"other");
         assert_ne!(a, c);
-        let d = payload_hash(&Uuid::new_v4(), &Method::POST, "/x", &[], b"other");
+        let d = payload_hash(
+            "claude-code",
+            &Uuid::new_v4(),
+            &Method::POST,
+            "/x",
+            &[],
+            b"other",
+        );
         assert_ne!(c, d);
+        // A different self-reported label shares the identity's coalesce
+        // namespace; the hash is what keeps its reuse of an id from being
+        // replayed another label's outcome.
+        let e = payload_hash("codex", &conn, &Method::POST, "/x", &[], b"other");
+        assert_ne!(c, e);
     }
 
     /// The upstream URL is built with `Url::join`, so a normalizing variant

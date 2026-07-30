@@ -217,6 +217,11 @@ fn fatal_startup(app: &tauri::App, e: CoreError) -> ! {
             MessageDialogKind::Warning,
             format!("{e}.\n\nQuit the other broker, then relaunch AgentMFA."),
         ),
+        CoreError::BrokerStateBusy(_) => (
+            "Broker state is being edited",
+            MessageDialogKind::Warning,
+            format!("{e}.\n\nWait for the mfa command to finish, then relaunch AgentMFA."),
+        ),
         CoreError::Vault(_) => (
             "Keychain access failed",
             MessageDialogKind::Error,
@@ -240,7 +245,10 @@ fn fatal_startup(app: &tauri::App, e: CoreError) -> ! {
     // Exit through the normal path either way — the dialog already told the
     // user what happened. 0 for the informational already-running case, 1
     // for real failures; neither raises a crash report.
-    std::process::exit(if matches!(e, CoreError::BrokerAlreadyRunning(_)) {
+    std::process::exit(if matches!(
+        e,
+        CoreError::BrokerAlreadyRunning(_) | CoreError::BrokerStateBusy(_)
+    ) {
         0
     } else {
         1

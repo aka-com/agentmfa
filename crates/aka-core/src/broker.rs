@@ -16,7 +16,7 @@ use crate::error::CoreError;
 use crate::events::BrokerEvents;
 use crate::executions::Executions;
 use crate::identity::IdentityStore;
-use crate::paths::{BrokerInstanceLock, Paths};
+use crate::paths::{BrokerInstanceLock, BrokerLockAttempt, BrokerLockRole, Paths};
 use crate::policy::AccessTable;
 use crate::ratelimit::{KeyedLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
@@ -223,7 +223,7 @@ impl Broker {
         config: BrokerConfig,
         events: Arc<dyn BrokerEvents>,
     ) -> Result<Arc<Self>> {
-        Self::new_inner(paths, vault, config, events, true).await
+        Self::new_inner(paths, vault, config, events, true, BrokerLockRole::Serve).await
     }
 
     /// Construct the broker state for a short-lived offline management
@@ -236,7 +236,7 @@ impl Broker {
         config: BrokerConfig,
         events: Arc<dyn BrokerEvents>,
     ) -> Result<Arc<Self>> {
-        Self::new_inner(paths, vault, config, events, false).await
+        Self::new_inner(paths, vault, config, events, false, BrokerLockRole::Cli).await
     }
 
     async fn new_inner(
@@ -245,11 +245,21 @@ impl Broker {
         config: BrokerConfig,
         events: Arc<dyn BrokerEvents>,
         start_background_tasks: bool,
+        lock_role: BrokerLockRole,
     ) -> Result<Arc<Self>> {
         paths.ensure()?;
-        let instance_lock = paths
-            .try_acquire_broker_lock()?
-            .ok_or_else(|| CoreError::BrokerAlreadyRunning(paths.socket_display()))?;
+        // A CLI holder blocks a starting broker just as it blocks another
+        // CLI: report the transient edit rather than claiming a broker is
+        // already listening on a socket nothing owns.
+        let instance_lock = match paths.try_acquire_broker_lock_for(lock_role)? {
+            BrokerLockAttempt::Acquired(lock) => lock,
+            BrokerLockAttempt::Held(Some(holder)) if holder.role == BrokerLockRole::Cli => {
+                return Err(CoreError::BrokerStateBusy(Some(holder.pid)));
+            }
+            BrokerLockAttempt::Held(_) => {
+                return Err(CoreError::BrokerAlreadyRunning(paths.socket_display()));
+            }
+        };
         reject_legacy_live_socket(&paths).await?;
         // Every shell observer is wrapped in the manage-event fanout so the
         // SSE stream sees exactly what the shell sees.

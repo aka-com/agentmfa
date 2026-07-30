@@ -49,6 +49,10 @@ impl BrokerEvents for TauriEvents {
         true
     }
 
+    fn native_authentication_available(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+
     fn sessions_changed(&self) {
         let _ = self.app.emit(EVT_SESSIONS, ());
     }

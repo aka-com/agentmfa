@@ -41,6 +41,17 @@ test('window components reconcile in place rather than remounting per revision',
   assert.doesNotMatch(app, /key=\{revision\}/);
 });
 
+test('ordinary publications stay on the React scheduler', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const render = app.match(/function render\(\): void \{[\s\S]*?\n\}\n\nfunction finishRender/)?.[0];
+
+  assert.ok(render, 'render publication function is present');
+  assert.match(render, /uiStore\.publish\(\)/);
+  assert.match(render, /requestAnimationFrame\(/);
+  assert.doesNotMatch(render, /flushSync/);
+  assert.match(app, /flushSync\(\(\) => \{\s*reactRoot\.render/);
+});
+
 test('drag reordering leaves React-owned DOM order to reconciliation', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
 
@@ -298,4 +309,43 @@ test('dropdown approval and elicitation dialogs hold the native form lease', asy
   assert.match(protectedSheets, /sheet\?\.kind === 'elicitation'/);
   assert.match(app, /case 'elicit-open': \{\s*if \(!await holdDropdownFormOpen\(\)\)/);
   assert.match(app, /case 'approval-open': \{\s*if \(!await holdDropdownFormOpen\(\)\)/);
+});
+
+test('elicitation forms preserve optional fields and validate required ones', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  // Absence of the flag (an older broker) must stay required — only an
+  // explicit `false` marks a field optional, so the form fails closed.
+  assert.match(app, /field\.required !== false/);
+  assert.match(app, /required \? <b aria-hidden="true">\*<\/b>/);
+  assert.match(app, /if \(!elicitFieldRequired\(field\)\) continue;/);
+  assert.match(app, /if \(!value && elicitFieldRequired\(field\)\)/);
+  assert.match(app, /if \(value\) values\[field\.name\] = value/);
+});
+
+test('known-host lookup is reachable from the SSH form', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  assert.match(app, /data-act="check-known-hosts"/);
+  assert.match(app, /invoke\('check_known_hosts'/);
+  assert.match(app, /data-act="pick-host-key"/);
+});
+
+test('request history and secret dependencies remain actionable', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  assert.match(app, /data-act="request-history-toggle"/);
+  assert.match(app, /data-act="request-open-connection"/);
+  assert.match(app, /data-act="show-connection"/);
+  assert.match(app, /data-act="delete-using-connection"/);
+  assert.match(app, /void runConnectionTest\(connectionId\)/);
+});
+
+test('untrusted prompt identity text is bidi-isolated and self-reported', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+
+  assert.match(app, /Agent reported as “\$\{agent\}”/);
+  assert.match(app, /className="approval-summary untrusted-identity" dir="auto"/);
+  assert.match(styles, /\.untrusted-identity\{ unicode-bidi: isolate; \}/);
 });

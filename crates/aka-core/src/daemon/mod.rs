@@ -6,7 +6,7 @@
 //!   immediately (no approval);
 //! - `GET /v1/connections`, `GET /v1/whoami`, `POST /v1/http` (+ the PG
 //!   opens added by later phases), authenticated with the shared broker
-//!   key, rate limited per client label.
+//!   key, rate limited and idempotency-scoped by authenticated identity.
 
 pub mod manage;
 pub mod wellknown;
@@ -1181,7 +1181,14 @@ async fn post_http(
         &header_map,
         &body_bytes,
     );
-    let hash = payload_hash(&conn.id, &method, &call.path, &wire_headers, &body_bytes);
+    let hash = payload_hash(
+        &client,
+        &conn.id,
+        &method,
+        &call.path,
+        &wire_headers,
+        &body_bytes,
+    );
     let body = match SpooledBody::from_bytes(body_bytes, broker.config.spool_threshold) {
         Ok(b) => Arc::new(b),
         Err(e) => {
@@ -1195,10 +1202,11 @@ async fn post_http(
 
     let mutating = is_mutating(&method);
 
-    // Coalescing is keyed on (client label, request_id) for mutating calls
-    // only; GET/HEAD are never coalesced, a request_id there is ignored.
+    // Coalescing is keyed on authenticated identity + connection + request id
+    // for mutating calls only. The display label is self-reported and never
+    // part of this authority boundary. GET/HEAD are never coalesced.
     let coalesce_key = match (&call.request_id, mutating) {
-        (Some(rid), true) => Some((client.clone(), rid.clone())),
+        (Some(rid), true) => Some((client_id, conn.id, rid.clone())),
         _ => None,
     };
     let payload_hash = coalesce_key.as_ref().map(|_| hash);
@@ -2081,6 +2089,7 @@ async fn post_ssh_open(
         );
     }
     let broker = &state.broker;
+    let client_id = authed.client_id;
     let limiter_key = authed.client_id.to_string();
     let client = authed.client;
     if let Err(wait) = broker.token_limiter.check(&limiter_key) {
@@ -2127,14 +2136,16 @@ async fn post_ssh_open(
         (!host_key_fingerprint.is_empty()).then(|| host_key_fingerprint.clone());
 
     // The idempotency payload is the open itself: same key + same
-    // connection = a genuine retry.
+    // connection + same client label = a genuine retry. The label shares
+    // the identity's namespace, so it rides in the hash: another label
+    // reusing the id is refused rather than handed this open's ticket.
     let coalesce_key = body
         .request_id
         .as_ref()
-        .map(|rid| (client.clone(), rid.clone()));
+        .map(|rid| (client_id, conn.id, rid.clone()));
     let payload_hash = coalesce_key.as_ref().map(|_| {
         use sha2::{Digest as _, Sha256};
-        let digest = Sha256::digest(format!("ssh/open\0{}", conn.name).as_bytes());
+        let digest = Sha256::digest(format!("ssh/open\0{}\0{}", client, conn.name).as_bytes());
         digest
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -2195,6 +2206,7 @@ async fn post_pg_open(
     ApiJson(body): ApiJson<OpenBody>,
 ) -> Response {
     let broker = &state.broker;
+    let client_id = authed.client_id;
     let limiter_key = authed.client_id.to_string();
     let client = authed.client;
     if let Some(response) = http_rate_limit(broker, &limiter_key, &client) {
@@ -2234,10 +2246,10 @@ async fn post_pg_open(
     let coalesce_key = body
         .request_id
         .as_ref()
-        .map(|rid| (client.clone(), rid.clone()));
+        .map(|rid| (client_id, conn.id, rid.clone()));
     let payload_hash = coalesce_key.as_ref().map(|_| {
         use sha2::{Digest as _, Sha256};
-        let digest = Sha256::digest(format!("pg/open\0{}", conn.name).as_bytes());
+        let digest = Sha256::digest(format!("pg/open\0{}\0{}", client, conn.name).as_bytes());
         digest
             .iter()
             .map(|b| format!("{b:02x}"))

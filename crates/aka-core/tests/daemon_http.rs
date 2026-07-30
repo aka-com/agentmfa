@@ -988,7 +988,7 @@ async fn mutating_retries_coalesce_to_one_execution() {
     assert_eq!(b1["status"], 204);
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
 
-    // A retry with the same request_id: replayed, still one execution.
+    // A genuine retry — same label, same payload — is replayed.
     let (status, b2) = uds_request(
         &h.socket,
         "POST",
@@ -1005,6 +1005,26 @@ async fn mutating_retries_coalesce_to_one_execution() {
         "exactly one upstream execution"
     );
 
+    // Another self-reported label shares the authenticated identity's
+    // namespace, so its reuse of the id cannot split the namespace into a
+    // second execution — but neither is it handed the first label's cached
+    // outcome. Fail closed: refused, still one execution.
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth), ("x-agentmfa-client", "codex")],
+        Some(payload.clone()),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(body["reason"], "request_id_mismatch");
+    assert_eq!(
+        up.hits.load(Ordering::SeqCst),
+        1,
+        "exactly one upstream execution"
+    );
+
     // Same request_id, different payload: a client bug, 409.
     let mut altered = payload.clone();
     altered["body"] = json!({"event_type": "delete-everything"});
@@ -1012,7 +1032,10 @@ async fn mutating_retries_coalesce_to_one_execution() {
         &h.socket,
         "POST",
         "/v1/http",
-        &[("authorization", &auth)],
+        &[
+            ("authorization", &auth),
+            ("x-agentmfa-client", "another-label"),
+        ],
         Some(altered),
     )
     .await;
@@ -1096,7 +1119,7 @@ async fn non_replayable_tombstone_prevents_duplicate_upstream_execution() {
 }
 
 #[tokio::test]
-async fn mutating_request_id_is_scoped_to_connection() {
+async fn mutating_request_id_is_independent_per_connection() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
@@ -1138,8 +1161,9 @@ async fn mutating_request_id_is_scoped_to_connection() {
     assert_eq!(body["status"], 204);
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
 
-    // The same request_id against a different connection is a mismatch,
-    // never a silent replay of the other connection's outcome.
+    // A caller can use the same request id independently for another
+    // connection. The target connection is part of the namespace, so this
+    // is a second execution rather than a mismatch or a replay.
     let (status, body) = uds_request(
         &h.socket,
         "POST",
@@ -1154,9 +1178,9 @@ async fn mutating_request_id_is_scoped_to_connection() {
         })),
     )
     .await;
-    assert_eq!(status, 409);
-    assert_eq!(body["reason"], "request_id_mismatch");
-    assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], 204);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

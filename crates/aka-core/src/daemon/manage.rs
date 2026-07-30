@@ -210,11 +210,15 @@ async fn remote_decision_context(request: axum::extract::Request, next: Next) ->
 }
 
 async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
+    let mut capabilities = vec![aka_api::APPROVAL_SURFACE_CAPABILITY];
+    if state.broker.events.native_authentication_available() {
+        capabilities.push(aka_api::NATIVE_AUTHENTICATION_CAPABILITY);
+    }
     ok(json!({
         "ok": true,
         "version": state.broker.config.version,
         "client_id": state.broker.identity.client_id(),
-        "capabilities": [aka_api::APPROVAL_SURFACE_CAPABILITY],
+        "capabilities": capabilities,
         "approval_surface_attached": state.broker.events.has_approval_surface(),
     }))
 }

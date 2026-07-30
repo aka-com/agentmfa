@@ -89,6 +89,12 @@ pub enum CoreError {
     #[error("another broker is already listening on {0}")]
     BrokerAlreadyRunning(String),
 
+    #[error(
+        "another CLI process is editing broker state{}",
+        .0.map(|pid| format!(" (pid {pid})")).unwrap_or_default()
+    )]
+    BrokerStateBusy(Option<u32>),
+
     #[error("OAuth: {0}")]
     OAuth(String),
 

@@ -549,8 +549,20 @@
   .request-card-action{
   flex: 0 0 auto; color: var(--accent-text); font-size: 12px; font-weight: 650;
 }
-  .request-card-history{ cursor: default; }
+  .request-card-history{ display: block; padding: 0; cursor: default; }
   .request-card-history:hover{ background: transparent; }
+  .request-history-toggle{
+  width: 100%; display: flex; align-items: stretch; gap: 11px; padding: 12px;
+  border: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer;
+}
+  .request-history-toggle:hover{ background: var(--field-bg); }
+  .request-history-toggle:focus-visible{ outline: 2px solid var(--accent); outline-offset: -2px; }
+  .request-history-detail{
+  display: flex; align-items: flex-end; gap: 10px; padding: 0 12px 12px 57px;
+  border-top: 1px solid var(--line-soft);
+}
+  .request-history-detail .approval-detail{ flex: 1; min-width: 0; max-height: 180px; }
+  .request-history-detail .btn{ flex: 0 0 auto; }
   .request-card-history.success .request-card-ico{
   color: var(--ok-ink); background: var(--ok-wash); border-color: var(--ok-border);
 }
@@ -571,13 +583,22 @@
   .dropdown-surface .request-inbox{ padding-top: 0; }
   .dropdown-surface .request-card{ padding: 10px; gap: 9px; }
   .dropdown-surface .request-card-ico{ width: 30px; height: 30px; }
+  /* History rows wrap their content in an inner toggle button that carries
+     the padding; the card rule above outranks the base .request-card-history
+     reset, so re-scope it (and the toggle/detail metrics) to the dropdown. */
+  .dropdown-surface .request-card-history{ padding: 0; }
+  .dropdown-surface .request-history-toggle{ padding: 10px; gap: 9px; }
+  .dropdown-surface .request-history-detail{ padding: 0 10px 10px 49px; }
   @media (max-width: 520px) {
     .request-card{ display: grid; grid-template-columns: 30px minmax(0, 1fr); }
+    .request-card-history{ display: block; }
+    .request-history-toggle{ display: grid; grid-template-columns: 30px minmax(0, 1fr); }
     .request-card-ico{ grid-row: 1 / span 2; }
     .request-card-side{
       grid-column: 2; min-width: 0; flex-direction: row; align-items: center;
     }
     .request-when{ white-space: normal; }
+    .request-history-detail{ padding-left: 12px; flex-direction: column; align-items: stretch; }
   }
   /* ---- elicitation (SEP-2322 request queue and dialog) ----------------- */
   /* The queue carries only a one-line notification; clicking it opens the
@@ -643,6 +664,9 @@
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 11.5px; line-height: 1.5; color: var(--muted); white-space: pre-wrap;
     overflow-wrap: anywhere; }
+  /* Agent-, upstream-, and target-controlled text is isolated from
+     surrounding punctuation so bidi controls cannot reorder the dialog. */
+  .untrusted-identity{ unicode-bidi: isolate; }
   /* What Approve hands over, in the app's voice. Deliberately outside
      .approval-call's field chrome: that block is the agent's text, and the
      two must not be able to read as one. */
@@ -725,6 +749,9 @@
   
   /* ---- tables ----------------------------------------------------------- */
 .sec-table{ width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  .sec-table th{ padding: 6px; color: var(--muted); border-bottom: 1px solid var(--line);
+    font-size: 11px; font-weight: 650; text-align: left; }
+  .sec-table th:nth-last-child(-n+2){ text-align: right; }
   .sec-table td{ padding: 8px 6px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
   .s-name{ font-weight: 600; font-size: 13px; font-family: ui-monospace, Menlo, Consolas, monospace; }
   .s-sub{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: var(--muted); margin-top: 2px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -767,8 +794,13 @@
 .sec-table .ghost-copy{ transform: translateY(-3.5px); }
   .dropdown-surface .sec-table .ghost-copy{ transform: none; }
   .rowdel{ text-align: right; white-space: nowrap; }
+  .used-by-links{ display: flex; align-items: flex-start; flex-direction: column; gap: 2px; }
+  .used-by-link{ max-width: 180px; padding: 0; border: 0; background: none;
+    color: var(--accent-text); font: inherit; font-size: 12px; text-align: left;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .used-by-link:hover{ text-decoration: underline; }
   .confirm-row td{ height: 48px; padding: 0 6px; background: var(--danger-wash); border-radius: 0; font-size: 13px; }
-  .confirm-inline{ min-height: 48px; display: flex; align-items: center; gap: 8px; }
+  .confirm-inline{ min-height: 48px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .confirm-inline span{ flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* ---- empty state ------------------------------------------------------ */
 .empty{ text-align: center; padding: 42px 26px; }
@@ -1620,6 +1652,11 @@
 .activity-live-sessions { margin: 0 0 14px; }
 .act-search { flex: 1 1 160px; min-width: 140px; }
 .act-filter { flex: 0 0 auto; padding: 3px 10px; font-size: 12px; }
+.request-filters { padding-top: 2px; }
+.host-key-check { display: flex; align-items: center; gap: 9px; margin-top: 3px; }
+.host-key-check .rule-note { margin: 0; }
+.host-key-candidates { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.host-key-candidates .btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .act-chips { display: flex; gap: 5px; margin-top: 3px; flex-wrap: wrap; }
 .act-chip {
   font-size: 11px; color: var(--muted); border: 1px solid var(--line);

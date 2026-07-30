@@ -3,16 +3,17 @@
 //! There is no approval step: an authorized (wired) call executes
 //! immediately. What this module adds is retry safety, governed by an
 //! idempotency key. Mutating calls carry an optional `request_id`, and a
-//! retry re-sending the same `(agent, request_id)` joins the in-flight
-//! execution — exactly one upstream execution, the same response fanned out
-//! to every waiter and replayed to late retries while its byte-bounded
-//! replay body remains cached. Every completed key keeps a compact tombstone
-//! for the retention window, except pre-execution refusals (confirmation
-//! timeout/unavailability, policy) that never reached an upstream and are
-//! therefore safe to retry.
+//! retry re-sending the same `(identity, connection, request_id)` joins the
+//! in-flight execution — exactly one upstream execution, the same response
+//! fanned out to every waiter and replayed to late retries while its
+//! byte-bounded replay body remains cached. Every completed key keeps a
+//! compact tombstone for the retention window, except pre-execution refusals
+//! (confirmation timeout/unavailability, policy) that never reached an
+//! upstream and are therefore safe to retry.
 //! Equality under the key is checked, not assumed: each key stores a hash of
-//! the full normalized request, and reusing a `request_id` with a different
-//! payload is rejected (409).
+//! the full normalized request (client label included), and reusing a
+//! `request_id` with a different payload — or under a different label — is
+//! rejected (409), never replayed across labels.
 //!
 //! A disconnect never cancels an execution already in flight; completion
 //! normally leaves an idempotency tombstone and retains the outcome for
@@ -55,7 +56,13 @@ pub type Executor = Pin<Box<dyn Future<Output = ExecOutcome> + Send + 'static>>;
 
 /* ------------------------------ internals -------------------------------- */
 
-type Key = (String, String); // (agent, request_id)
+/// Idempotency namespace: authenticated client identity, target connection,
+/// and the caller's request id. A self-reported display label is deliberately
+/// absent; changing it cannot split an identity's namespace. The label rides
+/// in the payload hash instead, so one label reusing another's request id is
+/// refused with a mismatch rather than handed the other's cached outcome.
+pub type CoalesceKey = (Uuid, Uuid, String);
+type Key = CoalesceKey;
 
 struct Pending {
     key: Option<Key>,
@@ -111,9 +118,9 @@ pub struct Executions {
 
 /// What `run` needs from a capability handler.
 pub struct ExecRequest {
-    /// `(agent, request_id)` for mutating calls that sent a `request_id`;
-    /// never set for GET/HEAD.
-    pub coalesce_key: Option<(String, String)>,
+    /// `(authenticated client id, connection id, request_id)` for mutating
+    /// calls that sent a `request_id`; never set for GET/HEAD.
+    pub coalesce_key: Option<CoalesceKey>,
     /// Hash of the full normalized request; required with `coalesce_key`.
     pub payload_hash: Option<String>,
     /// The one upstream execution.
@@ -527,7 +534,7 @@ mod tests {
     }
 
     fn key(id: &str) -> Option<Key> {
-        Some(("claude-code".into(), id.into()))
+        Some((Uuid::from_u128(1), Uuid::from_u128(2), id.into()))
     }
 
     fn expect_err(result: Result<Execution, ExecError>) -> ExecError {

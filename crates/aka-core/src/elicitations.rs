@@ -142,6 +142,11 @@ impl ElicitationPermits {
 pub struct ElicitationField {
     pub name: String,
     pub label: String,
+    /// Whether the field appears in the schema object's `required` array.
+    /// Always serialized: consumers treat an *absent* flag as "sent by a
+    /// broker that predates it" and fall back to requiring the field, so an
+    /// explicit `false` is what makes a field optional.
+    pub required: bool,
     /// A JSON Schema `boolean`: the app renders a toggle, and the answer rides
     /// upstream as a real JSON boolean rather than a string.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -383,6 +388,13 @@ fn fields_from_schema(schema: &Value) -> Vec<ElicitationField> {
     let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
         return Vec::new();
     };
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<std::collections::HashSet<_>>();
     properties
         .iter()
         .map(|(name, spec)| {
@@ -413,6 +425,7 @@ fn fields_from_schema(schema: &Value) -> Vec<ElicitationField> {
             ElicitationField {
                 name: cap_text(name, FIELD_TEXT_CAP),
                 label: cap_text(label, FIELD_TEXT_CAP),
+                required: required.contains(name.as_str()),
                 boolean,
                 options,
             }
@@ -1139,6 +1152,7 @@ mod tests {
     fn schema_becomes_form_fields() {
         let fields = fields_from_schema(&json!({
             "type": "object",
+            "required": ["name", "env"],
             "properties": {
                 "name": { "type": "string", "title": "Full name" },
                 "dry_run": { "type": "boolean", "title": "Dry run" },
@@ -1153,7 +1167,10 @@ mod tests {
         let by_name: HashMap<_, _> = fields.iter().map(|f| (f.name.as_str(), f)).collect();
         assert_eq!(by_name["name"].label, "Full name");
         assert_eq!(by_name["name"].options, None);
+        assert!(by_name["name"].required);
         assert!(by_name["dry_run"].boolean);
+        assert!(!by_name["dry_run"].required);
+        assert!(by_name["env"].required);
         assert_eq!(
             by_name["env"].options.as_deref(),
             Some(["prod".to_string(), "staging".to_string()].as_slice())

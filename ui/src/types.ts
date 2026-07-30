@@ -156,6 +156,11 @@ export interface ActivityEntry {
 export interface ElicitationField {
   name: string;
   label: string;
+  /** Whether the field appears in the schema object's `required` array.
+   * Absent from brokers that predate the flag — treated as required (the UI
+   * they shipped against required every field); only an explicit `false`
+   * makes a field optional. */
+  required?: boolean;
   /** A JSON Schema `boolean`: render a toggle; the answer is sent as a real boolean. */
   boolean?: boolean;
   /** A fixed set of choices (a JSON Schema `enum`): render a dropdown. */
@@ -272,6 +277,8 @@ export interface BrokerProfile {
   error: string | null;
   /** A saved management token exists for `url`. */
   has_saved_token: boolean;
+  /** The managed broker advertises native operating-system authentication. */
+  native_authentication: boolean;
 }
 
 export interface Settings {

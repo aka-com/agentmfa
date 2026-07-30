@@ -39,7 +39,7 @@ use aka_core::daemon::wellknown;
 use aka_core::error::CoreError;
 use aka_core::events::{BrokerEvents, PresenceAuthority};
 use aka_core::manage::{LocalBackend, ManageResult, ManagementBackend};
-use aka_core::paths::{BrokerInstanceLock, Paths};
+use aka_core::paths::{BrokerInstanceLock, BrokerLockAttempt, BrokerLockRole, Paths};
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{
     ConfirmationMethod, ConnectionConfig, OAuthSpec, PgSslMode, SecretMeta, SecretValue,
@@ -866,9 +866,15 @@ fn open_vault(
 
 fn acquire_offline_store_lock(paths: &Paths) -> Result<BrokerInstanceLock, CoreError> {
     paths.ensure()?;
-    let instance_lock = paths
-        .try_acquire_broker_lock()?
-        .ok_or_else(|| CoreError::BrokerAlreadyRunning(paths.socket_display()))?;
+    let instance_lock = match paths.try_acquire_broker_lock_for(BrokerLockRole::Cli)? {
+        BrokerLockAttempt::Acquired(lock) => lock,
+        BrokerLockAttempt::Held(Some(holder)) if holder.role == BrokerLockRole::Cli => {
+            return Err(CoreError::BrokerStateBusy(Some(holder.pid)));
+        }
+        BrokerLockAttempt::Held(_) => {
+            return Err(CoreError::BrokerAlreadyRunning(paths.socket_display()));
+        }
+    };
 
     // A broker from before `broker.lock` may still own the rendezvous point.
     // Once the new lease is held, reject a live legacy socket before opening
@@ -1153,6 +1159,10 @@ fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
             "a broker started on {} while this command was connecting — retry \
              to manage it live, or stop it for an offline edit",
             paths.socket_file().display()
+        )),
+        Err(CoreError::BrokerStateBusy(pid)) => die(format!(
+            "another CLI process{} is editing this broker state — wait for it to finish, then retry",
+            pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default()
         )),
         Err(e) => die(format!("could not open the broker state: {e}")),
     };
@@ -1914,6 +1924,10 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) 
             "a broker is running on {} — stop it first (its in-memory \
              identity would overwrite this change)",
             paths.socket_file().display()
+        )),
+        Err(CoreError::BrokerStateBusy(pid)) => die(format!(
+            "another CLI process{} is editing this broker state — wait for it to finish, then retry",
+            pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default()
         )),
         Err(error) => die(format!("could not acquire the broker state lease: {error}")),
     };
@@ -2886,6 +2900,18 @@ mod tests {
         ));
         drop(broker);
         assert!(acquire_offline_store_lock(&paths).is_ok());
+    }
+
+    #[test]
+    fn offline_store_writer_reports_cli_lock_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let _first = acquire_offline_store_lock(&paths).unwrap();
+
+        assert!(matches!(
+            acquire_offline_store_lock(&paths),
+            Err(CoreError::BrokerStateBusy(Some(pid))) if pid == std::process::id()
+        ));
     }
 
     #[test]

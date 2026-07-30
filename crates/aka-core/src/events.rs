@@ -58,6 +58,13 @@ pub trait BrokerEvents: Send + Sync {
         false
     }
 
+    /// Whether this shell can prove fresh user presence with a native
+    /// operating-system authentication prompt. Management clients surface
+    /// this as a negotiated capability instead of making platform guesses.
+    fn native_authentication_available(&self) -> bool {
+        false
+    }
+
     /// Live session set changed.
     fn sessions_changed(&self) {}
 

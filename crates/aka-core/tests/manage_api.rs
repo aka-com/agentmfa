@@ -166,6 +166,9 @@ async fn manage_routes_require_the_management_token() {
     assert!(body["capabilities"].as_array().is_some_and(|items| items
         .iter()
         .any(|item| { item.as_str() == Some(aka_api::APPROVAL_SURFACE_CAPABILITY) })));
+    assert!(body["capabilities"].as_array().is_some_and(|items| items
+        .iter()
+        .all(|item| { item.as_str() != Some(aka_api::NATIVE_AUTHENTICATION_CAPABILITY) })));
     let auth_failures: Vec<_> = h
         .broker
         .audit

@@ -291,6 +291,12 @@ execution, the same response replayed while its body remains cached, and a
 non-reexecute tombstone retained for 10 minutes. Confirmation timeout and
 unavailability happen before execution and are not retained, so retry those
 with the same `request_id`.
+The namespace is your authenticated broker identity plus the target
+connection. The client label is self-reported display text and does not
+create a separate idempotency namespace; the same ID may be used
+independently for a different connection. Retries must present the same
+client label: reusing a `request_id` under a different label is refused
+rather than replayed, so one client is never handed another's outcome.
 Reusing a `request_id` with a *different* payload is rejected with
 `409 {{"reason": "request_id_mismatch"}}`. GET/HEAD are never coalesced.
 The broker reserves bounded idempotency capacity before accepting a keyed

@@ -637,8 +637,7 @@ fn deliver_notification_job(job: NotificationJob) {
     notification
         .summary(&job.title)
         .body(&job.body)
-        .action(OPEN_INBOX_ACTION, "Open Inbox")
-        .auto_icon();
+        .action(OPEN_INBOX_ACTION, "Open Inbox");
     // XDG servers only emit body activation when the special default action
     // is advertised; some desktops hide named buttons entirely.
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -804,16 +803,7 @@ fn configure_notification_identity(
 ) -> Result<(), String> {
     // Windows accepts the configured AppUserModel ID only for an installed
     // application. Development builds retain notify-rust's PowerShell ID.
-    let executable = tauri::utils::platform::current_exe().map_err(|error| error.to_string())?;
-    let directory = executable
-        .parent()
-        .ok_or_else(|| "the application executable has no parent directory".to_string())?
-        .display()
-        .to_string();
-    let separator = std::path::MAIN_SEPARATOR;
-    if !(directory.ends_with(format!("{separator}target{separator}debug"))
-        || directory.ends_with(format!("{separator}target{separator}release")))
-    {
+    if !tauri::is_dev() {
         notification.app_id(&app.config().identifier);
     }
     Ok(())
@@ -821,9 +811,25 @@ fn configure_notification_identity(
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn configure_notification_identity(
-    _app: &AppHandle,
-    _notification: &mut notify_rust::Notification,
+    app: &AppHandle,
+    notification: &mut notify_rust::Notification,
 ) -> Result<(), String> {
+    use tauri::path::BaseDirectory;
+
+    // The icon is cosmetic. An error here would abort delivery and mark
+    // notifications unavailable for the rest of the session, so a missing
+    // or odd resource layout merely loses the icon, never the notification.
+    match app.path().resolve("icons/icon.png", BaseDirectory::Resource) {
+        Ok(icon) => match icon.to_str() {
+            Some(icon) => {
+                notification.icon(icon);
+            }
+            None => tracing::warn!("bundled notification icon path is not valid UTF-8"),
+        },
+        Err(error) => {
+            tracing::warn!(%error, "could not resolve the bundled notification icon")
+        }
+    }
     Ok(())
 }
 

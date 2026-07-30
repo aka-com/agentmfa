@@ -325,6 +325,7 @@ pub fn elicitation_dto(pending: &crate::elicitations::PendingElicitation) -> Eli
             .map(|field| aka_api::ElicitationFieldDto {
                 name: field.name.clone(),
                 label: field.label.clone(),
+                required: field.required,
                 boolean: field.boolean,
                 options: field.options.clone(),
             })
@@ -668,6 +669,10 @@ impl FanoutEvents {
 impl crate::events::BrokerEvents for FanoutEvents {
     fn has_approval_surface(&self) -> bool {
         self.inner.has_approval_surface() || self.bus.has_approval_surface()
+    }
+
+    fn native_authentication_available(&self) -> bool {
+        self.inner.native_authentication_available()
     }
 
     fn sessions_changed(&self) {
@@ -1540,6 +1545,24 @@ mod tests {
         assert!(!bus.has_approval_surface());
         assert!(bus.renew_approval_surface(&surface.id()));
         assert!(bus.has_approval_surface());
+    }
+
+    /// `whoami` consults the broker's events handle, which is always the
+    /// fanout wrapper — it must answer with the wrapped shell's capability,
+    /// not the trait default.
+    #[test]
+    fn fanout_forwards_native_authentication_to_the_shell() {
+        struct NativeShell;
+        impl crate::events::BrokerEvents for NativeShell {
+            fn native_authentication_available(&self) -> bool {
+                true
+            }
+        }
+        let bus = Arc::new(ManageBus::new());
+        let native = FanoutEvents::new(Arc::new(NativeShell), bus.clone());
+        assert!(crate::events::BrokerEvents::native_authentication_available(&native));
+        let headless = FanoutEvents::new(Arc::new(NoopEvents), bus);
+        assert!(!crate::events::BrokerEvents::native_authentication_available(&headless));
     }
 
     #[test]

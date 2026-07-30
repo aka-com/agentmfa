@@ -11,7 +11,7 @@
 //!   `0700`; the lock, socket, and token are `0600`.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read, Seek, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -36,12 +36,33 @@ pub struct BrokerInstanceLock {
     _file: fs::File,
 }
 
+/// The kind of process holding the shared state lease. This is diagnostic
+/// metadata only; the operating-system advisory lock remains authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerLockRole {
+    Serve,
+    Cli,
+}
+
+/// Best-effort holder metadata persisted inside `broker.lock`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BrokerLockHolder {
+    pub pid: u32,
+    pub role: BrokerLockRole,
+}
+
+/// Result of a non-blocking lease attempt.
+pub enum BrokerLockAttempt {
+    Acquired(BrokerInstanceLock),
+    Held(Option<BrokerLockHolder>),
+}
+
 impl BrokerInstanceLock {
-    /// Try to acquire the broker lease without blocking. `Ok(None)` means a
-    /// live process already owns it; other filesystem/locking failures retain
-    /// their underlying I/O diagnosis.
-    fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
-        let file = fs::OpenOptions::new()
+    /// Try to acquire the broker lease without blocking and publish the
+    /// holder's role and PID while the lock is owned.
+    fn try_acquire(path: &Path, role: BrokerLockRole) -> io::Result<BrokerLockAttempt> {
+        let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -50,11 +71,47 @@ impl BrokerInstanceLock {
             .open(path)?;
         match file.try_lock() {
             Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::WouldBlock) => {
+                // The winner owns the lock just before it publishes metadata.
+                // Give that tiny interval a bounded retry so two simultaneous
+                // CLI starts still diagnose CLI contention accurately. An
+                // older broker may legitimately leave this file empty, and an
+                // unreadable or unparsable file (junk bytes, non-UTF-8) is a
+                // missing diagnosis, never a failure: the advisory lock has
+                // already answered the only authoritative question.
+                for attempt in 0..4 {
+                    let mut encoded = String::new();
+                    let readable = file
+                        .seek(std::io::SeekFrom::Start(0))
+                        .and_then(|_| file.read_to_string(&mut encoded))
+                        .is_ok();
+                    if readable {
+                        if let Ok(holder) = serde_json::from_str(encoded.trim()) {
+                            return Ok(BrokerLockAttempt::Held(Some(holder)));
+                        }
+                    }
+                    if attempt < 3 {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+                return Ok(BrokerLockAttempt::Held(None));
+            }
             Err(fs::TryLockError::Error(error)) => return Err(error),
         }
+        // Erase the previous holder's record before anything else: a loser
+        // arriving in this window reads an empty file (diagnosed as an
+        // unknown holder) rather than a dead process's stale identity.
+        file.set_len(0)?;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        Ok(Some(Self { _file: file }))
+        let holder = BrokerLockHolder {
+            pid: std::process::id(),
+            role,
+        };
+        file.seek(std::io::SeekFrom::Start(0))?;
+        serde_json::to_writer(&mut file, &holder).map_err(io::Error::other)?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        Ok(BrokerLockAttempt::Acquired(Self { _file: file }))
     }
 }
 
@@ -160,7 +217,19 @@ impl Paths {
     /// state for writing, including offline CLI commands, must hold this guard
     /// until its state handles have been dropped.
     pub fn try_acquire_broker_lock(&self) -> io::Result<Option<BrokerInstanceLock>> {
-        BrokerInstanceLock::try_acquire(&self.broker_lock_file())
+        match self.try_acquire_broker_lock_for(BrokerLockRole::Serve)? {
+            BrokerLockAttempt::Acquired(lock) => Ok(Some(lock)),
+            BrokerLockAttempt::Held(_) => Ok(None),
+        }
+    }
+
+    /// Role-aware form used by broker startup and offline CLI writers so a
+    /// losing process can report whether a server or another CLI owns state.
+    pub fn try_acquire_broker_lock_for(
+        &self,
+        role: BrokerLockRole,
+    ) -> io::Result<BrokerLockAttempt> {
+        BrokerInstanceLock::try_acquire(&self.broker_lock_file(), role)
     }
     /// The shared broker key's plaintext home (`~/.aka/token`, 0600) —
     /// the one file every local agent reads.

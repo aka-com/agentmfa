@@ -145,6 +145,12 @@ interface ConnectionDraft {
   dbname?: string | null;
   user?: string | null;
   hostKeyFingerprint?: string | null;
+  hostKeyCandidates?: HostKeyCandidate[];
+  hostKeyCheckMessage?: string;
+  hostKeyChecking?: boolean;
+  /** The fingerprint was filled from a known_hosts lookup (not typed), so a
+   * host/port change invalidates it along with the candidate list. */
+  hostKeyAutoPinned?: boolean;
   proxyJump?: string | null;
   sslmode?: string | null;
   /** True while sslmode was set from a loopback host rather than picked, so
@@ -314,6 +320,11 @@ interface AppState {
   activityQuery: string;
   activityAgent: string | null;
   activityIssuesOnly: boolean;
+  /** Request-history filters and expanded rows, local to this broker view. */
+  requestQuery: string;
+  requestAgent: string | null;
+  requestIssuesOnly: boolean;
+  expandedRequests: string[];
 }
 
 interface WiringToolsState {
@@ -435,11 +446,21 @@ const initialState: AppState = {
   activityQuery: '',
   activityAgent: null,
   activityIssuesOnly: false,
+  requestQuery: '',
+  requestAgent: null,
+  requestIssuesOnly: false,
+  expandedRequests: [],
 };
 
 const uiStore = new UiStore(initialState);
 const state = uiStore.state;
 let reactMounted = false;
+let renderPublication = 0;
+/** Cancels the one pending post-render fix-up, if any. */
+let cancelPendingFinish: (() => void) | null = null;
+/** Scroll snapshot awaiting restore; `resetScroll` clears it so a deferred
+ * restore cannot undo an explicit scroll-to-top. */
+let pendingScroll: Array<[string, Element, number]> | null = null;
 /** Changes only when broker identity changes. Async work captures this value
  * so a result from an earlier backend cannot update the current broker's UI.
  * Link-state changes within that scope do not invalidate useful reads. */
@@ -508,6 +529,10 @@ function clearBrokerOwnedState(): void {
   state.activityQuery = '';
   state.activityAgent = null;
   state.activityIssuesOnly = false;
+  state.requestQuery = '';
+  state.requestAgent = null;
+  state.requestIssuesOnly = false;
+  state.expandedRequests = [];
   state.toolSearch = '';
   state.secretSearch = '';
   state.sectionsExpanded = [];
@@ -553,6 +578,9 @@ function restoreScroll(saved: Array<[string, Element, number]>): void {
 }
 /** Switching tabs should start at the top, not inherit the old offset. */
 function resetScroll(): void {
+  // A deferred restore from the render this reset follows must not re-apply
+  // the pre-switch offset onto the new view's scroller.
+  pendingScroll = null;
   for (const sel of SCROLLERS) {
     const el = document.querySelector(sel);
     if (el) el.scrollTop = 0;
@@ -821,9 +849,43 @@ function render(): void {
   const scroll = captureScroll();
 
   if (reactMounted) {
-    flushSync(() => uiStore.publish());
+    // Ordinary external-store publications stay on React's scheduler. The
+    // initial root mount below remains synchronous so startup never flashes
+    // an empty shell. Exactly one deferred fix-up is pending at a time —
+    // the superseded one is cancelled, not left to accumulate (the hidden
+    // dropdown renders on every broker event, and an animation frame never
+    // fires while the document is hidden, so uncancelled callbacks would
+    // pile up retaining detached DOM). While hidden, a zero timeout stands
+    // in for the frame that will not come.
+    const publication = ++renderPublication;
+    uiStore.publish();
+    cancelPendingFinish?.();
+    pendingScroll = scroll;
+    const finish = () => {
+      cancelPendingFinish = null;
+      if (publication !== renderPublication) return;
+      finishRender(active, focusId, sel, pendingScroll ?? []);
+      pendingScroll = null;
+    };
+    if (document.hidden) {
+      const handle = setTimeout(finish, 0);
+      cancelPendingFinish = () => clearTimeout(handle);
+    } else {
+      const handle = requestAnimationFrame(finish);
+      cancelPendingFinish = () => cancelAnimationFrame(handle);
+    }
+    return;
   }
 
+  finishRender(active, focusId, sel, scroll);
+}
+
+function finishRender(
+  active: HTMLInputElement | HTMLTextAreaElement | null,
+  focusId: string | null,
+  sel: { start: number; end: number | null; dir: 'forward' | 'backward' | 'none' | null } | null,
+  scroll: Array<[string, Element, number]>,
+): void {
   restoreScroll(scroll);
 
   // The focused control survived (still focused): leave it alone. Restore
@@ -879,8 +941,15 @@ function approvalUnit(approval: Approval): string {
  * self-reported name, shown as sent.
  */
 function agentLabel(agent: string): string {
-  return agent === 'endpoint' ? 'A direct endpoint client' : agent;
+  return agent === 'endpoint'
+    ? 'A direct endpoint client'
+    : `Agent reported as “${agent}”`;
 }
+
+/** A broker that predates the `required` flag omits it entirely, and the UI
+ * it shipped against required every field — so absence stays required, and
+ * only an explicit `false` marks a field optional. */
+const elicitFieldRequired = (field: { required?: boolean }): boolean => field.required !== false;
 
 function requestOutcome(record: RequestRecord): {
   label: string;
@@ -1059,9 +1128,21 @@ function globalSectionsHTML(embeddedInStart = false) {
 function RequestInbox(): ReactNode {
   const active = activeRequests(state.approvals, state.elicitations);
   const activeIds = new Set(active.map((request) => request.id));
-  const recent = recentRequests(state.requests, activeIds);
+  const allRecent = recentRequests(state.requests, activeIds);
+  const requestAgents = [...new Set(allRecent.map((record) => record.agent).filter(Boolean))];
+  const needle = state.requestQuery.trim().toLowerCase();
+  const recent = allRecent.filter((record) => {
+    if (state.requestAgent && record.agent !== state.requestAgent) return false;
+    if (state.requestIssuesOnly && requestOutcome(record).tone === 'success') return false;
+    if (!needle) return true;
+    return record.summary.toLowerCase().includes(needle)
+      || (record.detail || '').toLowerCase().includes(needle)
+      || record.agent.toLowerCase().includes(needle)
+      || record.connection.toLowerCase().includes(needle)
+      || (record.target || '').toLowerCase().includes(needle);
+  });
   const count = active.length;
-  const empty = count === 0 && recent.length === 0;
+  const empty = count === 0 && allRecent.length === 0;
   const unavailableRefusals = state.activity.filter((entry) =>
     entry.text.startsWith('Refused (nobody could confirm):')).length;
   return (
@@ -1105,11 +1186,15 @@ function RequestInbox(): ReactNode {
                               <span className="request-card-top">
                                 <span className="request-kind">Approval</span>
                               </span>
-                              <b>{agentLabel(approval.agent)} {approvalUnit(approval)}</b>
-                              <span className="request-context">
+                              <b className="untrusted-identity" dir="auto">
+                                {agentLabel(approval.agent)} {approvalUnit(approval)}
+                              </b>
+                              <span className="request-context untrusted-identity" dir="auto">
                                 {approval.connection} · {approval.target}
                               </span>
-                              <code className="request-summary">{approval.summary}</code>
+                              <code className="request-summary untrusted-identity" dir="auto">
+                                {approval.summary}
+                              </code>
                               <span className="request-foot">{riders}</span>
                             </span>
                             <span className="request-card-side">
@@ -1131,11 +1216,15 @@ function RequestInbox(): ReactNode {
                             <span className="request-card-top">
                               <span className="request-kind">Input request</span>
                             </span>
-                            <b>{request.agent} says {request.connection} asked for input</b>
-                            <span className="request-context">
+                            <b className="untrusted-identity" dir="auto">
+                              {agentLabel(request.agent)} says {request.connection} asked for input
+                            </b>
+                            <span className="request-context untrusted-identity" dir="auto">
                               {request.agent} is paused · {request.tool}
                             </span>
-                            <span className="request-prompt">{request.prompt}</span>
+                            <span className="request-prompt untrusted-identity" dir="auto">
+                              {request.prompt}
+                            </span>
                           </span>
                           <span className="request-card-side">
                             <span className="request-when" title={absTime(request.requested_at)}>
@@ -1151,16 +1240,38 @@ function RequestInbox(): ReactNode {
             <section className="request-section" aria-labelledby="request-recent-title">
               <div className="request-section-head">
                 <h3 id="request-recent-title">Recent (this broker session)</h3>
-                <span className="request-total">{recent.length}</span>
+                <span className="request-total">{allRecent.length}</span>
               </div>
+              {allRecent.length > 0
+                ? <div className="act-filters request-filters">
+                    <input id="request-search" className="cat-search act-search" type="search"
+                      placeholder="Filter requests…" aria-label="Filter request history"
+                      value={state.requestQuery}
+                      onChange={(e) => { state.requestQuery = e.currentTarget.value; render(); }} />
+                    <button className={`seg-btn act-filter ${state.requestIssuesOnly ? 'on' : ''}`}
+                      data-act="request-filter-issues">Issues</button>
+                    {requestAgents.map((agent) => (
+                      <button key={agent} dir="auto"
+                        className={`seg-btn act-filter untrusted-identity ${
+                          state.requestAgent === agent ? 'on' : ''}`}
+                        data-act="request-filter-agent" data-value={agent}>{agent}</button>
+                    ))}
+                  </div>
+                : null}
               {recent.length === 0
                 ? <div className="request-section-empty">
-                    Resolved requests from this broker session will appear here.
+                    {allRecent.length
+                      ? 'Nothing matches these filters.'
+                      : 'Resolved requests from this broker session will appear here.'}
                   </div>
                 : <div className="request-list request-history-list">
                     {recent.map((record) => {
                       const outcome = requestOutcome(record);
                       const at = record.resolved_at ?? record.requested_at;
+                      const key = `${record.kind}:${record.id}`;
+                      const expanded = state.expandedRequests.includes(key);
+                      const connectionAvailable = record.connection_id
+                        && state.connections.some((connection) => connection.id === record.connection_id);
                       const context = [
                         agentLabel(record.agent),
                         record.connection,
@@ -1169,27 +1280,49 @@ function RequestInbox(): ReactNode {
                       return (
                         <article key={`${record.kind}:${record.id}`}
                           className={`request-card request-card-history ${outcome.tone}`}>
-                          <span className="request-card-ico"><Icon markup={outcome.icon} /></span>
-                          <span className="request-card-body">
-                            <span className="request-card-top">
-                              <span className="request-kind">
-                                {record.kind === 'elicitation' ? 'Input request'
-                                  : record.kind === 'approval' ? 'Approval' : 'Request'}
-                              </span>
-                              <span className="request-outcome">{outcome.label}</span>
-                            </span>
-                            <b>{outcome.detail}</b>
-                            <span className="request-context">{context}</span>
-                            <code className="request-summary">{record.summary}</code>
-                            {record.waiting > 1
-                              ? <span className="request-foot">
-                                  {record.waiting} calls shared this decision
+                          <button className="request-history-toggle"
+                            data-act="request-history-toggle" data-id={key}
+                            aria-expanded={expanded}>
+                            <span className="request-card-ico"><Icon markup={outcome.icon} /></span>
+                            <span className="request-card-body">
+                              <span className="request-card-top">
+                                <span className="request-kind">
+                                  {record.kind === 'elicitation' ? 'Input request'
+                                    : record.kind === 'approval' ? 'Approval' : 'Request'}
                                 </span>
-                              : null}
-                          </span>
-                          <span className="request-card-side">
-                            <span className="request-when" title={absTime(at)}>{relTime(at)}</span>
-                          </span>
+                                <span className="request-outcome">{outcome.label}</span>
+                              </span>
+                              <b>{outcome.detail}</b>
+                              <span className="request-context untrusted-identity" dir="auto">
+                                {context}
+                              </span>
+                              <code className="request-summary untrusted-identity" dir="auto">
+                                {record.summary}
+                              </code>
+                              {record.waiting > 1
+                                ? <span className="request-foot">
+                                    {record.waiting} calls shared this decision
+                                  </span>
+                                : null}
+                            </span>
+                            <span className="request-card-side">
+                              <span className="request-when" title={absTime(at)}>{relTime(at)}</span>
+                              <span className="request-card-action">
+                                {expanded ? 'Hide details' : 'Details'}
+                              </span>
+                            </span>
+                          </button>
+                          {expanded
+                            ? <div className="request-history-detail">
+                                <pre className="approval-detail untrusted-identity" dir="auto">
+                                  {record.detail || record.summary}
+                                </pre>
+                                {connectionAvailable
+                                  ? <button className="btn sm" data-act="request-open-connection"
+                                      data-id={record.connection_id}>Open tool</button>
+                                  : null}
+                              </div>
+                            : null}
                         </article>
                       );
                     })}
@@ -1206,11 +1339,19 @@ function secretsTableHTML(query = '') {
     || secret.name.toLowerCase().includes(needle)
     || secret.used_by_names.some((name) => name.toLowerCase().includes(needle))).map((s) => {
     if (state.confirm && state.confirm.kind === 'del-secret-inuse' && state.confirm.id === s.id) {
-      return `<tr class="confirm-row"><td colspan="3"><div class="confirm-inline"><span>Currently used by ${esc(s.used_by_names.join(', '))}. Delete the tool first.</span>
+      const deleteButtons = s.used_by_names.map((name) => {
+        const connection = state.connections.find((candidate) => candidate.name === name);
+        return connection
+          ? `<button class="btn sm danger" data-act="delete-using-connection"
+              data-id="${escAttr(connection.id)}">Delete ${esc(name)}…</button>`
+          : '';
+      }).join('');
+      return `<tr class="confirm-row"><td colspan="4"><div class="confirm-inline"><span>Currently used by ${esc(s.used_by_names.join(', '))}. Delete the tool first.</span>
+          ${deleteButtons}
           <button class="btn sm" data-act="confirm-cancel">OK</button></div></td></tr>`;
     }
     if (state.confirm && state.confirm.kind === 'del-secret' && state.confirm.id === s.id) {
-      return `<tr class="confirm-row"><td colspan="3"><div class="confirm-inline"><span>Delete “${esc(s.name)}” from the macOS Keychain?</span>
+      return `<tr class="confirm-row"><td colspan="4"><div class="confirm-inline"><span>Delete “${esc(s.name)}” from the macOS Keychain?</span>
           <button class="btn sm" data-act="confirm-cancel">Cancel</button>
           <button class="btn sm danger" data-act="del-secret-confirm" data-id="${s.id}">Delete</button></div></td></tr>`;
     }
@@ -1229,14 +1370,24 @@ function secretsTableHTML(query = '') {
       ? `<span class="copied-badge">${ICONS.check}<span>Copied</span></span>`
       : `<button class="ghost-copy" title="Copy value" data-act="copy-secret" data-id="${s.id}">${ICONS.copy}<span>Copy</span></button>`;
     const valText = revealed ? esc(revealed) : '••••••••';
+    const usedBy = s.used_by_names.length
+      ? `<div class="used-by-links">${s.used_by_names.map((name) => {
+          const connection = state.connections.find((candidate) => candidate.name === name);
+          return connection
+            ? `<button class="used-by-link" data-act="show-connection"
+                data-id="${escAttr(connection.id)}">${esc(name)}</button>`
+            : `<span>${esc(name)}</span>`;
+        }).join('')}</div>`
+      : '<span class="s-sub">Not in use</span>';
     return `<tr>
       <td><div class="s-name">${esc(s.name)}</div></td>
+      <td>${usedBy}</td>
       <td class="val"><span class="val-wrap"><span class="val-slot ${copied ? 'is-copied' : ''}"><code>${valText}</code><span class="val-overlay">${overlay}</span></span></span> ${eyeBtn}</td>
       <td class="rowdel">
         <button class="icon-btn" title="Edit secret" aria-label="Edit secret ${escAttr(s.name)}" data-act="edit-secret" data-id="${s.id}">${ICONS.pencil}</button>
         <button class="icon-btn" title="Delete secret" aria-label="Delete secret ${escAttr(s.name)}" data-act="del-secret-ask" data-id="${s.id}">${ICONS.trash}</button></td></tr>`;
   }).join('');
-  return `<table class="sec-table"><tbody>${rows}</tbody></table>`;
+  return `<table class="sec-table"><thead><tr><th>Credential</th><th>Used by</th><th>Value</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 /* ---- connection guides (Get started > guides view) ---- */
@@ -2200,7 +2351,10 @@ function ActivityRow({ entry }: { entry: ActivityEntry }): ReactNode {
         {entry.detail ? <div className="act-detail">{entry.detail}</div> : null}
         {hasChips && (
           <div className="act-chips">
-            {entry.agent ? <span className="act-chip" title="Agent">{entry.agent}</span> : null}
+            {entry.agent
+              ? <span className="act-chip untrusted-identity" dir="auto"
+                  title="Self-reported agent label">reported as “{entry.agent}”</span>
+              : null}
             {typeof entry.duration_ms === 'number'
               ? <span className="act-chip act-chip-time" title="Duration">{entry.duration_ms} ms</span> : null}
             {/* A hosted broker authorizes gated actions by manage-token
@@ -3281,11 +3435,11 @@ function ElicitationSheet(): ReactNode {
       <div className="sheet-backdrop" data-act="sheet-cancel"></div>
       <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="elicit-title">
         <div className="elicit-dlg-ico"><Icon markup={ICONS.bell} /></div>
-        <h3 id="elicit-title" className="elicit-dlg-title">
-          {request.agent} says {request.connection} asked for input
+        <h3 id="elicit-title" className="elicit-dlg-title untrusted-identity" dir="auto">
+          {agentLabel(request.agent)} says {request.connection} asked for input
         </h3>
         {/* Third-party text: rendered verbatim and inert. */}
-        <div className="elicit-dlg-question">{request.prompt}</div>
+        <div className="elicit-dlg-question untrusted-identity" dir="auto">{request.prompt}</div>
         {/* The upstream asked for something credential-shaped. It still gets
             its form — the match is a guess about prose, and refusing on it
             broke ordinary fields whose names merely read like secrets — but
@@ -3305,18 +3459,25 @@ function ElicitationSheet(): ReactNode {
           )
           : null}
         <div className="elicit-dlg-fields">
-          {request.fields.map((field, index) => (
+          {request.fields.map((field, index) => {
+            const required = elicitFieldRequired(field);
+            return (
             <label className="elicit-field" key={field.name}>
-              <span>{field.label}</span>
+              <span className="untrusted-identity" dir="auto">
+                {field.label} {required ? <b aria-hidden="true">*</b>
+                  : <span className="label-detail">(optional)</span>}
+              </span>
               {field.boolean ? (
                 // A yes/no field: a checkbox whose value is stored as the
                 // string 'true'/'false' (the broker coerces it to a real JSON
                 // boolean before it rides upstream).
                 <input id={`elicit-${request.id}-${field.name}`} type="checkbox"
                   className="elicit-toggle"
+                  aria-required={required}
                   checked={state.elicitValues[field.name] === 'true'}
                   onChange={(e) => {
                     state.elicitValues[field.name] = e.currentTarget.checked ? 'true' : 'false';
+                    delete state.sheetErrors[`elicit:${field.name}`];
                     render();
                   }} />
               ) : field.options?.length ? (
@@ -3324,8 +3485,13 @@ function ElicitationSheet(): ReactNode {
                 // field's index so an arbitrary upstream field name cannot
                 // produce an invalid DOM id. select-pick writes elicitValues.
                 <CustomSelect id={`elicit-sel-${index}`}
-                  options={field.options.map((opt) => [opt, opt])}
-                  selectedValue={state.elicitValues[field.name] ?? field.options[0]} />
+                  options={[
+                    ...(required ? [] : [['', 'Not provided'] as [string, string]]),
+                    ...field.options.map((opt): [string, string] => [opt, opt]),
+                  ]}
+                  ariaRequired={required}
+                  selectedValue={state.elicitValues[field.name]
+                    ?? (required ? field.options[0] : '')} />
               ) : (
                 // Always plain text, whatever the schema declared. A masked
                 // field is the affordance that says "this is a credential,
@@ -3335,14 +3501,21 @@ function ElicitationSheet(): ReactNode {
                 // drawn by the browser instead of by us.
                 <input id={`elicit-${request.id}-${field.name}`}
                   type="text" autoComplete="off" spellCheck={false}
+                  aria-required={required}
                   autoCapitalize="off" autoCorrect="off"
                   data-1p-ignore="true" data-lpignore="true" data-bwignore="true"
                   data-form-type="other"
                   value={state.elicitValues[field.name] ?? ''}
-                  onChange={(e) => { state.elicitValues[field.name] = e.currentTarget.value; render(); }} />
+                  onChange={(e) => {
+                    state.elicitValues[field.name] = e.currentTarget.value;
+                    delete state.sheetErrors[`elicit:${field.name}`];
+                    render();
+                  }} />
               )}
+              <FieldError k={`elicit:${field.name}`} />
             </label>
-          ))}
+            );
+          })}
         </div>
         <div className="sheet-actions elicit-dlg-actions">
           <button className="btn elicit-refuse-btn" data-act="elicit-refuse" data-id={request.id}>Refuse</button>
@@ -3395,14 +3568,18 @@ function ApprovalSheet(): ReactNode {
       <div className="sheet-backdrop" data-act="sheet-cancel"></div>
       <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
         <div className="elicit-dlg-ico"><Icon markup={ICONS.shieldAlert} /></div>
-        <h3 id="approval-title" className="elicit-dlg-title">
+        <h3 id="approval-title" className="elicit-dlg-title untrusted-identity" dir="auto">
           {agentLabel(approval.agent)} {approvalUnit(approval)}
         </h3>
-        <div className="elicit-dlg-context">{approval.connection} · {approval.target}</div>
+        <div className="elicit-dlg-context untrusted-identity" dir="auto">
+          {approval.connection} · {approval.target}
+        </div>
         {/* The call itself, verbatim and inert: it is the agent's text. */}
         <div className="approval-call">
-          <div className="approval-summary">{approval.summary}</div>
-          {approval.detail ? <pre className="approval-detail">{approval.detail}</pre> : null}
+          <div className="approval-summary untrusted-identity" dir="auto">{approval.summary}</div>
+          {approval.detail
+            ? <pre className="approval-detail untrusted-identity" dir="auto">{approval.detail}</pre>
+            : null}
         </div>
         {/* What Approve actually hands over. Outside the block above on
             purpose: that is the agent's text, this is ours, and the whole
@@ -3562,18 +3739,20 @@ const fieldCls = (key: string): string => (state.sheetErrors[key] ? 'err' : '');
  * button plus a fixed-position listbox portaled under #overlays so the
  * scrolling sheet cannot clip it (see positionFormMenu). Selection is
  * applied by the delegated select-pick handler writing the draft. */
-function CustomSelect({ id, options, selectedValue, errCls = '' }: {
+function CustomSelect({ id, options, selectedValue, errCls = '', ariaRequired }: {
   id: string;
   options: Array<[string, string]>;
   selectedValue: string | null | undefined;
   errCls?: string;
+  ariaRequired?: boolean;
 }): ReactNode {
   const open = state.formMenuOpen === id;
   const selected = options.find(([value]) => value === selectedValue) ?? options[0];
   return (
     <div className="cred-select">
       <button type="button" id={id} className={`cred-trigger ${errCls}`} value={selected[0]}
-        data-act="select-toggle" data-menu={id} aria-haspopup="listbox" aria-expanded={open}>
+        data-act="select-toggle" data-menu={id} aria-haspopup="listbox" aria-expanded={open}
+        aria-required={ariaRequired}>
         <span className="cred-name">{selected[1]}</span>
         <span className="cred-chevron" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>
       </button>
@@ -3623,6 +3802,9 @@ function disarmDraftTestOverride(): void {
  * add-form edit disarms a failed draft test's save-anyway override. */
 function setDraftField(key: keyof ConnectionDraft & string, errKey: string, value: string): void {
   (state.draft as Record<string, unknown>)[key] = value;
+  // A hand-edited fingerprint is the user's own claim, not the lookup's; it
+  // must survive later host/port corrections.
+  if (key === 'hostKeyFingerprint') state.draft.hostKeyAutoPinned = undefined;
   if (state.sheetErrors[errKey]) delete state.sheetErrors[errKey];
   delete state.sheetErrors._global;
   delete state.sheetErrors._detail;
@@ -3946,6 +4128,17 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       if (key === 'host' && state.sheet?.kind === 'add-conn' && t === 'pg') {
         applyLoopbackTlsPrefill(d);
       }
+      if (t === 'ssh' && (key === 'host' || key === 'port')) {
+        d.hostKeyCandidates = undefined;
+        d.hostKeyCheckMessage = undefined;
+        // A fingerprint filled from the lookup was learned for the old
+        // destination; keeping it would pin the wrong host's key. Typed
+        // values are the user's own claim and survive.
+        if (d.hostKeyAutoPinned) {
+          d.hostKeyFingerprint = null;
+          d.hostKeyAutoPinned = undefined;
+        }
+      }
       render();
     };
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
@@ -4067,6 +4260,25 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
           value={d.hostKeyFingerprint ?? ''}
           onChange={(e) => setDraftField('hostKeyFingerprint', 'hostKeyFingerprint', e.currentTarget.value)} />
         <FieldError k="hostKeyFingerprint" />
+        <div className="host-key-check">
+          <button type="button" className="btn sm" data-act="check-known-hosts"
+            disabled={!d.host?.trim() || d.hostKeyChecking}>
+            {d.hostKeyChecking ? 'Checking…' : 'Check known_hosts'}
+          </button>
+          {d.hostKeyCheckMessage
+            ? <span className="rule-note" role="status">{d.hostKeyCheckMessage}</span>
+            : null}
+        </div>
+        {d.hostKeyCandidates && d.hostKeyCandidates.length > 1
+          ? <div className="host-key-candidates" aria-label="Matching known host keys">
+              {d.hostKeyCandidates.map((candidate) => (
+                <button type="button" className="btn sm" key={candidate.fingerprint}
+                  data-act="pick-host-key" data-id={candidate.fingerprint}>
+                  {candidate.algorithm} · {candidate.fingerprint}
+                </button>
+              ))}
+            </div>
+          : null}
         <div className="rule-note">The server’s identity (host key) is confirmed with you the first time an agent connects.</div>
       </div>
     );
@@ -4567,6 +4779,17 @@ function settingsSheet() {
       <div class="seg in-form" role="radiogroup" aria-label="Stay unlocked for">
       ${windowBtn(15 * 60, '15 min')}${windowBtn(60 * 60, '1 hr')}${windowBtn(2 * 60 * 60, '2 hrs')}</div></div>`
     : '';
+  const authenticationRows = state.broker.native_authentication
+    ? `${reauthRow}${presenceRow}`
+    : state.broker.mode === 'remote'
+      ? `<div class="set-row"><div class="set-txt">
+          <div class="st-title">Authorized by management token on ${esc(brokerLabel(state.broker))}</div>
+          <div class="st-sub">This broker does not advertise native OS authentication. Sensitive settings are authorized by the management token instead.</div>
+        </div></div>`
+      : `<div class="set-row"><div class="set-txt">
+          <div class="st-title">Native OS authentication unavailable</div>
+          <div class="st-sub">This broker shell does not advertise an operating-system authentication prompt.</div>
+        </div></div>`;
   // Window chrome is a this-machine concern: in remote mode the toggle
   // would patch the *remote* broker's setting, which this app's chrome
   // deliberately never reads (windows.rs) — and could silently reconfigure
@@ -4578,7 +4801,7 @@ function settingsSheet() {
     : '';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${notificationRow}${notificationWarning}${notificationPreviewRow}${reauthRow}${presenceRow}${dockRow}
+    ${notificationRow}${notificationWarning}${notificationPreviewRow}${authenticationRows}${dockRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -4970,6 +5193,7 @@ async function saveSecret(): Promise<void> {
   const epoch = brokerEpoch;
   const name = (state.draft.name || '').trim();
   const value = state.draft.value || '';
+  let dependentConnectionIds: string[] = [];
   const errs: Record<string, string> = {};
   if (!name) errs.name = 'Name is required';
   if (sheet.kind === 'add-secret' && !value) errs.value = 'Value is required';
@@ -4988,6 +5212,10 @@ async function saveSecret(): Promise<void> {
       render();
       return;
     }
+    const usedBy = state.secrets.find((secret) => secret.id === sheet.id)?.used_by_names ?? [];
+    dependentConnectionIds = state.connections
+      .filter((connection) => usedBy.includes(connection.name))
+      .map((connection) => connection.id);
     try {
       await invoke('edit_secret', {
         id: sheet.id ?? '',
@@ -5003,6 +5231,10 @@ async function saveSecret(): Promise<void> {
   }
   closeSheet();
   await refresh('secrets');
+  if (!brokerEpochIsCurrent(epoch)) return;
+  for (const connectionId of dependentConnectionIds) {
+    void runConnectionTest(connectionId);
+  }
 }
 
 async function saveConn(): Promise<void> {
@@ -5724,6 +5956,22 @@ document.addEventListener('click', async (e) => {
         state.confirm = null; toast('🗑 Removed from macOS Keychain'); await refresh('secrets');
       }
       break;
+    case 'show-connection':
+      state.tab = 'connections';
+      state.addToolOpen = false;
+      state.selectedConn = id;
+      state.connDetailOpen = true;
+      state.confirm = null;
+      render();
+      break;
+    case 'delete-using-connection':
+      state.tab = 'connections';
+      state.addToolOpen = false;
+      state.selectedConn = id;
+      state.connDetailOpen = true;
+      state.confirm = { kind: 'del-conn', id };
+      render();
+      break;
     case 'edit-secret':
       if (!await holdDropdownFormOpen()) break;
       setSheet({ kind: 'edit-secret', id });
@@ -5919,6 +6167,55 @@ document.addEventListener('click', async (e) => {
       state.connAdvancedOpen = !state.connAdvancedOpen;
       render();
       break;
+    case 'check-known-hosts': {
+      const host = state.draft.host?.trim() ?? '';
+      if (!host || state.draft.hostKeyChecking) break;
+      const port = Number.parseInt(state.draft.port || '22', 10);
+      const epoch = brokerEpoch;
+      const draft = state.draft;
+      draft.hostKeyChecking = true;
+      draft.hostKeyCheckMessage = undefined;
+      render();
+      try {
+        const candidates = await invoke('check_known_hosts', {
+          host,
+          port: Number.isInteger(port) && port > 0 ? port : 22,
+        });
+        if (!brokerEpochIsCurrent(epoch) || state.draft !== draft) break;
+        draft.hostKeyCandidates = candidates;
+        if (candidates.length === 1) {
+          draft.hostKeyFingerprint = candidates[0].fingerprint;
+          draft.hostKeyAutoPinned = true;
+          draft.hostKeyCheckMessage =
+            `Pinned ${candidates[0].algorithm} from ${candidates[0].source}.`;
+        } else if (candidates.length > 1) {
+          draft.hostKeyCheckMessage = 'Choose the host key this tool should pin.';
+        } else {
+          draft.hostKeyCheckMessage = 'No matching key was found in known_hosts.';
+        }
+      } catch (error) {
+        if (!brokerEpochIsCurrent(epoch) || state.draft !== draft) break;
+        draft.hostKeyCandidates = [];
+        draft.hostKeyCheckMessage = errorMessage(error);
+      } finally {
+        if (brokerEpochIsCurrent(epoch) && state.draft === draft) {
+          draft.hostKeyChecking = false;
+          render();
+        }
+      }
+      break;
+    }
+    case 'pick-host-key': {
+      const candidate = state.draft.hostKeyCandidates
+        ?.find((item) => item.fingerprint === id);
+      if (!candidate) break;
+      state.draft.hostKeyFingerprint = candidate.fingerprint;
+      state.draft.hostKeyAutoPinned = true;
+      state.draft.hostKeyCheckMessage = `Pinned ${candidate.algorithm} from ${candidate.source}.`;
+      delete state.sheetErrors.hostKeyFingerprint;
+      render();
+      break;
+    }
     case 'select-toggle': {
       const menuId = btn.dataset.menu ?? '';
       state.formMenuOpen = state.formMenuOpen === menuId ? null : menuId;
@@ -5936,7 +6233,10 @@ document.addEventListener('click', async (e) => {
         const index = Number(menuId.slice('elicit-sel-'.length));
         const request = state.elicitations.find((r) => r.id === state.sheet?.id);
         const field = request?.fields[index];
-        if (field) state.elicitValues[field.name] = id;
+        if (field) {
+          state.elicitValues[field.name] = id;
+          delete state.sheetErrors[`elicit:${field.name}`];
+        }
         render();
         focusField(menuId);
         break;
@@ -6063,6 +6363,29 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     }
+    case 'request-filter-issues':
+      state.requestIssuesOnly = !state.requestIssuesOnly;
+      render();
+      break;
+    case 'request-filter-agent': {
+      const value = btn.dataset.value || '';
+      state.requestAgent = state.requestAgent === value ? null : value;
+      render();
+      break;
+    }
+    case 'request-history-toggle':
+      state.expandedRequests = state.expandedRequests.includes(id)
+        ? state.expandedRequests.filter((request) => request !== id)
+        : [...state.expandedRequests, id];
+      render();
+      break;
+    case 'request-open-connection':
+      state.tab = 'connections';
+      state.addToolOpen = false;
+      state.selectedConn = id;
+      state.connDetailOpen = true;
+      render();
+      break;
     case 'oauth-reconnect': {
       state.connMenuOpen = null;
       state.connMenuPoint = null;
@@ -6196,13 +6519,17 @@ document.addEventListener('click', async (e) => {
     case 'elicit-open': {
       if (!await holdDropdownFormOpen()) break;
       state.elicitValues = {};
+      state.sheetErrors = {};
       const request = state.elicitations.find((r) => r.id === id);
-      // A dropdown shows its first choice selected; seed that as the value so
-      // an untouched enum still sends what the user sees, and validation on
-      // send treats it as answered.
+      // A required dropdown shows its first choice selected; seed that value
+      // so an untouched enum sends what the user sees. Optional fields start
+      // absent and stay out of the upstream answer until the user fills them.
       for (const field of request?.fields ?? []) {
+        if (!elicitFieldRequired(field)) continue;
         if (field.boolean) state.elicitValues[field.name] = 'false';
-        else if (field.options?.length) state.elicitValues[field.name] = field.options[0];
+        else if (field.options?.length) {
+          state.elicitValues[field.name] = field.options[0];
+        }
       }
       setSheet({ kind: 'elicitation', id });
       render();
@@ -6215,13 +6542,25 @@ document.addEventListener('click', async (e) => {
       const request = state.elicitations.find((r) => r.id === id);
       if (!request) break;
       const values: Record<string, string> = {};
-      let missing = false;
-      for (const field of request.fields) {
+      state.sheetErrors = {};
+      let missingIndex: number | null = null;
+      for (const [index, field] of request.fields.entries()) {
         const value = (state.elicitValues[field.name] ?? '').trim();
-        if (!value) { missing = true; focusField(`elicit-${id}-${field.name}`); break; }
-        values[field.name] = value;
+        if (!value && elicitFieldRequired(field)) {
+          state.sheetErrors[`elicit:${field.name}`] = 'This field is required';
+          missingIndex = index;
+          break;
+        }
+        if (value) values[field.name] = value;
       }
-      if (missing) break;
+      if (missingIndex !== null) {
+        render();
+        const field = request.fields[missingIndex];
+        focusField(field.options?.length
+          ? `elicit-sel-${missingIndex}`
+          : `elicit-${id}-${field.name}`);
+        break;
+      }
       if (await answerElicitation(id, true, values)) {
         toast(`📨 Sent to ${request.connection} — ${request.agent} resumes`);
         closeSheet();
