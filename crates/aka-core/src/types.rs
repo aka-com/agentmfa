@@ -668,13 +668,15 @@ pub enum DecisionSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfirmationMethod {
-    /// Native OS authentication (Touch ID / account password).
+    /// Legacy value retained so historical audit entries remain readable.
+    /// Current builds do not emit it.
     OsAuthentication,
     /// An interactive terminal acknowledged the action.
     Terminal,
     /// The shell explicitly waived confirmation (auto-approve / dev modes).
     Waived,
-    /// A recent OS authentication was still fresh (the presence window).
+    /// Legacy value retained so historical audit entries remain readable.
+    /// Current builds do not emit it.
     RecentAuthentication,
     /// Possession of the management token authorized the action (a hosted
     /// broker managed over its manage API — no user is at the machine).
@@ -779,9 +781,10 @@ mod tests {
 
     #[test]
     fn settings_written_by_older_versions_still_load() {
-        // Retired keys (the walkthrough toggles) must not fail the parse.
+        // Retired keys must not fail the parse.
         let settings: Settings = serde_json::from_str(
-            r#"{"reauth_on_read":true,"menu_bar_hides_dock":false,
+            r#"{"reauth_on_read":true,"presence_window_secs":900,
+                "menu_bar_hides_dock":false,
                 "show_service_walkthrough":true,"show_agent_walkthrough":false}"#,
         )
         .unwrap();

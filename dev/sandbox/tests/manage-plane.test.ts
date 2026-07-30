@@ -360,17 +360,13 @@ test('access and confirmation settings round-trip through the DTO', async () => 
 
 test('settings and identity are readable and writable', async () => {
   const settings = await broker.manage<Record<string, unknown>>('GET', '/settings');
-  assert.equal(typeof settings.reauth_on_read, 'boolean');
-  // The window is a fixed choice, not a free number: an out-of-range value
-  // is refused rather than clamped.
-  const refused = await broker.manageRaw('PATCH', '/settings', { body: { presence_window_secs: 600 } });
-  assert.equal(refused.status, 422);
-  assert.equal(refused.json<{ code: string }>().code, 'invalid_setting');
+  assert.equal(typeof settings.menu_bar_hides_dock, 'boolean');
+  assert.equal(typeof settings.confirm_ssh_host_keys, 'boolean');
 
   const patched = await broker.manage<Record<string, unknown>>('PATCH', '/settings', {
-    presence_window_secs: 3600,
+    confirm_ssh_host_keys: true,
   });
-  assert.equal(patched.presence_window_secs, 3600);
+  assert.equal(patched.confirm_ssh_host_keys, true);
 
   const identity = await broker.manage<Record<string, string>>('GET', '/identity');
   assert.equal(identity.socket_path, broker.socketPath);

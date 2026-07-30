@@ -26,12 +26,6 @@ struct TestEvents;
 
 impl BrokerEvents for TestEvents {}
 
-/// A shell whose user declines every native confirmation. Used to exercise
-/// the key-rotation confirmation's cancel path.
-struct DecliningEvents;
-
-impl BrokerEvents for DecliningEvents {}
-
 struct Harness {
     broker: Arc<Broker>,
     _daemon: daemon::DaemonHandle,
@@ -597,14 +591,6 @@ async fn pairing_flow_and_token_auth() {
     )
     .await;
     assert_eq!(status, 200);
-}
-
-#[tokio::test]
-async fn rotation_requires_the_native_confirmation() {
-    let h = harness_with_events(BrokerConfig::default(), Arc::new(DecliningEvents)).await;
-    let before = h.broker.identity.token();
-    assert!(h.broker.ui_rotate_key().is_err(), "declined ⇒ no rotation");
-    assert_eq!(h.broker.identity.token(), before);
 }
 
 #[tokio::test]

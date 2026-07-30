@@ -156,17 +156,18 @@ Nothing about the app's behaviour changes between the two — same entitlement,
 same access group, same runtime probe. The only question either answers is
 whether macOS honours the entitlement at all, so try the default first.
 
-Human presence is *not* enforced by the Keychain. Where the app asks for it,
-it is enforced by the shell's own LocalAuthentication gate
-(`src-tauri/src/auth.rs`) and the presence window in `Store` — one prompt,
-then a sliding window (`presence_window_secs`, 15 minutes by default,
-12-hour hard ceiling). Reading or copying one's own secrets is prompt-free
-by default: the read gate (`reauth_on_read`) is opt-in, and stores written
-while it defaulted to on are flipped off once at open, with an activity-log
-entry (`migrate_read_gate_default` in `store.rs`).
-Attaching `SecAccessControl(userPresence)` to the items instead would move
-that decision into the OS, but Touch ID reuse there caps at five minutes, so
-it would prompt more often than the app's opt-in gate does rather than less.
+Human presence is not independently enforced for vault reads. The signed app
+reads its data-protection Keychain items without an OS dialog; submitting a
+management action in the app or CLI is the authorization to perform it.
+Agent traffic remains constrained by each connection's access policy, optional
+Ask-before decision, pinned destination, and immediate revocation behavior.
+Destructive UI actions such as rotating the shared key use ordinary in-app
+confirmation dialogs.
+
+The unsigned `mfa` binary uses the login keychain for an offline edit, so macOS
+may still show a Keychain access dialog for those reads. That is a consequence
+of the offline executable's Keychain access, not an AgentMFA presence policy;
+online CLI commands go through the broker and do not touch the Keychain.
 
 ## Publishing
 

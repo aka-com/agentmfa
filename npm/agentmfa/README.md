@@ -111,12 +111,9 @@ demos, tests, and CI.
 ## Platform notes
 
 - **macOS** is the fully supported product platform: secrets live in the
-  Keychain. Copying a secret's full value from the desktop app can be gated
-  behind native reauthentication (Touch ID) with the opt-in "Confirm before
-  using saved secrets" setting; by default it is off and copies are audited
-  but not prompted. ABP/0
-  agents authenticate with the machine's shared broker key; the key is not
-  bound to a process or code-signing identity.
+  Keychain. Explicit app actions authorize management changes, and copies are
+  audited. ABP/0 agents authenticate with the machine's shared broker key; the
+  key is not bound to a process or code-signing identity.
 
   The signed AgentMFA app reads its Keychain items without any OS approval
   dialog, because it is entitled to the data-protection keychain. This `mfa`

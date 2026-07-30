@@ -67,10 +67,10 @@ fn request_tray_icon(waiting: bool) -> tauri::Result<Image<'static>> {
 
 const DROPDOWN_GAP: f64 = 6.0;
 static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
-/// A dropdown form may hold credentials that must survive native
-/// authentication and any error returned afterwards. While it is open, focus
-/// loss (including the Touch ID sheet becoming key) must not dismiss it. The
-/// webview renews this lease; a crashed/reloaded form cannot strand the panel.
+/// A dropdown form may hold credentials that must survive focus changes and
+/// any error returned afterwards. While it is open, focus loss must not
+/// dismiss it. The webview renews this lease; a crashed/reloaded form cannot
+/// strand the panel.
 static DROPDOWN_FORM_ACTIVE: Mutex<Option<Instant>> = Mutex::new(None);
 const DROPDOWN_FORM_TTL: Duration = Duration::from_secs(2 * 60);
 /// Tray navigation can happen before a webview installs its event listener.
