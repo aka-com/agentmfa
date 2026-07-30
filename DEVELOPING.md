@@ -55,9 +55,15 @@ Then open:
 ### Frontend architecture
 
 React owns the main-window and dropdown shells in `ui/app.tsx`. Transient UI
-state lives in the small external store in `ui/src/ui-store.ts`; broker-owned
-reads go through the broker-scoped TanStack Query client in
-`ui/src/query-client.ts`.
+state and its schema live in `ui/src/app-state.ts`, backed by the small
+external store in `ui/src/ui-store.ts`; broker-owned reads go through the
+broker-scoped TanStack Query client in `ui/src/query-client.ts`.
+
+Feature views live under `ui/src/features/`. The shared direct-endpoint UI is
+in `endpoint-view.tsx`, and onboarding/agent guides are in
+`getting-started-view.tsx`. Feature modules may read the shared application
+state and emit typed React actions, but they must not import the application
+shell. This keeps the dependency direction `app.tsx → feature → state/core`.
 
 Every form, sheet, and view is a controlled TSX component reading and writing
 the store directly, so React reconciles in place and renders leave focus,

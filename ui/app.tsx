@@ -23,18 +23,23 @@ import {
   collapsedCatalogGroup, connectedCatalogFirst, connectionEditPresentation,
   connectionsForEntry, entryForConnection, mcpTemplateForConnection, visibleCatalog,
 } from '/src/catalog';
-import type { ConnectionPreset } from '/src/catalog';
 import {
-  CLI_INSTALL_COMMAND, CONNECT_CLIENTS, CONNECT_MODE_LABELS, START_OPTIONS, clientMatchesLabel,
-  connectClientById, connectModesFor, directEndpointAddress, directStartTask,
-  resolveConnectMode,
-  connectGuideSteps, sshDirectCommand, sshInvocationCommand, startKindLabel,
-  startOptionById, startProgress, startTask,
-} from '/src/getting-started';
+  DEFAULT_SETTINGS,
+  DROPDOWN_TABS,
+  START_VIEWS,
+  TABS,
+  defaultLoadStatus,
+  state,
+  uiStore,
+} from '/src/app-state';
 import type {
-  ConnectClient, ConnectClientEnv, ConnectModeId, ConnectStep, Platform, StartOption,
-  StartProgress,
-} from '/src/getting-started';
+  ConnectionDraft,
+  LoadKey,
+  SheetState,
+  StartView,
+  Tab,
+} from '/src/app-state';
+import { START_OPTIONS } from '/src/getting-started';
 import type { CatalogEntry } from '/src/catalog';
 import {
   ICONS, TYPES, toast, relTime, absTime, timeLeft, clockTime,
@@ -44,7 +49,6 @@ import {
   insecureNonLoopbackHttp, isLoopbackHost, parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
-import { ENDPOINT_FORMATS } from '/src/endpoint-formats';
 import {
   formErrorCode, formErrorDetail, formErrorKind, formErrorMessage, formErrorToast, inlineFormError,
   sentenceCase,
@@ -57,7 +61,6 @@ import { activityIdentity } from '/src/activity';
 import { activeRequestCount, activeRequests, anchorExpiry, recentRequests } from '/src/requests';
 import { APP_VERSION } from '/src/version';
 import { virtualListWindow } from '/src/virtual-list';
-import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
   ActivityPage,
@@ -70,23 +73,24 @@ import type {
   ConnectionSummary,
   ConnectionType,
   ElicitationRequest,
-  IdentityInfo,
   McpAuthDraft,
   McpAuthState,
-  McpStatusReport,
-  McpToolInfo,
   NotificationSettings,
   RequestRecord,
-  IssuedEndpoint,
   SecretSummary,
   SessionSummary,
-  Settings,
   TestErrorKind,
 } from '/src/types';
 import { queryClient, refetchBrokerQuery, removeBrokerQueries } from '/src/query-client';
-import { UiStore, useUiRevision } from '/src/ui-store';
+import { useUiRevision } from '/src/ui-store';
 import { AppIcon } from '/src/icon';
 import type { IconDefinition } from '/src/icon';
+import {
+  ConnectionToggle,
+  ENDPOINTABLE,
+  EndpointStrip,
+} from '/src/features/endpoint-view';
+import { StartViewPage } from '/src/features/getting-started-view';
 import { Sheet } from '/src/sheet';
 
 const EDIT_SECRET_MASK = '••••••••••••';
@@ -102,368 +106,6 @@ const ACTIVITY_OVERSCAN = 8;
  * under-mounting would show a short list until the scroller is measured. */
 const ACTIVITY_PREPAINT_VIEWPORT = 1200;
 
-// The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['start', 'inbox', 'connections', 'secrets', 'activity'] as const;
-// The tray dropdown is a quick-access panel; onboarding belongs in the window.
-const DROPDOWN_TABS = TABS.filter((tab) => tab !== 'start');
-type Tab = typeof TABS[number];
-
-// The two Get started views: the intro walkthrough and the per-client
-// connection guides (formerly the Connect tab).
-const START_VIEWS = ['walkthrough', 'guides'] as const;
-type StartView = typeof START_VIEWS[number];
-
-
-interface SheetState {
-  kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity'
-    | 'elicitation' | 'approval' | 'mcp-auth' | 'wiring-tools' | 'endpoint-issued';
-  id?: string;
-  /** Version of the connection whose values seeded an edit draft. */
-  expectedUpdatedAt?: string;
-  /** The issue result, for the 'endpoint-issued' sheet. */
-  endpoint?: IssuedEndpoint;
-}
-
-interface ConfirmState {
-  kind: string;
-  id?: string | number;
-  name?: string;
-}
-
-interface ConnectionDraft {
-  name?: string;
-  /** The form may keep deriving the name until the user edits it directly. */
-  nameIsAutomatic?: boolean;
-  value?: string;
-  importWarnings?: string[];
-  origin?: string | null;
-  /** This draft is an MCP server, so the origin field is a full server URL. */
-  isMcp?: boolean;
-  /** Catalog row that opened the sheet (template lookup for MCP rows). */
-  entryId?: string;
-  mcpPath?: string | null;
-  scheme?: string | null;
-  host?: string | null;
-  port?: string;
-  dbname?: string | null;
-  user?: string | null;
-  hostKeyFingerprint?: string | null;
-  hostKeyCandidates?: HostKeyCandidate[];
-  hostKeyCheckMessage?: string;
-  hostKeyChecking?: boolean;
-  /** The fingerprint was filled from a known_hosts lookup (not typed), so a
-   * host/port change invalidates it along with the candidate list. */
-  hostKeyAutoPinned?: boolean;
-  proxyJump?: string | null;
-  sslmode?: string | null;
-  /** True while sslmode was set from a loopback host rather than picked, so
-   * a host change may keep adjusting it; false once the user picks one. */
-  sslmodeIsAutomatic?: boolean;
-  pgCaBundlePath?: string | null;
-  url?: string | null;
-  template?: string | null;
-  secretId?: string | null;
-  secretSource?: 'existing' | 'new' | 'none';
-  newSecretName?: string;
-  newSecretValue?: string;
-  importedCredential?: string | null;
-  identityFile?: string;
-  /**
-   * Passphrase for an encrypted SSH private key. Revealed only once the backend
-   * says the offered key needs one, spent on the save that follows, and never
-   * kept in the draft afterwards — it decrypts the key at import and has no
-   * further role, because the vault is what protects a stored key.
-   */
-  keyPassphrase?: string;
-  identityFiles?: string[];
-  sshImportId?: string;
-  destination?: string | null;
-  authMode?: string;
-  // BYO-app OAuth (plain REST rows).
-  oauthClientId?: string;
-  oauthClientSecret?: string;
-  oauthAuthUrl?: string;
-  oauthTokenUrl?: string;
-  /** Checked scopes; undefined means "preset defaults, all on". */
-  oauthScopes?: string[];
-  authDetail?: string;
-  import?: string;
-  setupSource?: 'manual' | 'import';
-}
-
-interface ConnectionReadyState {
-  name: string;
-}
-
-/** The remote-broker configuration form's transient state. */
-interface RemoteSetupState {
-  open: boolean;
-  advancedOpen: boolean;
-  url: string;
-  token: string;
-  busy: boolean;
-  error: string | null;
-}
-
-interface ConnMenuPoint {
-  x: number;
-  y: number;
-}
-
-type LoadKey = 'secrets' | 'connections' | 'identity' | 'sessions' | 'activity' |
-  'settings' | 'elicitations' | 'approvals' | 'requests';
-interface LoadStatus {
-  status: 'idle' | 'loading' | 'ready' | 'error';
-  error?: string;
-}
-
-interface AppState {
-  tab: Tab;
-  /** Which broker the app manages and its link state. */
-  broker: BrokerProfile;
-  /** The header's broker-switcher menu is open. */
-  brokerMenuOpen: boolean;
-  /** The remote-broker configuration form (a full-pane takeover). */
-  remoteSetup: RemoteSetupState;
-  localUsername: string;
-  secrets: SecretSummary[];
-  connections: ConnectionSummary[];
-  /** The shared broker identity ("this computer's key"); null until loaded. */
-  identity: IdentityInfo | null;
-  sessions: SessionSummary[];
-  activity: ActivityEntry[];
-  /** Opaque cursor for the next older activity page, null at the retained end. */
-  activityNextBefore: number | null;
-  activityLoadingOlder: boolean;
-  activityOlderError: string | null;
-  elicitations: ElicitationRequest[];
-  /** The open elicitation dialog's field values, keyed by field name. */
-  elicitValues: Record<string, string>;
-  /** Agent traffic parked on a decision: it moves only once answered. */
-  approvals: Approval[];
-  /** Broker-owned request decision lifecycle history. */
-  requests: RequestRecord[];
-  /** One approval response in flight; prevents duplicate native prompts/actions. */
-  approvalAnswering: string | null;
-  agentSetupInstructions: string;
-  settings: Settings;
-  /** Native request notifications for this desktop shell, not the broker. */
-  notificationSettings: NotificationSettings;
-  /** Per-resource read health. Failed reads must never masquerade as empty data. */
-  loadStatus: Record<LoadKey, LoadStatus>;
-  reveal: Record<string, string>;
-  /** Direct-endpoint fields expanded from their masked one-liner, by connection id. */
-  epExpanded: Record<string, boolean>;
-  /**
-   * An issued SSH endpoint's agent socket path, by connection id.
-   *
-   * Connection summaries do not carry it. The filename is derived from the
-   * endpoint secret precisely so the socket cannot be found by listing a
-   * directory — the ssh-agent protocol has nowhere to present a credential, so
-   * whoever opens the socket gets signatures — which means only the broker,
-   * holding the vault, can name it. Read back per connection and cached here.
-   */
-  sshSockets: Record<string, string>;
-  sheet: SheetState | null;
-  draft: ConnectionDraft;
-  sheetErrors: Record<string, string>;
-  sheetBaseline: string | null;
-  confirmDiscard: boolean;
-  formMenuOpen: string | null;
-  connAdvancedOpen: boolean;
-  connType: ConnectionType;
-  /** The catalog row that opened the add sheet; names the dialog. */
-  connEntryName: string | null;
-  /** The branded row's prefill (docs pointer, credential hint) while adding. */
-  connPreset: ConnectionPreset | null;
-  confirm: ConfirmState | null;
-  toolSearch: string;
-  secretSearch: string;
-  catalogActionMenuOpen: string | null;
-  /** Collapsible catalog sections currently showing all of their rows. */
-  sectionsExpanded: string[];
-  startOption: string;
-  /** Which view the Get started tab shows: the walkthrough or the guides. */
-  startView: StartView;
-  /** Which connect mode step 2 of the walkthrough shows. */
-  connectMode: string;
-  connImportSource: string;
-  connImportError: string | null;
-  menuOpen: boolean;
-  /** Which connection-guide card is expanded. */
-  connectOpen: string | null;
-  agentMenuOpen: string | null;
-  connMenuOpen: string | null;
-  /** Pointer anchor for a row's right-click menu. Null means the same menu
-   * is anchored to the detail panel's ellipsis button instead. */
-  connMenuPoint: ConnMenuPoint | null;
-  /** Tools tab: the catalog "add" view is open (the flat list otherwise). */
-  addToolOpen: boolean;
-  /** Tools tab: the connection whose detail panel is shown (null falls
-   * back to the first row that needs attention, then the first row). */
-  selectedConn: string | null;
-  /** Narrow layout only: the detail panel is open as a slide-over. */
-  connDetailOpen: boolean;
-  copied: string | null;
-  readyCopied: boolean;
-  connectionReady: ConnectionReadyState | null;
-  connTests: Record<string, ConnectionTestState>;
-  /** Verdict of testing the add-form draft; null when no test has run. */
-  draftTest: ConnectionTestState | null;
-  /** Armed by a failed draft test: the next Add saves without re-testing.
-   * Any edit to the form disarms it, so changed details test again. */
-  draftTestOverride: boolean;
-  /** Live MCP sign-in session shown by the mcp-auth sheet. */
-  mcpAuth: McpAuthState | null;
-  /** The submitted draft, kept for Try again. */
-  mcpAuthDraft: McpAuthDraft | null;
-  /** Authorization URL already auto-opened, so re-renders don't re-open. */
-  mcpAuthOpenedUrl: string | null;
-  /** connectionId -> in-flight/last MCP status check (transient). */
-  mcpStatus: Record<string, McpStatusState>;
-  /** The open per-wiring tool picker (agent x MCP connection). */
-  wiringTools: WiringToolsState | null;
-  /** Activity tab filters (transient; cleared on tab switch is deliberate NOT done — keep across renders). */
-  activityQuery: string;
-  activityAgent: string | null;
-  activityIssuesOnly: boolean;
-  /** Request-history filters and expanded rows, local to this broker view. */
-  requestQuery: string;
-  requestAgent: string | null;
-  requestIssuesOnly: boolean;
-  expandedRequests: string[];
-}
-
-interface WiringToolsState {
-  connectionId: string;
-  connectionName: string;
-  loading: boolean;
-  error?: string;
-  tools?: McpToolInfo[];
-  stale?: boolean;
-  fetchedAt?: string;
-  cacheAgeSeconds?: number;
-  truncated?: boolean;
-  /** Checked tool names; null means "all tools" (no curation). */
-  selected: string[] | null;
-  saving: boolean;
-}
-
-interface McpStatusState {
-  running: boolean;
-  report?: McpStatusReport;
-  error?: string;
-}
-
-interface ConnectionTestState {
-  running: boolean;
-  ok?: boolean;
-  detail?: string;
-  kind?: TestErrorKind;
-}
-
-/* ------------------------------ local state ------------------------------ */
-const DEFAULT_SETTINGS: Settings = {
-  reauth_on_read: true,
-  menu_bar_hides_dock: false,
-  presence_window_secs: 15 * 60,
-};
-const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
-  mode: 'when_hidden',
-  showContext: false,
-  available: true,
-  canOpenSystemSettings: false,
-};
-const DEFAULT_LOAD_STATUS = (): Record<LoadKey, LoadStatus> => ({
-  secrets: { status: 'idle' },
-  connections: { status: 'idle' },
-  identity: { status: 'idle' },
-  sessions: { status: 'idle' },
-  activity: { status: 'idle' },
-  settings: { status: 'idle' },
-  elicitations: { status: 'idle' },
-  approvals: { status: 'idle' },
-  requests: { status: 'idle' },
-});
-
-const initialState: AppState = {
-  tab: 'connections',
-  broker: LOCAL_BROKER,
-  brokerMenuOpen: false,
-  remoteSetup: { open: false, advancedOpen: false, url: '', token: '', busy: false, error: null },
-  localUsername: '',
-  secrets: [],
-  connections: [],
-  identity: null,
-  sessions: [],
-  activity: [],
-  activityNextBefore: null,
-  activityLoadingOlder: false,
-  activityOlderError: null,
-  elicitations: [],      // paused upstream tool calls awaiting the user (SEP-2322)
-  elicitValues: {},      // open elicitation dialog's field values (transient)
-  approvals: [],         // agent traffic parked on the user's confirmation
-  requests: [],          // bounded request history, including terminal records
-  approvalAnswering: null,
-  agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
-  settings: { ...DEFAULT_SETTINGS },
-  notificationSettings: { ...DEFAULT_NOTIFICATION_SETTINGS },
-  loadStatus: DEFAULT_LOAD_STATUS(),
-  reveal: {},            // secretId -> prefix string (transient)
-  epExpanded: {},        // connId -> endpoint field expanded (transient)
-  sshSockets: {},        // connId -> issued SSH agent socket path (read back)
-  // sheet / confirm state
-  sheet: null,           // {kind:'add-secret'|'edit-secret'|'add-conn'|'edit-conn'|'settings', ...}
-  draft: {},
-  sheetErrors: {},       // field key -> inline validation message
-  sheetBaseline: null,   // draft signature at sheet open (dirty-close detection)
-  confirmDiscard: false, // "Discard this tool?" confirm over the conn sheet
-  formMenuOpen: null,    // id of the open custom-select listbox in the sheet
-  connAdvancedOpen: false, // "Advanced" disclosure in the tool sheet
-  connType: 'api',
-  connEntryName: null,
-  connPreset: null,      // branded-row prefill for the open add sheet
-  confirm: null,         // {kind, id/name}
-  toolSearch: '',        // Add-tools catalog search query
-  secretSearch: '',      // Secrets catalog search query
-  catalogActionMenuOpen: null, // catalog id whose quick-connect chevron menu is open
-  sectionsExpanded: [],  // sections showing beyond their connected/minimum rows
-  startOption: 'postgres', // which walkthrough the Get started tab shows
-  startView: 'walkthrough' as StartView, // walkthrough vs connection guides (kept across tab switches)
-  connectMode: 'direct', // step 2's connect-mode chip (falls back per option)
-  connImportSource: '',  // paste-to-prefill field in the add sheet
-  connImportError: null,
-  menuOpen: false,       // desktop-mode settings popover (gear) open
-  connectOpen: 'claude-code', // connection-guide card that starts expanded
-  agentMenuOpen: null,   // 'identity' while the key card's ⋯ menu is open
-  connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
-  connMenuPoint: null,   // right-click pointer anchor; null uses the ⋯ button
-  addToolOpen: false,    // Tools tab: catalog add-view open (flat list otherwise)
-  selectedConn: null,    // Tools tab: detail-panel selection (null = automatic)
-  connDetailOpen: false, // narrow layout: detail panel open as a slide-over
-
-  copied: null,          // secretId whose value was just copied (transient "Copied" flash)
-  readyCopied: false,    // transient feedback on the setup-instructions status button
-  connectionReady: null,
-  connTests: {},         // connectionId -> in-flight/last test result (transient)
-  draftTest: null,
-  draftTestOverride: false,
-  mcpAuth: null,
-  mcpAuthDraft: null,
-  mcpAuthOpenedUrl: null,
-  mcpStatus: {},
-  wiringTools: null,
-  activityQuery: '',
-  activityAgent: null,
-  activityIssuesOnly: false,
-  requestQuery: '',
-  requestAgent: null,
-  requestIssuesOnly: false,
-  expandedRequests: [],
-};
-
-const uiStore = new UiStore(initialState);
-const state = uiStore.state;
 let reactMounted = false;
 let renderPublication = 0;
 /** Cancels the one pending post-render fix-up, if any. */
@@ -512,7 +154,7 @@ function clearBrokerOwnedState(): void {
   state.approvalAnswering = null;
   state.agentSetupInstructions = '';
   state.settings = { ...DEFAULT_SETTINGS };
-  state.loadStatus = DEFAULT_LOAD_STATUS();
+  state.loadStatus = defaultLoadStatus();
   state.reveal = {};
   state.epExpanded = {};
   state.sshSockets = {};
@@ -768,27 +410,6 @@ async function resolveSshEndpointSockets(broker: BrokerProfile, epoch: number): 
   if (!changed) return;
   state.sshSockets = resolved;
   render();
-}
-/**
- * The issued SSH agent socket for `conn`, reading it back if the cache is cold.
- *
- * The cached copy arrives a beat after the connection list, so a click that
- * lands in that window would otherwise find nothing to copy. The read is the
- * same one `resolveSshEndpointSockets` makes; it populates the cache too.
- */
-async function sshEndpointSocket(conn: ConnectionSummary): Promise<string | null> {
-  const cached = state.sshSockets[conn.id];
-  if (cached) return cached;
-  if (!conn.agent_access.endpoint) return null;
-  try {
-    const issued = await invoke('get_endpoint', { connectionId: conn.id });
-    if (!issued?.dsn) return null;
-    state.sshSockets = { ...state.sshSockets, [conn.id]: issued.dsn };
-    return issued.dsn;
-  } catch (error) {
-    console.error('get_endpoint', error);
-    return null;
-  }
 }
 async function loadSettings(): Promise<boolean> {
   const broker = state.broker;
@@ -1440,119 +1061,9 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
 // enable/disable toggle. Enabled = agents use the tool without prompting;
 // disabled = refused.
 
-// Kinds that can be issued a stable direct endpoint (a pasteable
-// DSN/socket an unmodified tool uses).
-const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: true };
-
 // Below this width the Tools tab's detail panel is a slide-over rather
 // than a second column. Must match the styles.css breakpoint.
 const NARROW_LAYOUT = '(max-width: 720px)';
-
-/** The address with its embedded credential replaced by bullets — the
- * collapsed field's display text. Addresses without an inline password
- * (SSH socket commands, plain URLs) pass through unchanged. */
-function maskedEndpoint(address: string): string {
-  return address.replace(/(:\/\/[^:@/\s]*:)[^@\s]+(?=@)/, '$1******');
-}
-
-// The direct-endpoint lifecycle strip on an enabled Postgres/SSH/HTTP row:
-// a hairline footer that owns issue → live badge → reissue/revoke. The
-// SSH renders the socket assignment together with its configured `ssh`
-// invocation so the copied value connects immediately.
-function BreakableAddress({ address }: { address: string }): ReactNode {
-  const parts = address.split(/(?<=[/?&@:=])(?![/?&@:=])/);
-  return <>{parts.map((part, index) => (
-    <span key={`${index}:${part}`}>{index ? <wbr /> : null}{part}</span>
-  ))}</>;
-}
-
-function EndpointFormatRow({ connection, address }: {
-  connection: ConnectionSummary;
-  address: string;
-}): ReactNode {
-  const formats = ENDPOINT_FORMATS[connection.type].filter(
-    (format) =>
-      format.needsSecret || format.needsAltAddress || format.build(connection, address) != null,
-  );
-  if (!formats.length) return null;
-  return (
-    <div className="ep-formats" role="group" aria-label="Copy the connection for other applications">
-      <span className="ep-formats-lbl">Copy for</span>
-      {formats.map((format) => {
-        const copied = state.copied === `epf:${connection.id}:${format.key}`;
-        return <button key={format.key}
-          className={`btn sm ep-fmt ${copied ? 'is-copied' : ''}`} title={format.title}
-          aria-label={`${copied ? 'Copied. ' : ''}${format.title} for ${connection.name}`}
-          data-act="copy-endpoint-format" data-conn={connection.id} data-format={format.key}>
-          <span className="ep-fmt-label">{format.label}</span>
-          {copied
-            ? <span className="ep-fmt-check" aria-hidden="true"><Icon markup={ICONS.check} /></span>
-            : null}
-        </button>;
-      })}
-    </div>
-  );
-}
-
-function EndpointStrip({ connection: c, withFormats = false }: {
-  connection: ConnectionSummary;
-  withFormats?: boolean;
-}): ReactNode {
-  if (!c.agent_access.enabled || !ENDPOINTABLE[c.type]) return null;
-  const endpoint = c.agent_access.endpoint ?? null;
-  if (!endpoint) {
-    return <div className="ep-strip">
-      <button className="btn primary sm" data-act="issue-endpoint" data-conn={c.id}
-        title="A pasteable address for an unmodified tool">Get connection address…</button>
-    </div>;
-  }
-  const copied = state.copied === `ep:${c.id}`;
-  const expanded = Boolean(state.epExpanded[c.id]);
-  const endpointAddress = directEndpointAddress(c.type, endpoint, state.sshSockets[c.id]);
-  const endpointText = endpointAddress
-    ? c.type === 'ssh' ? sshDirectCommand(endpointAddress, c) : endpointAddress
-    : null;
-  const copyTitle = c.type === 'ssh' ? 'Copy the SSH command' : 'Copy the connection command';
-  const copyButton = endpointText
-    ? <button className="btn sm ep-copy" title={copyTitle}
-        aria-label={`${copyTitle} for ${c.name}`} data-act="copy-endpoint-dsn" data-conn={c.id}>
-        {copied ? <><Icon markup={ICONS.check} /> Copied</> : <><Icon markup={ICONS.copy} /> Copy</>}
-      </button>
-    : null;
-  let address: ReactNode;
-  if (!endpointText) {
-    address = <span className="ep-addr ep-addr-hidden">Connection address unavailable</span>;
-  } else if (expanded) {
-    address = <div className="ep-field">
-      <code className="ep-addr"><BreakableAddress address={endpointText} /></code>
-      {copyButton}
-    </div>;
-  } else {
-    address = <div className="ep-field collapsed">
-      <button className="ep-addr ep-addr-masked" title="Show the full address"
-        aria-label={`Show the full connection address for ${c.name}`}
-        aria-expanded={false} data-act="expand-endpoint" data-conn={c.id}>
-        {maskedEndpoint(endpointText)}
-      </button>
-      {copyButton}
-    </div>;
-  }
-  return <>
-    <div className="ep-strip">{address}</div>
-    {withFormats && endpointText && endpointAddress
-      ? <EndpointFormatRow connection={c} address={endpointAddress} />
-      : null}
-  </>;
-}
-
-function ConnectionToggle({ connection: c }: { connection: ConnectionSummary }): ReactNode {
-  const enabled = c.agent_access.enabled;
-  return <button className={`switch ${enabled ? 'on' : ''}`} role="switch"
-    aria-checked={enabled}
-    title={enabled ? 'Agents may use this tool' : 'Agents may not use this tool'}
-    aria-label={`${enabled ? 'Disable' : 'Enable'} ${c.name} for agents`}
-    data-act={enabled ? 'disable-tool' : 'enable-tool'} data-conn={c.id}></button>;
-}
 
 /** The agents on/off switch, in the detail panel's header — the tool's one
  * primary control. Its state is written out in the title's subline
@@ -1569,153 +1080,6 @@ function ConnectionToggle({ connection: c }: { connection: ConnectionSummary }):
 
 // Tauri gives the webview the host OS's UA; Claude Desktop's config path
 // is the only per-platform copy today.
-function detectPlatform(): Platform {
-  const ua = navigator.userAgent;
-  if (ua.includes('Win')) return 'windows';
-  if (ua.includes('Mac')) return 'macos';
-  return 'linux';
-}
-
-/** The broker facts client snippets interpolate, with pre-identity fallbacks. */
-function connectClientEnv(): ConnectClientEnv {
-  return {
-    socket: state.identity?.socket_path ?? '~/.aka/broker.sock',
-    token: state.identity?.token_path ?? '~/.aka/token',
-    platform: detectPlatform(),
-  };
-}
-
-/** Activity labels seen recently, newest first: the cosmetic replacement
- * for the old agent roster. */
-function recentClients(): Array<{ name: string; at: string }> {
-  const latest = new Map<string, string>();
-  for (const entry of state.activity) {
-    if (!entry.agent || entry.agent === 'endpoint') continue;
-    if (!latest.has(entry.agent)) latest.set(entry.agent, entry.at);
-  }
-  return [...latest.entries()]
-    .map(([name, at]) => ({ name, at }))
-    .slice(0, 6);
-}
-
-function ConnectKeyCard({ identity }: { identity: IdentityInfo }): ReactNode {
-  const menuOpen = state.agentMenuOpen === 'identity';
-  const copied = state.copied === 'shared-key';
-  return (
-    <div className="agent-block">
-      <div className="agent-card">
-        <span className="agent-avatar" role="img" aria-label="This computer's key">
-          <Icon markup={ICONS.fileKey} />
-        </span>
-        <div className="agent-id"><div className="c-name">This computer’s key</div>
-          <div className="s-sub agent-sub">{identity.token_path}
-            {identity.legacy_aliases
-              ? ` · ${identity.legacy_aliases} older key${identity.legacy_aliases === 1 ? '' : 's'} still accepted briefly`
-              : ''}
-          </div>
-        </div>
-        <button className="btn sm" data-act="copy-key">
-          {copied ? <><Icon markup={ICONS.check} /> Copied</> : 'Copy key'}
-        </button>
-        <div className="agent-menu-wrap">
-          <button className={`icon-btn agent-menu-btn ${menuOpen ? 'on' : ''}`}
-            title="Key options" aria-label="Key options" aria-haspopup="menu"
-            aria-expanded={menuOpen} data-act="toggle-agent-menu" data-id="identity">
-            <Icon markup={ICONS.ellipsis} />
-          </button>
-          {menuOpen
-            ? <div className="agent-menu" role="menu" aria-label="Key options">
-                <button className="menu-item danger" role="menuitem" data-act="rotate-key-ask">
-                  <Icon markup={ICONS.unplug} /> Rotate key…
-                </button>
-              </div>
-            : null}
-        </div>
-      </div>
-      <div className="connect-keynote">One shared key for everything that runs as you on this computer.
-        Rotating it disconnects every agent at once.</div>
-    </div>
-  );
-}
-
-function ConnectStepView({ step, number }: { step: ConnectStep; number: number }): ReactNode {
-  return (
-    <div className="connect-step">
-      <span className="connect-step-n" aria-hidden="true">{number}</span>
-      <div className="connect-step-bd"><b>{step.title}</b>
-        {step.detail ? <div className="connect-step-d">{step.detail}</div> : null}
-        {step.snippet
-          ? <div className="connect-snip"><pre><code>{step.snippet}</code></pre>
-              <button className="btn sm connect-copy" data-act="copy-text"
-                data-text={step.snippet}>Copy</button>
-            </div>
-          : null}
-        {step.followup
-          ? <div className="connect-step-d connect-step-followup">{step.followup}</div>
-          : null}
-      </div>
-    </div>
-  );
-}
-
-function ConnectCard({ client, env }: { client: ConnectClient; env: ConnectClientEnv }): ReactNode {
-  const open = state.connectOpen === client.id;
-  const seen = recentClients().find((recent) => clientMatchesLabel(client, recent.name));
-  return (
-    <div className={`agent-block connect-card ${open ? 'open' : ''}`}>
-      <button className="connect-row" data-act="connect-toggle" data-id={client.id}
-        aria-expanded={open}>
-        <span className={`connect-mark ${client.id}`} aria-hidden="true">
-          {client.icon ? <Icon markup={ICONS[client.icon] || ''} /> : client.mark}
-        </span>
-        <span className="connect-tx"><b>{client.name}</b><span>{client.sub}</span></span>
-        {seen
-          ? <span className="connect-seen" title="An agent using this label reached the broker">
-              ● seen {relTime(seen.at)}
-            </span>
-          : null}
-        <span className={`cat-chev ${open ? 'open' : ''}`}>
-          <Icon markup={ICONS.chevronDown} />
-        </span>
-      </button>
-      {open
-        ? <div className="connect-steps">
-            {connectGuideSteps(client, env).map((step, index) =>
-              <ConnectStepView key={`${client.id}:${index}`} step={step} number={index + 1} />)}
-            {client.note ? <div className="connect-note">{client.note}</div> : null}
-          </div>
-        : null}
-    </div>
-  );
-}
-
-function RecentClients(): ReactNode {
-  const clients = recentClients();
-  if (!clients.length) return null;
-  return <>
-    <div className="connect-sec-lbl">Recently seen</div>
-    <div className="agent-block"><div className="connect-recent">
-      {clients.map((client) => <div key={client.name} className="connect-recent-row">
-        <code>{client.name}</code><span className="grow"></span>
-        <span className="s-sub">{relTime(client.at)}</span>
-      </div>)}
-    </div>
-    <div className="connect-keynote">Names are labels agents report about themselves for the
-      activity log — they aren’t identities, and access doesn’t depend on them.</div></div>
-  </>;
-}
-
-function ConnectGuides(): ReactNode {
-  const identity = state.identity;
-  if (!identity) return null;
-  const env = connectClientEnv();
-  return <>
-    <ConnectKeyCard identity={identity} />
-    <div className="connect-sec-lbl">Connect an agent</div>
-    {CONNECT_CLIENTS.map((client) => <ConnectCard key={client.id} client={client} env={env} />)}
-    <RecentClients />
-  </>;
-}
 const liveCount = (c: ConnectionSummary): number =>
   state.sessions.filter((s) => s.connection === c.name).length;
 /** The coarse kind a connection belongs to. Drives the muted per-kind
@@ -1847,13 +1211,6 @@ function connectionIssues(
 function stripTargetParen(name: string, target: string): string {
   const paren = /^(.*\S)\s*\((.+)\)$/.exec(name);
   return paren && target.includes(paren[2]) ? paren[1] : name;
-}
-
-/** Account-first display title, used where a connection is named without
- * its subline (the attention banner): the signed-in identity is what
- * tells two connections to the same server apart. */
-function connectionTitle(c: ConnectionSummary): string {
-  return c.mcp_path && c.account ? c.account : stripTargetParen(c.name, c.target);
 }
 
 /** The per-server tool filter chip an enabled MCP connection carries. */
@@ -2798,189 +2155,6 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
 
 /** Step 2's pane for one connect mode: a one-line lead, the snippet, and its
  * action row. */
-function StartConnectPane({ mode: connectMode, option, progress }: {
-  mode: ConnectModeId;
-  option: StartOption;
-  progress: StartProgress;
-}): ReactNode {
-  const connection = progress.toolName
-    ? state.connections.find((candidate) => candidate.name === progress.toolName) ?? null
-    : null;
-  const snippet = (text: string): ReactNode =>
-    <pre className="setup-instructions"><code>{text}</code></pre>;
-  const copyButton = (text: string, label: string): ReactNode =>
-    <button className="btn primary sm" data-act="copy-text" data-text={text}>{label}</button>;
-
-  if (connectMode === 'direct') {
-    if (!connection) {
-      const prerequisite = option.connType === 'pg'
-        ? 'Add a Postgres database first.'
-        : option.connType === 'ssh'
-        ? 'Add an SSH server first.'
-        : `Add a ${option.label} tool first.`;
-      return <><p>{prerequisite}</p>
-        <div className="start-actions"><button className="btn primary sm" disabled>
-          Get connection address</button></div></>;
-    }
-    if (!connection.agent_access.endpoint) {
-      const lead = connection.type === 'pg'
-        ? `Get a local DSN for “${connection.name}” that any unmodified Postgres client can use — psql, drivers, ORMs.`
-        : `Get a signing-agent socket for “${connection.name}”. Plain ssh, git, and rsync work unmodified; the private key never leaves this machine.`;
-      return <><p>{lead}</p>
-        <div className="start-actions"><button className="btn primary sm"
-          data-act="issue-endpoint" data-conn={connection.id}>Get connection address</button></div></>;
-    }
-    const lead = connection.type === 'pg'
-      ? 'Tell your agent to connect directly to this database.'
-      : 'Tell your agent to connect directly to this server.';
-    return <><p>{lead}</p><EndpointStrip connection={connection} /></>;
-  }
-
-  const client = connectClientById(connectMode);
-  if (!client) return null;
-  const env = connectClientEnv();
-  if (client.paneSource === 'agent-setup') {
-    return <><p>{client.lead(env)}</p>
-      {snippet(state.agentSetupInstructions || 'Loading…')}
-      <div className="start-actions"><button className="btn primary sm"
-        data-act="copy-agent-setup">{client.copyLabel}</button></div></>;
-  }
-  const clientSnippet = client.snippet(env);
-  if (client.requiresCli && !client.inlineCliInstall) {
-    return <><p>Install the AgentMFA CLI:</p>
-      {snippet(CLI_INSTALL_COMMAND)}
-      <p className="start-pane-next">{client.lead(env)}</p>
-      {snippet(clientSnippet)}
-      <div className="start-actions">{copyButton(clientSnippet, client.copyLabel)}</div></>;
-  }
-  const text = client.inlineCliInstall
-    ? `${CLI_INSTALL_COMMAND}\n${clientSnippet}`
-    : clientSnippet;
-  return <><p>{client.lead(env)}</p>{snippet(text)}
-    <div className="start-actions">{copyButton(text, client.copyLabel)}</div></>;
-}
-
-function StartViewToggle(): ReactNode {
-  const button = (view: StartView, label: string): ReactNode => (
-    <button className={`seg-btn ${state.startView === view ? 'on' : ''}`}
-      aria-pressed={state.startView === view} data-act="start-view" data-id={view}>{label}</button>
-  );
-  return <div className="start-view-toggle"><div className="seg" role="group"
-    aria-label="Get started view">
-    {button('walkthrough', 'Quick start')}{button('guides', 'Agent guides')}
-  </div></div>;
-}
-
-function StartWalkthrough(): ReactNode {
-  const option = startOptionById(state.startOption);
-  const catalogEntry = option.catalogId ? catalogEntryById(option.catalogId) : undefined;
-  const progress = startProgress(option, state.connections);
-  const connectMode = resolveConnectMode(state.connectMode, option);
-  const addAction = catalogEntry && canQuickConnectMcp(catalogEntry)
-    ? 'catalog-connect-oauth' : 'catalog-add';
-  const optionKind = startKindLabel(option);
-  const optionName = optionKind ? `${option.label} ${optionKind}` : option.label;
-  const addLabel = progress.added ? `${optionName} Connected` : `Add ${optionName}`;
-  const directConnection = progress.toolName
-    ? state.connections.find((candidate) => candidate.name === progress.toolName) ?? null
-    : null;
-  const directEndpoint = directConnection?.agent_access.endpoint ?? null;
-  const directAddress = directConnection && directEndpoint
-    ? directEndpointAddress(
-        directConnection.type,
-        directEndpoint,
-        state.sshSockets[directConnection.id],
-      )
-    : null;
-  const task = connectMode === 'direct'
-    ? directStartTask(
-        option,
-        progress,
-        directEndpoint
-          ? {
-              ...directEndpoint,
-              dsn: directAddress,
-              sshInvocation: directConnection?.type === 'ssh'
-                ? sshInvocationCommand(directConnection)
-                : null,
-            }
-          : null,
-      )
-    : startTask(option, progress);
-  const step = (number: number, title: string, done: boolean, body: ReactNode): ReactNode => (
-    <li className={`start-step ${done ? 'done' : ''}`}>
-      <span className="start-num" aria-hidden="true">{number}</span>
-      <div className="start-body"><b>{title}</b>{body}</div>
-    </li>
-  );
-  return (
-    <ol className="start-steps">
-      {step(1, 'Select a tool to connect', progress.added, <>
-        <p>AgentMFA supports databases, SSH, APIs, and MCPs.</p>
-        <div className="start-picker" role="group" aria-label="What to connect">
-          {START_OPTIONS.map((candidate) => {
-            const candidateEntry = candidate.catalogId
-              ? catalogEntryById(candidate.catalogId) : undefined;
-            const kind = startKindLabel(candidate);
-            const fullLabel = kind ? `${candidate.label} ${kind}` : candidate.label;
-            return <button key={candidate.id}
-              className={`start-pick ${candidate.showPickerLabel ? 'has-label' : ''} ${
-                candidate.id === option.id ? 'on' : ''}`}
-              aria-pressed={candidate.id === option.id} aria-label={fullLabel} title={fullLabel}
-              data-act="start-option" data-id={candidate.id}>
-              <span className="start-pick-icon" aria-hidden="true">
-                <Icon markup={ICONS[candidate.icon] || ''} />
-              </span>
-              {candidate.showPickerLabel
-                ? <span className="start-pick-label">{candidate.label}</span> : null}
-              {candidateEntry?.limitedSupport
-                ? <span className="start-pick-limited">Limited</span> : null}
-            </button>;
-          })}
-        </div>
-        <div className="start-actions">
-          <button className="btn primary sm" data-act={addAction} data-id={option.catalogId}
-            disabled={progress.added}>{addLabel}</button>
-        </div>
-      </>)}
-      {step(2, 'Connect your agent', recentClients().length > 0, <>
-        <div className="start-picker" role="group" aria-label="How your agent connects">
-          {connectModesFor(option).map((candidate) => (
-            <button key={candidate}
-              className={`start-pick has-label ${candidate === connectMode ? 'on' : ''}`}
-              aria-pressed={candidate === connectMode} data-act="start-mode" data-id={candidate}>
-              <span className="start-pick-label">{CONNECT_MODE_LABELS[candidate]}</span>
-            </button>
-          ))}
-        </div>
-        <StartConnectPane mode={connectMode} option={option} progress={progress} />
-      </>)}
-      {step(3, 'Ask for something useful', progress.wired, <>
-        <pre className="setup-instructions"><code>{task}</code></pre>
-        <div className="start-actions"><button className="btn primary sm"
-          data-act="copy-text" data-text={task}>Copy</button></div>
-      </>)}
-    </ol>
-  );
-}
-
-function StartViewPage(): ReactNode {
-  return (
-    <div className="start">
-      <div className="start-hero"><h3>Connect your agent to tools and services</h3></div>
-      <StartViewToggle />
-      <GlobalSections embeddedInStart />
-      <div className="start-view-body">
-        {state.startView === 'guides'
-          ? <ConnectGuides />
-          : <StartWalkthrough />}
-      </div>
-    </div>
-  );
-}
-
-/** The dropdown's inline catalog search (the main window's lives in its
- * header). */
 function DropdownCatalogSearch({ kind }: { kind: 'tool' | 'secret' }): ReactNode {
   const isTool = kind === 'tool';
   return (
@@ -2999,7 +2173,9 @@ function DropdownCatalogSearch({ kind }: { kind: 'tool' | 'secret' }): ReactNode
 function TabContent(): ReactNode {
   if (state.tab === 'inbox') return <RequestInbox />;
   if (state.tab === 'activity') return <ActivityView />;
-  if (state.tab === 'start') return <StartViewPage />;
+  if (state.tab === 'start') {
+    return <StartViewPage globalSections={<GlobalSections embeddedInStart />} />;
+  }
   // The dropdown puts its catalog search inline above the list; the wide
   // window has it in the header instead (see MainWindow). The ready card
   // stays above the search, where the one-markup-blob layout had it.
@@ -5882,7 +5058,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
   if (!btn) return;
   const act = btn.dataset.act;
   const id = btn.dataset.id ?? '';
-  const name = btn.dataset.name ?? '';
   switch (act) {
     case 'tab': {
       const tab = btn.dataset.tab;

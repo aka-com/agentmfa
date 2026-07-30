@@ -15,9 +15,16 @@ const RAW_HTML_SINKS = [
 
 test('first-party UI rendering has no raw HTML assignment sink', async () => {
   const srcDir = new URL('../src/', import.meta.url);
-  const srcFiles = (await readdir(srcDir))
-    .filter((name) => name.endsWith('.ts') || name.endsWith('.tsx'))
-    .map((name) => new URL(name, srcDir));
+  const collectSourceFiles = async (directory: URL): Promise<URL[]> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    const nested = await Promise.all(entries.map((entry) => {
+      const url = new URL(entry.name + (entry.isDirectory() ? '/' : ''), directory);
+      if (entry.isDirectory()) return collectSourceFiles(url);
+      return entry.name.endsWith('.ts') || entry.name.endsWith('.tsx') ? [url] : [];
+    }));
+    return nested.flat();
+  };
+  const srcFiles = await collectSourceFiles(srcDir);
   const files = [new URL('../app.tsx', import.meta.url), ...srcFiles];
 
   for (const file of files) {
@@ -44,6 +51,31 @@ test('React owns pointer actions and native global listeners have cleanup', asyn
   assert.match(app, /function useExternalAppEvents\(\): void \{/);
   assert.match(app, /document\.removeEventListener\('keydown', handleAppKeyDown\)/);
   assert.match(app, /document\.removeEventListener\('scroll', handleDocumentScroll, true\)/);
+});
+
+test('feature views and state are kept outside the application shell', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const appState = await readFile(new URL('../src/app-state.ts', import.meta.url), 'utf8');
+  const endpointView = await readFile(
+    new URL('../src/features/endpoint-view.tsx', import.meta.url),
+    'utf8',
+  );
+  const startView = await readFile(
+    new URL('../src/features/getting-started-view.tsx', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(app, /from '\/src\/app-state'/);
+  assert.match(app, /from '\/src\/features\/endpoint-view'/);
+  assert.match(app, /from '\/src\/features\/getting-started-view'/);
+  assert.doesNotMatch(app, /interface AppState/);
+  assert.doesNotMatch(app, /function EndpointStrip/);
+  assert.doesNotMatch(app, /function StartWalkthrough/);
+  assert.match(appState, /export interface AppState/);
+  assert.match(endpointView, /export function EndpointStrip/);
+  assert.match(startView, /export function StartViewPage/);
+  assert.doesNotMatch(endpointView, /from ['"].*app(?:\.tsx)?['"]/);
+  assert.doesNotMatch(startView, /from ['"].*app(?:\.tsx)?['"]/);
 });
 
 test('window components reconcile in place rather than remounting per revision', async () => {
@@ -223,8 +255,11 @@ test('the Inbox ticks its second-level countdowns while requests wait', async ()
 });
 
 test('the SSH endpoint field includes the configured ssh invocation', async () => {
-  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
-  const endpointStrip = app.match(
+  const endpointView = await readFile(
+    new URL('../src/features/endpoint-view.tsx', import.meta.url),
+    'utf8',
+  );
+  const endpointStrip = endpointView.match(
     /function EndpointStrip\([\s\S]*?\): ReactNode \{([\s\S]*?)function ConnectionToggle/,
   )?.[1];
 
@@ -234,11 +269,14 @@ test('the SSH endpoint field includes the configured ssh invocation', async () =
 });
 
 test('direct connection guides tell the user to hand the address to their agent', async () => {
-  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const startView = await readFile(
+    new URL('../src/features/getting-started-view.tsx', import.meta.url),
+    'utf8',
+  );
 
-  assert.match(app, /Tell your agent to connect directly to this database\./);
-  assert.match(app, /Tell your agent to connect directly to this server\./);
-  assert.doesNotMatch(app, /Connect directly to this (?:database|remote server) via AgentMFA\./);
+  assert.match(startView, /Tell your agent to connect directly to this database\./);
+  assert.match(startView, /Tell your agent to connect directly to this server\./);
+  assert.doesNotMatch(startView, /Connect directly to this (?:database|remote server) via AgentMFA\./);
 });
 
 test('the first-use task does not restate automatic agent access', async () => {
@@ -293,8 +331,13 @@ test('typography and narrow form columns follow the user text scale', async () =
 });
 
 test('connection-string credentials are masked with asterisks', async () => {
-  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
-  const masker = app.match(/function maskedEndpoint\(address: string\): string \{([\s\S]*?)\}/)?.[1];
+  const endpointView = await readFile(
+    new URL('../src/features/endpoint-view.tsx', import.meta.url),
+    'utf8',
+  );
+  const masker = endpointView.match(
+    /function maskedEndpoint\(address: string\): string \{([\s\S]*?)\}/,
+  )?.[1];
 
   assert.ok(masker, 'connection-string masker is present');
   assert.match(masker, /\$1\*{6}/);
@@ -315,8 +358,9 @@ test('endpoint credentials use the native hygienic copy command', async () => {
 
 test('failed broker reads stay visible and never trigger empty-vault onboarding', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const appState = await readFile(new URL('../src/app-state.ts', import.meta.url), 'utf8');
 
-  assert.match(app, /loadStatus: Record<LoadKey, LoadStatus>/);
+  assert.match(appState, /loadStatus: Record<LoadKey, LoadStatus>/);
   assert.match(app, /<LoadFailureBand \/>/);
   assert.match(
     app,
