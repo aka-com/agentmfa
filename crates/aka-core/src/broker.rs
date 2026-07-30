@@ -2555,6 +2555,15 @@ impl Broker {
             else {
                 return Ok(false);
             };
+            // Host-key trust is one durable pin, not traffic confirmation.
+            // A stale or non-desktop management client may still send the
+            // generic approve_all value; accept the pin without weakening
+            // this connection's separate per-login confirmation switch.
+            if pending.unit == crate::approvals::ApprovalUnit::HostKey {
+                return Ok(self
+                    .approvals
+                    .respond(id, crate::approvals::ApprovalDecision::ApproveWindow));
+            }
             // Turning the switch off releases everything parked on the
             // connection, this prompt included — so there is nothing left
             // to answer afterwards. A no-op change (the switch was already

@@ -481,7 +481,8 @@ pub struct ApprovalDto {
     /// language: a request, a tool call, a session.
     #[serde(rename = "type")]
     pub kind: String,
-    /// What this decision authorizes (`request`, `tool`, or `session`).
+    /// What this decision authorizes (`request`, `tool`, `session`, `login`,
+    /// or a durable `host_key` pin).
     /// Optional so a new app can still manage an older broker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
@@ -495,6 +496,17 @@ pub struct ApprovalDto {
     /// the client's application name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Saved credential names that will be used. Values never enter this DTO.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_names: Vec<String>,
+    /// Structured HTTP operation fields; do not parse these out of `summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Present only for a first-seen SSH trust decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key_fingerprint: Option<String>,
     /// What approving hands over, written by the broker rather than derived
     /// from the request — a Postgres session, for instance, carries every
     /// statement the client sends, not the one that raised the prompt.
@@ -557,6 +569,14 @@ pub struct RequestDto {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key_fingerprint: Option<String>,
     pub waiting: usize,
     pub requested_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

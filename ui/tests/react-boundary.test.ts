@@ -453,6 +453,18 @@ test('known-host lookup is reachable from the SSH form', async () => {
   assert.match(app, /data-act="pick-host-key"/);
 });
 
+test('approval sheets use structured credential and TOFU provenance context', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  assert.match(app, /approval\.credential_names/);
+  assert.match(app, /approval\.method/);
+  assert.match(app, /approval\.path/);
+  assert.match(app, /approval\.host_key_fingerprint/);
+  assert.match(app, /Matches \$\{matchingKnownHost\.algorithm\} in/);
+  assert.match(app, /fingerprint does not match/);
+  assert.match(app, /hostKeyDecision \? 'Trust and pin'/);
+});
+
 test('request history and secret dependencies remain actionable', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
 

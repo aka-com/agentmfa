@@ -8,8 +8,8 @@
 //! - a background sweeper renews tokens shortly before they expire,
 //! - every credential *use* (a brokered agent call, a connection test, the
 //!   status check) renews first when the token is at expiry, and
-//! - the status check renews-and-retries once on an upstream 401/403,
-//!   instead of telling the user to reconnect.
+//! - the status check and agent MCP traffic renew-and-retry once when an
+//!   upstream rejects the bearer, instead of telling the user to reconnect.
 //!
 //! Renewals are serialized per connection: providers may rotate the
 //! refresh token on use, so two concurrent renewals would spend it twice

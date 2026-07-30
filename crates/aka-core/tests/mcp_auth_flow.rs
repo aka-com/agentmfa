@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
+use aka_core::daemon;
 use aka_core::events::{ApprovalHandling, BrokerEvents};
 use aka_core::mcp::McpCheckOptions;
 use aka_core::mcp_auth::{McpAuthDraft, McpAuthPhase, McpAuthState};
@@ -24,6 +25,7 @@ use aka_core::paths::Paths;
 use aka_core::types::ConnectionConfig;
 use aka_core::vault::MemoryVault;
 use base64::Engine as _;
+use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
 use sha2::Digest as _;
 use uuid::Uuid;
@@ -57,6 +59,8 @@ struct MockAuthServer {
     registered_redirect: Option<String>,
     token_requests: u32,
     refresh_requests: u32,
+    mcp_authorized_requests: u32,
+    mcp_rejected_requests: u32,
     mcp_session_deletes: u32,
     /// The bearer the MCP resource currently accepts; refresh rotates it.
     current_access: String,
@@ -75,6 +79,8 @@ impl Default for MockAuthServer {
             registered_redirect: None,
             token_requests: 0,
             refresh_requests: 0,
+            mcp_authorized_requests: 0,
+            mcp_rejected_requests: 0,
             mcp_session_deletes: 0,
             current_access: ACCESS_TOKEN.into(),
             valid_refresh: Some(REFRESH_TOKEN.into()),
@@ -136,6 +142,7 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
                     .and_then(|value| value.to_str().ok())
                     == Some(expected.as_str());
                 if !authorized {
+                    state.lock().unwrap().mcp_rejected_requests += 1;
                     return axum::http::Response::builder()
                         .status(401)
                         .header(
@@ -147,6 +154,7 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
                         .body(axum::body::Body::from("unauthorized"))
                         .unwrap();
                 }
+                state.lock().unwrap().mcp_authorized_requests += 1;
                 // A notification carries no id; the transport answers 202.
                 if body.0.get("id").is_none() {
                     return axum::http::Response::builder()
@@ -358,6 +366,26 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
         let _ = axum::serve(listener, app).await;
     });
     (port, state)
+}
+
+async fn uds_json_request(socket: &std::path::Path, token: &str, body: Value) -> (u16, Value) {
+    let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(connection);
+    let request = hyper::Request::builder()
+        .method("POST")
+        .uri("/v1/http")
+        .header("host", "localhost")
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-agentmfa-client", "codex")
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap())
 }
 
 /// A Google-style vendor: the MCP endpoint answers `initialize` without
@@ -950,6 +978,63 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
     )
     .expect("grant is JSON");
     assert_eq!(grant["refresh_token"], json!(null), "refresh token retired");
+}
+
+#[tokio::test]
+async fn agent_mcp_traffic_recovers_once_from_an_early_oauth_rejection() {
+    let (port, vendor) = spawn_mock_vendor().await;
+    let (broker, _dir) = test_broker().await;
+    let connection = complete_sign_in(&broker, port, "github-agent-refresh").await;
+    let before = {
+        let locked = vendor.lock().unwrap();
+        (
+            locked.mcp_authorized_requests,
+            locked.mcp_rejected_requests,
+            locked.refresh_requests,
+        )
+    };
+
+    // No expires_in signal changed: the upstream simply revoked this access
+    // token early. The first tools/call gets a 401, renewal rotates the bearer,
+    // and the broker replays exactly once. A 401 is a rejected operation, so
+    // the mutating tool itself is accepted only once.
+    vendor.lock().unwrap().current_access = "revoked-early".into();
+    let daemon = daemon::serve(broker.clone()).await.unwrap();
+    let token = broker.identity.token();
+    let (status, response) = uds_json_request(
+        &daemon.socket_path,
+        &token,
+        json!({
+            "connection": connection.name,
+            "method": "POST",
+            "path": "/mcp",
+            "headers": {
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream"
+            },
+            "body": {
+                "jsonrpc": "2.0",
+                "id": 91,
+                "method": "tools/call",
+                "params": { "name": "write_issue", "arguments": { "title": "one" } }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["status"], 200, "{response}");
+    let upstream_body: Value =
+        serde_json::from_str(response["body"].as_str().expect("utf8 MCP body")).unwrap();
+    assert_eq!(upstream_body["id"], 91);
+
+    let after = vendor.lock().unwrap();
+    assert_eq!(after.refresh_requests, before.2 + 1);
+    assert_eq!(after.mcp_rejected_requests, before.1 + 1);
+    assert_eq!(
+        after.mcp_authorized_requests,
+        before.0 + 1,
+        "the tool operation must not execute twice"
+    );
 }
 
 #[tokio::test]

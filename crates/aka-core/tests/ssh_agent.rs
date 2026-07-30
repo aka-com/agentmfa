@@ -627,6 +627,56 @@ async fn tofu_first_bind_pins_and_signs() {
 }
 
 #[tokio::test]
+async fn tofu_confirmation_carries_a_structured_host_key_decision() {
+    let mut h = harness_answering(
+        BrokerConfig::default(),
+        Some(aka_core::approvals::ApprovalDecision::ApproveWindow),
+    )
+    .await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    add_ssh_connection_with_fingerprint(&h.broker, &key, "deploy", String::new());
+    confirm_logins(&h.broker);
+    h.broker.ui_set_confirm_ssh_host_keys(true).unwrap();
+    let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let observed = host_key
+        .public_key()
+        .fingerprint(HashAlg::Sha256)
+        .to_string();
+
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+    assert_eq!(
+        spawn_bind(&auth_sock, &host_key).await.unwrap().0,
+        SSH_AGENT_SUCCESS
+    );
+
+    let prompt = h.last_prompt.lock().unwrap().clone().expect("TOFU prompt");
+    assert_eq!(
+        prompt.unit,
+        aka_core::approvals::ApprovalUnit::HostKey,
+        "a permanent pin must not look like a login approval window"
+    );
+    assert_eq!(
+        prompt.host_key_fingerprint.as_deref(),
+        Some(observed.as_str())
+    );
+    assert_eq!(stored_fingerprint(&h.broker), observed);
+
+    // Trusting the host key must not silently approve the login that follows.
+    let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
+    let (_, mut stream) = spawn_bind(&auth_sock, &host_key).await.unwrap();
+    let (kind, _) = sign(&mut stream, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
+    assert_eq!(
+        h.prompts.load(Ordering::SeqCst),
+        2,
+        "host-key trust must not open a login approval window"
+    );
+}
+
+#[tokio::test]
 async fn tofu_pin_holds_for_later_binds_and_refuses_other_keys() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();

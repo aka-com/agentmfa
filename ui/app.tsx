@@ -148,6 +148,7 @@ function clearBrokerOwnedState(): void {
   state.activityOlderError = null;
   state.elicitValues = {};
   state.approvalAnswering = null;
+  state.approvalHostKeyProvenance = null;
   state.agentSetupInstructions = '';
   state.loadStatus = defaultLoadStatus();
   state.reveal = {};
@@ -552,6 +553,7 @@ function finishRender(
  * makes "Approve" mean something specific.
  */
 function approvalUnit(approval: Approval): string {
+  if (approval.unit === 'host_key') return 'is asking you to trust an SSH host key';
   if (approval.unit === 'session' || approval.type === 'pg') {
     return 'wants to open a database session';
   }
@@ -774,6 +776,10 @@ function RequestInbox(): ReactNode {
     if (!needle) return true;
     return record.summary.toLowerCase().includes(needle)
       || (record.detail || '').toLowerCase().includes(needle)
+      || (record.credential_names || []).some((name) => name.toLowerCase().includes(needle))
+      || (record.method || '').toLowerCase().includes(needle)
+      || (record.path || '').toLowerCase().includes(needle)
+      || (record.host_key_fingerprint || '').toLowerCase().includes(needle)
       || record.agent.toLowerCase().includes(needle)
       || record.connection.toLowerCase().includes(needle)
       || (record.target || '').toLowerCase().includes(needle);
@@ -951,6 +957,28 @@ function RequestInbox(): ReactNode {
                           </button>
                           {expanded
                             ? <div className="request-history-detail">
+                                {record.kind === 'approval'
+                                  ? <dl className="approval-facts">
+                                      <div>
+                                        <dt>{record.credential_names?.length === 1
+                                          ? 'Credential' : 'Credentials'}</dt>
+                                        <dd className="untrusted-identity" dir="auto">
+                                          {record.credential_names?.length
+                                            ? record.credential_names.join(', ') : 'None'}
+                                        </dd>
+                                      </div>
+                                      {record.method
+                                        ? <div><dt>Method</dt><dd><code>{record.method}</code></dd></div>
+                                        : null}
+                                      {record.path
+                                        ? <div><dt>Path</dt><dd><code>{record.path}</code></dd></div>
+                                        : null}
+                                      {record.host_key_fingerprint
+                                        ? <div><dt>Host key</dt>
+                                            <dd><code>{record.host_key_fingerprint}</code></dd></div>
+                                        : null}
+                                    </dl>
+                                  : null}
                                 <pre className="approval-detail untrusted-identity" dir="auto">
                                   {record.detail || record.summary}
                                 </pre>
@@ -2945,6 +2973,31 @@ function ApprovalSheet(): ReactNode {
   }
   const minutes = Math.max(1, Math.round(approval.window_secs / 60));
   const answering = state.approvalAnswering !== null;
+  const hostKeyDecision = approval.unit === 'host_key'
+    && Boolean(approval.host_key_fingerprint);
+  const credentialNames = approval.credential_names ?? [];
+  const provenance = state.approvalHostKeyProvenance?.approvalId === approval.id
+    ? state.approvalHostKeyProvenance
+    : null;
+  const matchingKnownHost = provenance?.candidates.find(
+    (candidate) => candidate.fingerprint === approval.host_key_fingerprint,
+  );
+  const hostKeyProvenance = hostKeyDecision
+    ? !provenance
+      ? 'This computer’s known_hosts comparison is unavailable. '
+        + 'Verify the fingerprint through another trusted channel before pinning it.'
+      : provenance.loading
+      ? 'Checking this computer’s known_hosts…'
+      : matchingKnownHost
+        ? `Matches ${matchingKnownHost.algorithm} in ${matchingKnownHost.source}.`
+        : provenance.error
+          ? `Could not check this computer’s known_hosts: ${provenance.error}`
+          : provenance.candidates.length
+            ? `Warning: this fingerprint does not match the ${provenance.candidates.length} `
+              + `key${provenance.candidates.length === 1 ? '' : 's'} in this computer’s known_hosts.`
+            : 'No key for this destination was found in this computer’s known_hosts. '
+              + 'Verify the fingerprint through another trusted channel before pinning it.'
+    : null;
   return (
     <>
       <div className="elicit-dlg-ico"><Icon markup={ICONS.shieldAlert} /></div>
@@ -2954,6 +3007,29 @@ function ApprovalSheet(): ReactNode {
       <div className="elicit-dlg-context untrusted-identity" dir="auto">
         {approval.connection} · {approval.target}
       </div>
+      <dl className="approval-facts">
+        <div>
+          <dt>{credentialNames.length === 1 ? 'Credential' : 'Credentials'}</dt>
+          <dd className="untrusted-identity" dir="auto">
+            {credentialNames.length ? credentialNames.join(', ') : 'None'}
+          </dd>
+        </div>
+        {approval.method
+          ? <div><dt>Method</dt><dd><code>{approval.method}</code></dd></div>
+          : null}
+        {approval.path
+          ? <div><dt>Path</dt><dd><code className="untrusted-identity" dir="auto">
+              {approval.path}
+            </code></dd></div>
+          : null}
+        {approval.host_key_fingerprint
+          ? <div><dt>Host key</dt><dd><code>{approval.host_key_fingerprint}</code></dd></div>
+          : null}
+      </dl>
+      {hostKeyProvenance
+        ? <div className={matchingKnownHost ? 'rule-note' : 'approval-consequence'}
+            role="status">{hostKeyProvenance}</div>
+        : null}
       {/* The call itself, verbatim and inert: it is the agent's text. */}
       <div className="approval-call">
         <div className="approval-summary untrusted-identity" dir="auto">{approval.summary}</div>
@@ -2982,12 +3058,14 @@ function ApprovalSheet(): ReactNode {
         <button className="btn elicit-refuse-btn" data-act="approval-deny"
           data-id={approval.id} disabled={answering}>Deny</button>
         <span className="elicit-dlg-spacer"></span>
-        <button className="btn" data-act="approval-approve-all"
-          data-id={approval.id} disabled={answering}
-          title="Allow this call and turn traffic confirmation off for this tool">Stop asking</button>
+        {!hostKeyDecision
+          ? <button className="btn" data-act="approval-approve-all"
+              data-id={approval.id} disabled={answering}
+              title="Allow this call and turn traffic confirmation off for this tool">Stop asking</button>
+          : null}
         <button className="btn primary" data-act="approval-approve-window"
           data-id={approval.id} disabled={answering}>
-          {answering ? 'Answering…' : `Approve ${minutes}m`}
+          {answering ? 'Answering…' : hostKeyDecision ? 'Trust and pin' : `Approve ${minutes}m`}
         </button>
       </div>
     </>
@@ -4976,6 +5054,7 @@ function closeSheet() {
   }
   state.mcpAuth = null;
   state.wiringTools = null;
+  state.approvalHostKeyProvenance = null;
   setSheet(null);
   state.draft = {};
   // The elicitation dialog's answers may include secrets; they must not
@@ -6057,8 +6136,46 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     // turns the tool's switch off.
     case 'approval-open': {
       if (!await holdDropdownFormOpen()) break;
+      const approval = state.approvals.find((candidate) => candidate.id === id);
       setSheet({ kind: 'approval', id });
       render();
+      if (approval?.unit === 'host_key' && approval.host_key_fingerprint) {
+        const connection = state.connections.find(
+          (candidate) => candidate.id === approval.connection_id,
+        );
+        if (connection?.host) {
+          state.approvalHostKeyProvenance = {
+            approvalId: approval.id,
+            loading: true,
+            candidates: [],
+          };
+          render();
+          try {
+            const candidates = await invoke('check_known_hosts', {
+              host: connection.host,
+              port: connection.port ?? 22,
+            });
+            if (state.sheet?.kind === 'approval' && state.sheet.id === approval.id) {
+              state.approvalHostKeyProvenance = {
+                approvalId: approval.id,
+                loading: false,
+                candidates,
+              };
+              render();
+            }
+          } catch (error) {
+            if (state.sheet?.kind === 'approval' && state.sheet.id === approval.id) {
+              state.approvalHostKeyProvenance = {
+                approvalId: approval.id,
+                loading: false,
+                candidates: [],
+                error: errorMessage(error),
+              };
+              render();
+            }
+          }
+        }
+      }
       // The triggering queue row disappears behind a modal. Put keyboard
       // focus on the safest answer instead of leaving it on a hidden node.
       setTimeout(() => {

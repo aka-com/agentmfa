@@ -607,6 +607,20 @@ pub fn resolves_to_mcp_path(path: &str, mcp_path: &str) -> bool {
     }
 }
 
+/// Whether one parsed HTTP body is an MCP client request (or batch) that was
+/// rejected before authentication. Merely aiming arbitrary JSON at the MCP
+/// path is not enough to opt a mutating HTTP call into automatic replay.
+fn is_mcp_client_message(value: &Value) -> bool {
+    let request = |message: &Value| {
+        message.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+            && message.get("method").and_then(Value::as_str).is_some()
+    };
+    match value {
+        Value::Array(messages) => !messages.is_empty() && messages.iter().all(request),
+        message => request(message),
+    }
+}
+
 fn same_pinned_authority(url: &Url, scheme: &str, host: &str, port: Option<u16>) -> bool {
     let pinned_port = port.unwrap_or(match scheme {
         "https" => 443,
@@ -1072,7 +1086,7 @@ impl HttpExecution {
         // drop.
         let (scheme, host, port) = pinned_base(&self.connection.config).expect("api config");
 
-        let injection = match render_connection_injection(
+        let mut injection = match render_connection_injection(
             &self.store,
             &upstream_client,
             &self.connection,
@@ -1082,7 +1096,7 @@ impl HttpExecution {
             Ok(i) => i,
             Err(e) => return Err(broker_error(502, e.reason, e.message)),
         };
-        let redactions = Redactions::from_injection(&injection);
+        let mut redactions = Redactions::from_injection(&injection);
         let mcp_request = match &self.connection.config {
             ConnectionConfig::Api {
                 mcp_path: Some(mcp_path),
@@ -1102,6 +1116,7 @@ impl HttpExecution {
             .as_ref()
             .filter(|body| body.get("method").and_then(Value::as_str) == Some("tools/call"))
             .and_then(|body| body.get("id").cloned());
+        let authenticated_mcp_message = mcp_request.as_ref().is_some_and(is_mcp_client_message);
 
         // Build the initial URL from parsed components, never string
         // concatenation.
@@ -1143,6 +1158,12 @@ impl HttpExecution {
         let mut method = self.method.clone();
         let mut send_body = true;
         let mut hops = 0usize;
+        // An MCP server that rejects an OAuth token has not accepted the
+        // JSON-RPC operation. Renew once and replay that same request with the
+        // replacement token. The bound prevents a bad grant or a permissions
+        // 403 from looping; limiting this to an explicit MCP message prevents
+        // ordinary mutating API calls from ever being retried here.
+        let mut oauth_recovery_attempted = false;
 
         loop {
             let mut request = upstream_client
@@ -1206,6 +1227,49 @@ impl HttpExecution {
             };
 
             let status = response.status();
+            let credential_rejected = status.as_u16() == 401
+                || (status.as_u16() == 403
+                    && response
+                        .headers()
+                        .contains_key(http::header::WWW_AUTHENTICATE));
+            if !oauth_recovery_attempted
+                && self.connection.oauth.is_some()
+                && authenticated_mcp_message
+                && credential_rejected
+            {
+                oauth_recovery_attempted = true;
+                let ctx = crate::mcp_refresh::RefreshContext {
+                    store: self.store.as_ref(),
+                    http: &upstream_client,
+                    audit: self.audit.as_ref(),
+                    health: self.health.as_deref(),
+                };
+                if crate::mcp_refresh::refresh_connection_token(
+                    &ctx,
+                    &self.connection.id,
+                    crate::mcp_refresh::RefreshMode::Force,
+                )
+                .await
+                .is_ok()
+                {
+                    match render_connection_injection(
+                        &self.store,
+                        &upstream_client,
+                        &self.connection,
+                    )
+                    .await
+                    {
+                        Ok(refreshed) => {
+                            injection = refreshed;
+                            redactions = Redactions::from_injection(&injection);
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(broker_error(502, error.reason, error.message));
+                        }
+                    }
+                }
+            }
             if status.is_redirection() {
                 let location = response
                     .headers()
@@ -2312,11 +2376,15 @@ async fn proxy_handler(
         let version = connection.updated_at;
         let verdict = broker
             .approvals
-            .gate(crate::approvals::ApprovalRequest::new(
-                &connection,
-                "endpoint",
-                format!("{method} {}", crate::approvals::capped_text(&path)),
-            ))
+            .gate(
+                crate::approvals::ApprovalRequest::new(
+                    &connection,
+                    "endpoint",
+                    format!("{method} {}", crate::approvals::capped_text(&path)),
+                )
+                .credentials_from(&broker.store)
+                .http_operation(&method, &path),
+            )
             .await;
         if !verdict.is_allowed() {
             let status = match verdict {
@@ -3391,6 +3459,39 @@ mod tests {
                 "{path} must not be treated as the MCP leg"
             );
         }
+    }
+
+    #[test]
+    fn only_mcp_client_messages_are_replay_eligible() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {}
+        });
+        assert!(is_mcp_client_message(&request));
+        assert!(is_mcp_client_message(&json!([
+            request,
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }
+        ])));
+
+        assert!(!is_mcp_client_message(&json!({"not": "mcp"})));
+        assert!(!is_mcp_client_message(&json!([])));
+        assert!(!is_mcp_client_message(&json!([
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list"
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {}
+            }
+        ])));
     }
 
     /// A pinned path that itself needs normalizing still matches.

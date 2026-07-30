@@ -664,6 +664,11 @@
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 0.71875rem; line-height: 1.5; color: var(--muted); white-space: pre-wrap;
     overflow-wrap: anywhere; }
+  .approval-facts{ display: grid; gap: 5px; margin: 12px auto 0; max-width: 460px;
+    text-align: left; font-size: 0.75rem; }
+  .approval-facts div{ display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 10px; }
+  .approval-facts dt{ color: var(--muted); }
+  .approval-facts dd{ margin: 0; min-width: 0; overflow-wrap: anywhere; }
   /* Agent-, upstream-, and target-controlled text is isolated from
      surrounding punctuation so bidi controls cannot reorder the dialog. */
   .untrusted-identity{ unicode-bidi: isolate; }

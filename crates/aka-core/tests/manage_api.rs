@@ -510,7 +510,11 @@ async fn request_history_round_trips_pending_and_terminal_lifecycles() {
     let call = tokio::spawn(async move {
         broker
             .approvals
-            .gate(ApprovalRequest::new(&connection, "codex", "GET /user"))
+            .gate(
+                ApprovalRequest::new(&connection, "codex", "GET /user")
+                    .credentials_from(&broker.store)
+                    .http_operation(&http::Method::GET, "/user"),
+            )
             .await
     });
 
@@ -545,6 +549,9 @@ async fn request_history_round_trips_pending_and_terminal_lifecycles() {
     assert_eq!(requests[0]["kind"], "approval");
     assert_eq!(requests[0]["status"], "pending");
     assert_eq!(requests[0]["summary"], "GET /user");
+    assert_eq!(requests[0]["credential_names"], json!(["GITHUB_KEY"]));
+    assert_eq!(requests[0]["method"], "GET");
+    assert_eq!(requests[0]["path"], "/user");
 
     let (status, answer) = h
         .manage(

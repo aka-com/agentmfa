@@ -343,6 +343,9 @@ async fn an_approved_request_executes_and_its_window_covers_the_next_ones() {
     let prompt = user.last_prompt();
     assert_eq!(prompt.summary, "GET /user/repos");
     assert_eq!(prompt.connection, "github");
+    assert_eq!(prompt.credential_names, ["GITHUB_KEY"]);
+    assert_eq!(prompt.method.as_deref(), Some("GET"));
+    assert_eq!(prompt.path.as_deref(), Some("/user/repos"));
     assert!(
         prompt.target.starts_with("http://127.0.0.1:"),
         "the prompt names the pinned destination: {}",
@@ -1086,6 +1089,9 @@ async fn the_queue_carries_what_the_app_renders() {
     assert_eq!(prompt.agent, "codex", "the prompt attributes the caller");
     assert_eq!(prompt.connection, "github");
     assert_eq!(prompt.summary, "GET /user/repos");
+    assert_eq!(prompt.credential_names, ["GITHUB_KEY"]);
+    assert_eq!(prompt.method.as_deref(), Some("GET"));
+    assert_eq!(prompt.path.as_deref(), Some("/user/repos"));
     assert!(prompt.expires_at > prompt.requested_at);
     assert_eq!(prompt.window_secs, 15 * 60);
 }

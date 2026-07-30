@@ -59,6 +59,9 @@ pub enum ApprovalUnit {
     /// the broker signs a login and is then out of the connection entirely,
     /// so this authorizes a session it cannot afterwards see or stop.
     Login,
+    /// Permanently pin one first-seen SSH host key. This is a trust decision,
+    /// not a login grant or an approval window.
+    HostKey,
 }
 
 impl ApprovalUnit {
@@ -68,6 +71,7 @@ impl ApprovalUnit {
             Self::Tool => "tool",
             Self::Session => "session",
             Self::Login => "login",
+            Self::HostKey => "host_key",
         }
     }
 }
@@ -116,6 +120,16 @@ pub struct ApprovalRequest {
     /// The second line, when there is more worth showing: a body preview,
     /// the tool's arguments, the client's application name.
     pub detail: Option<String>,
+    /// Saved credential labels the broker will use. Names only: values never
+    /// enter a prompt. Empty means the operation sends no saved credential.
+    pub credential_names: Vec<String>,
+    /// Structured HTTP operation fields. They ride beside the human summary
+    /// so a prompt never has to parse security context back out of prose.
+    pub method: Option<String>,
+    pub path: Option<String>,
+    /// Structured first-seen SSH host key, for a decision surface to compare
+    /// against its own known_hosts provenance.
+    pub host_key_fingerprint: Option<String>,
     /// What approving actually hands over, in the broker's own words.
     ///
     /// Deliberately a separate field from `summary`/`detail`, which are
@@ -143,6 +157,10 @@ impl ApprovalRequest {
             agent: cap_approval_text(agent.into()),
             summary: cap_approval_text(summary.into()),
             detail: None,
+            credential_names: Vec::new(),
+            method: None,
+            path: None,
+            host_key_fingerprint: None,
             consequence: None,
         }
     }
@@ -161,6 +179,38 @@ impl ApprovalRequest {
 
     pub fn tool(mut self) -> Self {
         self.unit = ApprovalUnit::Tool;
+        self
+    }
+
+    /// Attach display-only saved credential names from the sealed binding.
+    /// OAuth grants are intentionally not public Secrets, but still need a
+    /// stable label so the prompt says which credential class will ride.
+    pub fn credentials_from(mut self, store: &crate::store::Store) -> Self {
+        self.credential_names = if self.connection.oauth.is_some() {
+            vec![cap_approval_text(format!(
+                "OAuth token for {}",
+                self.connection.name
+            ))]
+        } else {
+            self.connection
+                .secrets
+                .iter()
+                .filter_map(|id| store.secret_by_id(id).ok())
+                .map(|secret| cap_approval_text(secret.name))
+                .collect()
+        };
+        self
+    }
+
+    pub fn http_operation(mut self, method: &http::Method, path: &str) -> Self {
+        self.method = Some(capped_text(method.as_str()));
+        self.path = Some(capped_text(path));
+        self
+    }
+
+    pub fn host_key(mut self, fingerprint: &ssh_key::Fingerprint) -> Self {
+        self.unit = ApprovalUnit::HostKey;
+        self.host_key_fingerprint = Some(fingerprint.to_string());
         self
     }
 
@@ -187,6 +237,13 @@ pub struct PendingApproval {
     pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    pub credential_names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_key_fingerprint: Option<String>,
     /// What approving hands over, in the broker's words rather than the
     /// agent's — see [`ApprovalRequest::consequence`].
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -480,6 +537,10 @@ impl Approvals {
                         agent: cap_approval_text(request.agent.clone()),
                         summary: request.summary.clone(),
                         detail: request.detail.clone(),
+                        credential_names: request.credential_names.clone(),
+                        method: request.method.clone(),
+                        path: request.path.clone(),
+                        host_key_fingerprint: request.host_key_fingerprint.clone(),
                         consequence: request.consequence,
                         waiting: 1,
                         requested_at,
@@ -615,7 +676,9 @@ impl Approvals {
                 state.inflight.remove(&key);
             }
             match decision {
-                ApprovalDecision::ApproveWindow => {
+                ApprovalDecision::ApproveWindow
+                    if pending.info.unit != ApprovalUnit::HostKey =>
+                {
                     // Scoped to the agent the prompt named. Another agent on
                     // the same connection is a question the user has not been
                     // asked yet, and gets asked in its own name.
@@ -628,6 +691,12 @@ impl Approvals {
                                     .unwrap_or_else(|_| chrono::Duration::seconds(900)),
                         },
                     );
+                }
+                ApprovalDecision::ApproveWindow => {
+                    // A host-key pin is the durable outcome itself. It must
+                    // not also open a traffic-confirmation window that waves
+                    // through the SSH login which follows the bind.
+                    state.grants.remove(&key);
                 }
                 ApprovalDecision::ApproveAll => {
                     // The switch is going off; nothing to remember here.

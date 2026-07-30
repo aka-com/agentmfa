@@ -234,7 +234,7 @@ export interface Approval {
   /** Connection kind, so the prompt can name the unit it is asking about. */
   type: ConnectionType;
   /** Exact traffic unit; absent when connected to an older broker. */
-  unit?: 'request' | 'tool' | 'session' | 'login' | null;
+  unit?: 'request' | 'tool' | 'session' | 'login' | 'host_key' | null;
   /** The pinned destination the traffic would reach. */
   target: string;
   /** Self-reported agent label. Attribution, never authorization. */
@@ -243,6 +243,13 @@ export interface Approval {
   summary: string;
   /** A body preview, a tool's arguments, or the client's application name. */
   detail?: string | null;
+  /** Saved credential names only; credential values never reach the UI. */
+  credential_names?: string[];
+  /** Structured HTTP operation fields; never reconstructed from summary. */
+  method?: string | null;
+  path?: string | null;
+  /** First-seen SSH host key being considered for a durable pin. */
+  host_key_fingerprint?: string | null;
   /**
    * What approving hands over, written by the broker rather than derived from
    * the request. Render it in the broker's own voice, outside the block that
@@ -272,11 +279,15 @@ export interface RequestRecord {
   connection_id?: string | null;
   connection: string;
   connection_type?: ConnectionType | null;
-  unit?: 'request' | 'tool' | 'session' | 'login' | null;
+  unit?: 'request' | 'tool' | 'session' | 'login' | 'host_key' | null;
   target?: string | null;
   agent: string;
   summary: string;
   detail?: string | null;
+  credential_names?: string[];
+  method?: string | null;
+  path?: string | null;
+  host_key_fingerprint?: string | null;
   waiting: number;
   requested_at: string;
   expires_at?: string | null;

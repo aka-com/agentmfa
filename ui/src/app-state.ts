@@ -169,6 +169,12 @@ export interface AppState {
   approvals: Approval[];
   requests: RequestRecord[];
   approvalAnswering: string | null;
+  approvalHostKeyProvenance: {
+    approvalId: string;
+    loading: boolean;
+    candidates: HostKeyCandidate[];
+    error?: string;
+  } | null;
   agentSetupInstructions: string;
   settings: Settings;
   notificationSettings: NotificationSettings;
@@ -272,6 +278,7 @@ function createInitialState(): AppState {
     approvals: [],
     requests: [],
     approvalAnswering: null,
+    approvalHostKeyProvenance: null,
     agentSetupInstructions: '',
     settings: { ...DEFAULT_SETTINGS },
     notificationSettings: { ...DEFAULT_NOTIFICATION_SETTINGS },

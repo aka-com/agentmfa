@@ -2080,6 +2080,7 @@ async fn confirm_host_key(state: &Arc<AgentState>, observed: &Fingerprint) -> Op
                 format!("Trust the SSH host key for {}", connection.target()),
             )
             .detail(observed.to_string())
+            .host_key(observed)
             .consequence(HOST_KEY_CONSEQUENCE),
         )
         .await;
@@ -2176,6 +2177,7 @@ async fn confirm_login(state: &Arc<AgentState>, user: &str) -> Option<Vec<u8>> {
         .approvals
         .gate(
             crate::approvals::ApprovalRequest::new(&connection, state.agent.clone(), summary)
+                .credentials_from(&state.broker.store)
                 .maybe_detail(
                     state
                         .host_key_fingerprint

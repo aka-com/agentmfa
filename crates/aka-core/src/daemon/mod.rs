@@ -1216,6 +1216,7 @@ async fn post_http(
     // without a request ready there, turning confirmation on while this call
     // was being admitted let it execute silently.
     let approval = approval_for_call(
+        &broker.store,
         &conn,
         &client,
         &method,
@@ -1794,6 +1795,7 @@ fn is_mcp_envelope_body(body: &[u8]) -> bool {
 /// ordinary traffic to a credentialed destination, and is asked about as
 /// such rather than waved through for looking like plumbing.
 fn approval_for_call(
+    store: &crate::store::Store,
     conn: &crate::types::Connection,
     client: &str,
     method: &http::Method,
@@ -1802,6 +1804,11 @@ fn approval_for_call(
     body: &[u8],
 ) -> Option<crate::approvals::ApprovalRequest> {
     use crate::approvals::{capped_text, ApprovalRequest};
+    let request = |summary: String| {
+        ApprovalRequest::new(conn, client, summary)
+            .credentials_from(store)
+            .http_operation(method, path)
+    };
     let mcp_path = match &conn.config {
         ConnectionConfig::Api { mcp_path, .. } => mcp_path.clone(),
         _ => None,
@@ -1810,7 +1817,7 @@ fn approval_for_call(
         .as_deref()
         .is_some_and(|pinned| crate::capability::http::resolves_to_mcp_path(path, pinned));
     if !on_mcp_path {
-        let request = ApprovalRequest::new(conn, client, format!("{method} {}", capped_text(path)));
+        let request = request(format!("{method} {}", capped_text(path)));
         return Some(if body.is_empty() {
             request
         } else {
@@ -1821,7 +1828,7 @@ fn approval_for_call(
         return None;
     }
     let generic = || {
-        ApprovalRequest::new(conn, client, format!("{method} {}", capped_text(path)))
+        request(format!("{method} {}", capped_text(path)))
             .maybe_detail((!body.is_empty()).then(|| preview_bytes(body)))
     };
     if body.len() > APPROVAL_RPC_PARSE_CAP {
@@ -1864,10 +1871,7 @@ fn approval_for_call(
                 methods.join(", "),
             )
         };
-        return Some(
-            ApprovalRequest::new(conn, client, summary)
-                .maybe_detail((!body.is_empty()).then(|| preview_bytes(body))),
-        );
+        return Some(request(summary).maybe_detail((!body.is_empty()).then(|| preview_bytes(body))));
     }
     if rpc.get("jsonrpc").and_then(|value| value.as_str()) != Some("2.0") {
         return Some(generic());
@@ -1890,17 +1894,13 @@ fn approval_for_call(
             .and_then(|p| p.get("arguments"))
             .filter(|args| !matches!(args, serde_json::Value::Null))
             .map(preview_json);
-        return Some(
-            ApprovalRequest::new(conn, client, tool)
-                .tool()
-                .maybe_detail(arguments),
-        );
+        return Some(request(tool).tool().maybe_detail(arguments));
     }
     let params = rpc
         .get("params")
         .filter(|params| !matches!(params, serde_json::Value::Null))
         .map(preview_json);
-    Some(ApprovalRequest::new(conn, client, capped_text(rpc_method)).maybe_detail(params))
+    Some(request(capped_text(rpc_method)).maybe_detail(params))
 }
 
 /// The response a refused call gets: the machine reason it can branch on,

@@ -1039,6 +1039,7 @@ where
     .collect::<Vec<_>>()
     .join(" · ");
     let request = crate::approvals::ApprovalRequest::new(connection, agent, "New Postgres session")
+        .credentials_from(&state.broker.store)
         .maybe_detail((!detail.is_empty()).then_some(detail))
         .consequence(SESSION_CONSEQUENCE);
     let verdict = tokio::select! {
