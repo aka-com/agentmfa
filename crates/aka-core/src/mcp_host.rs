@@ -2657,6 +2657,11 @@ async fn ensure_protocol_catalog(
                 registered_upstream_tools += 1;
             }
         }
+        // A curated tool subset fails closed for every non-tool capability:
+        // a connection with `allowed_tools` set publishes no resources,
+        // templates, or prompts, and — because reads, prompt gets, and
+        // completions all route through catalog bindings — the corresponding
+        // requests refuse rather than reach the upstream (MCP-U11).
         if connection.allowed_tools.is_none() {
             for resource in discovery.resources {
                 let Some(uri) = resource.get("uri").and_then(Value::as_str) else {
@@ -2761,6 +2766,11 @@ async fn ensure_protocol_catalog(
                     supports_completion: discovery.capabilities.get("completions").is_some(),
                 });
             }
+        }
+        if connection.allowed_tools.is_some() {
+            // Same fail-closed rule as resources above: curated connections
+            // expose their tool subset and nothing else.
+            continue;
         }
         for prompt in discovery.prompts {
             let Some(upstream_name) = prompt.get("name").and_then(Value::as_str) else {

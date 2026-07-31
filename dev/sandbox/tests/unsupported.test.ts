@@ -52,15 +52,17 @@ test('an API connection cannot be narrowed to particular paths or methods', (t) 
 });
 
 test('MCP resources and prompts have no allow-list of their own', (t) => {
-  // `allowed_tools` curates `tools/call` only. `resources/read` is
-  // confirmed like other real access when the switch is on, but there is no
-  // subset to enable a resource in the way a tool can be enabled, and
-  // `resources/list` and `prompts/list` are session plumbing
-  // (`is_mcp_envelope` in crates/aka-core/src/daemon/mod.rs).
+  // `allowed_tools` names tools only. Since MCP-U11 a curated connection
+  // fails closed for every non-tool capability — its resources, templates,
+  // and prompts are not published and reads/gets/completions against them
+  // refuse (`ensure_protocol_catalog` in crates/aka-core/src/mcp_host.rs) —
+  // but there is still no subset that enables *individual* resources or
+  // prompts the way a tool can be enabled: on an uncurated connection they
+  // are all-or-nothing with the connection.
   pending(
     t,
     'curating which MCP resources or prompts an agent may reach, as tools can be curated',
-    'the subset covers tools; resources and prompts are all-or-nothing with the connection',
+    'a tool subset disables all non-tool capabilities; without one, resources and prompts are all-or-nothing',
   );
 });
 

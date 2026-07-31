@@ -485,7 +485,10 @@ SSH connections appear as `agentmfa_<connection>_open`. An upstream MCP
 connection contributes bounded names derived from both the connection and
 the upstream tool name. Its `allowed_tools` field, when present, is the
 curated upstream subset the broker enforces on every `tools/call`; absence
-means all advertised upstream tools.
+means all advertised upstream tools. A curated connection fails closed for
+every non-tool capability: its resources, resource templates, and prompts
+are not published, and reads, prompt gets, and completions against them
+refuse rather than reach the upstream.
 
 Use `agentmfa_status` first when a tool is absent or an upstream failed.
 Large upstream catalogs keep overflow tools behind `agentmfa_search_tools`

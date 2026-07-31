@@ -1065,6 +1065,188 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
     );
 }
 
+#[tokio::test]
+async fn a_curated_connection_refuses_every_non_tool_capability() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+            let id = body["id"].clone();
+            let result = match body["method"].as_str() {
+                Some("initialize") => json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {
+                        "tools": {},
+                        "resources": {},
+                        "prompts": {},
+                        "completions": {},
+                    },
+                    "serverInfo": {"name": "docs", "version": "1"},
+                }),
+                Some("tools/list") => json!({
+                    "tools": [{"name": "search", "inputSchema": {"type": "object"}}],
+                }),
+                Some("resources/list") => json!({
+                    "resources": [{"uri": "docs://home", "name": "home"}],
+                }),
+                Some("resources/templates/list") => json!({
+                    "resourceTemplates": [{"uriTemplate": "docs://page/{id}", "name": "page"}],
+                }),
+                Some("prompts/list") => json!({
+                    "prompts": [{"name": "review"}],
+                }),
+                Some("resources/read") | Some("prompts/get") => json!({
+                    "contents": [{"uri": "leak://should-not-happen", "text": "leaked"}],
+                }),
+                Some("completion/complete") => {
+                    json!({"completion": {"values": ["leaked"], "hasMore": false}})
+                }
+                _ => Value::Null,
+            };
+            axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, upstream).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::new(
+        Paths::under(dir.path()),
+        Arc::new(MemoryVault::new()),
+        BrokerConfig::default(),
+        Arc::new(NoopEvents),
+    )
+    .await
+    .unwrap();
+    let connection = broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "docs".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(upstream_port),
+                trusted_ca_bundle_path: None,
+                template: String::new(),
+                mcp_path: Some("/mcp".into()),
+                test_path: None,
+                oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    broker
+        .ui_set_allowed_tools(&connection.id, Some(vec!["search".into()]))
+        .unwrap();
+    let token = broker.identity.token();
+    let host = mcp_host::serve(broker).await.unwrap();
+    let client = reqwest::Client::new();
+    let session = initialize(&client, &host.mcp_url(), &token).await;
+
+    // The curated tool subset is still served…
+    let tools = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        2,
+        "tools/list",
+        json!({}),
+    )
+    .await;
+    let tool_names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(tool_names.iter().any(|name| name.contains("search")));
+
+    // …but every non-tool capability fails closed: nothing is listed, and
+    // reads, prompt gets, and completions refuse instead of reaching upstream.
+    let resources = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        3,
+        "resources/list",
+        json!({}),
+    )
+    .await;
+    assert_eq!(resources["result"]["resources"], json!([]));
+    let templates = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        4,
+        "resources/templates/list",
+        json!({}),
+    )
+    .await;
+    assert_eq!(templates["result"]["resourceTemplates"], json!([]));
+    let prompts = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        5,
+        "prompts/list",
+        json!({}),
+    )
+    .await;
+    assert_eq!(prompts["result"]["prompts"], json!([]));
+
+    let read = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        6,
+        "resources/read",
+        json!({"uri": "agentmfa://docs/docs://home"}),
+    )
+    .await;
+    assert!(read["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+    let prompt = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        7,
+        "prompts/get",
+        json!({"name": "docs/review"}),
+    )
+    .await;
+    assert!(prompt["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+    let completion = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        8,
+        "completion/complete",
+        json!({
+            "ref": {"type": "ref/resource", "uri": "agentmfa://docs/docs://page/{id}"},
+            "argument": {"name": "id", "value": "secret-value"},
+        }),
+    )
+    .await;
+    assert_eq!(completion["result"]["completion"]["values"], json!([]));
+}
+
 async fn initialize(client: &reqwest::Client, url: &str, token: &str) -> String {
     let response = client
         .post(url)
