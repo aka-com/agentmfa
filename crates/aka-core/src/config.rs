@@ -139,6 +139,10 @@ impl BrokerConfig {
     /// - `AGENTMFA_UPSTREAM_OPERATION_TIMEOUT_SECS` — the whole upstream
     ///   operation (refresh + redirect chain + body receipt).
     /// - `AGENTMFA_RESPONSE_CAP_BYTES` — buffered response body cap.
+    /// - `AGENTMFA_REQUEST_CAP_BYTES` — request body cap.
+    /// - `AGENTMFA_SPOOL_THRESHOLD_BYTES` — request bodies above this spool
+    ///   to disk instead of buffering in memory.
+    /// - `AGENTMFA_MAX_REDIRECTS` — redirect-chain budget per operation.
     /// - `AGENTMFA_PER_IDENTITY_PER_MIN` — capability-call rate limit.
     pub fn overridden_from_env(mut self) -> Self {
         self.apply_env(|name| std::env::var(name).ok());
@@ -173,6 +177,21 @@ impl BrokerConfig {
             get("AGENTMFA_RESPONSE_CAP_BYTES"),
         ) {
             self.response_cap = bytes as usize;
+        }
+        if let Some(bytes) = parse(
+            "AGENTMFA_REQUEST_CAP_BYTES",
+            get("AGENTMFA_REQUEST_CAP_BYTES"),
+        ) {
+            self.request_cap = bytes as usize;
+        }
+        if let Some(bytes) = parse(
+            "AGENTMFA_SPOOL_THRESHOLD_BYTES",
+            get("AGENTMFA_SPOOL_THRESHOLD_BYTES"),
+        ) {
+            self.spool_threshold = bytes as usize;
+        }
+        if let Some(redirects) = parse("AGENTMFA_MAX_REDIRECTS", get("AGENTMFA_MAX_REDIRECTS")) {
+            self.max_redirects = redirects as usize;
         }
         if let Some(per_min) = parse(
             "AGENTMFA_PER_IDENTITY_PER_MIN",
@@ -217,6 +236,9 @@ mod tests {
             "AGENTMFA_UPSTREAM_TIMEOUT_SECS" => Some("90".into()),
             "AGENTMFA_UPSTREAM_OPERATION_TIMEOUT_SECS" => Some("garbage".into()),
             "AGENTMFA_RESPONSE_CAP_BYTES" => Some("0".into()),
+            "AGENTMFA_REQUEST_CAP_BYTES" => Some("2000000".into()),
+            "AGENTMFA_SPOOL_THRESHOLD_BYTES" => Some("-5".into()),
+            "AGENTMFA_MAX_REDIRECTS" => Some("3".into()),
             "AGENTMFA_PER_IDENTITY_PER_MIN" => Some("120".into()),
             _ => None,
         });
@@ -229,6 +251,9 @@ mod tests {
             defaults.upstream_operation_timeout
         );
         assert_eq!(config.response_cap, defaults.response_cap);
+        assert_eq!(config.request_cap, 2_000_000);
+        assert_eq!(config.spool_threshold, defaults.spool_threshold);
+        assert_eq!(config.max_redirects, 3);
         assert_eq!(config.per_identity_per_min, 120);
     }
 
