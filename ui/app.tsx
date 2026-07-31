@@ -1460,10 +1460,53 @@ function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolea
 const COLLAPSIBLE_SECTIONS: string[] =
   ['Developer Tools', 'AI Models', 'Productivity', 'Communication', 'Business'];
 
-function ConnectionTestResult({ connection }: { connection: ConnectionSummary }): ReactNode {
-  const test = state.connTests[connection.id];
-  if (!test || test.running || test.detail === undefined || !test.ok) return null;
-  return <div className="cc-test ok"><Icon markup={ICONS.circleCheck} /><span>{test.detail}</span></div>;
+/** Whether a test or MCP check finished this session and passed. The verdict
+ * surfaces as a plain-words success alert — the technical transcript ("GET …
+ * answered HTTP 200 OK") stays out of the success path, since a pass needs no
+ * diagnostics. */
+function freshTestPassed(c: ConnectionSummary): boolean {
+  if (c.mcp_path) {
+    const status = state.mcpStatus[c.id];
+    return Boolean(status && !status.running && !status.error && status.report?.ok);
+  }
+  const test = state.connTests[c.id];
+  return Boolean(test && !test.running && test.ok && test.detail !== undefined);
+}
+
+/** The attention layer above the details pane: the fresh test verdict and
+ * every issue, pulled out of the pane so a tool's health reads before its
+ * plumbing. */
+function ConnectionAlerts({ connection: c }: { connection: ConnectionSummary }): ReactNode {
+  if (!c.agent_access.enabled) return null;
+  const issues = connectionIssues(c);
+  const passed = freshTestPassed(c);
+  if (!issues.length && !passed) return null;
+  return <div className="cc-issues cd-alerts">
+    {passed
+      ? <div className="cc-issue ok" role="status">
+          <Icon markup={ICONS.circleCheck} />
+          <div className="cc-issue-body">
+            <span className="cc-issue-headline">
+              Connection test passed — {connectionRowName(c)} is responding.
+            </span>
+          </div>
+        </div>
+      : null}
+    {issues.map((issue, index) =>
+      <div key={`${issue.text}:${index}`} className={`cc-issue ${issue.tone ?? ''}`}>
+        <Icon markup={issue.tone === 'info' ? ICONS.info : ICONS.triangleAlert} />
+        <div className="cc-issue-body">
+          <span className="cc-issue-headline">{issue.text}</span>
+          {issue.detail ? <span className="cc-issue-detail">{issue.detail}</span> : null}
+          {issue.fix
+            ? <div className="cc-issue-fixes">
+                <button className={`btn sm ${issue.fix.primary ? 'primary' : ''}`}
+                  data-act={issue.fix.action} data-id={issue.fix.id}>{issue.fix.label}</button>
+              </div>
+            : null}
+        </div>
+      </div>)}
+  </div>;
 }
 
 function ConnectionToolsChip({ connection: c }: {
@@ -1681,7 +1724,6 @@ function McpStatus({ connection: c }: { connection: ConnectionSummary }): ReactN
   if (!report?.ok) return null;
   const shown = report.resources.slice(0, 8);
   return <>
-    <div className="cc-test ok"><Icon markup={ICONS.circleCheck} /><span>{report.detail}</span></div>
     {report.resources_supported
       ? <>
           <div className="mcp-res-head">Resources ({report.resources.length})</div>
@@ -1746,7 +1788,6 @@ function ConnectionDetail({ connection: c }: {
   const menuOpen = state.connMenuOpen === c.id && !state.connMenuPoint;
   const enabled = c.agent_access.enabled;
   const entry = entryForConnection(c);
-  const issues = connectionIssues(c);
   const connectTitle = connectionKind(c) === 'db'
     ? 'Connect to this database'
     : connectionKind(c) === 'ssh'
@@ -1793,24 +1834,6 @@ function ConnectionDetail({ connection: c }: {
       </div>
     </div>
     {!enabled ? <div className="cd-help cd-off-note">This tool is disabled.</div> : null}
-    {enabled && issues.length
-      ? <div className="cc-issues">{issues.map((issue, index) =>
-          <div key={`${issue.text}:${index}`} className={`cc-issue ${issue.tone ?? ''}`}>
-            <Icon markup={issue.tone === 'info' ? ICONS.info : ICONS.triangleAlert} />
-            <div className="cc-issue-body">
-              <span className="cc-issue-headline">{issue.text}</span>
-              {issue.detail ? <span className="cc-issue-detail">{issue.detail}</span> : null}
-              {issue.fix
-                ? <div className="cc-issue-fixes">
-                    <button className={`btn sm ${issue.fix.primary ? 'primary' : ''}`}
-                      data-act={issue.fix.action} data-id={issue.fix.id}>{issue.fix.label}</button>
-                  </div>
-                : null}
-            </div>
-          </div>)}
-        </div>
-      : null}
-    <ConnectionTestResult connection={c} />
     {c.mcp_path ? <>{mcpSection}{endpointSection}</> : <>{endpointSection}{mcpSection}</>}
     <ConfirmationSection connection={c} />
     <ConnectionAdvancedSection connection={c} />
@@ -2165,9 +2188,12 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
                 </div>)}
         </div>
         {detail
-          ? <aside className="conn-detail-pane" aria-label="Connection details">
-              <ConnectionDetail connection={detail} />
-            </aside>
+          ? <div className="conn-detail-col">
+              <ConnectionAlerts connection={detail} />
+              <aside className="conn-detail-pane" aria-label="Connection details">
+                <ConnectionDetail connection={detail} />
+              </aside>
+            </div>
           : null}
       </div>
       {detail && state.connDetailOpen

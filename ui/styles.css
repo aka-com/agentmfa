@@ -1445,12 +1445,20 @@
   display: flex; gap: 14px; align-items: flex-start; padding-bottom: 14px;
 }
 .tools-list { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+/* The detail column stacks the attention layer (alerts) above the panel
+   card; the column owns the sticky placement and the viewport height, the
+   pane keeps the card chrome and the scroll. */
+.conn-detail-col {
+  flex: 0 1 clamp(20rem, calc(38% + 2.5rem), 26.25rem);
+  min-width: 0;
+  position: sticky; top: 0;
+  display: flex; flex-direction: column; gap: 10px;
+  height: fit-content; max-height: calc(100vh - 130px);
+  height: calc(100cqh - 14px); max-height: calc(100cqh - 14px);
+}
 .conn-detail-pane {
   --cd-gutter-x: 16px;
-  flex: 0 1 clamp(20rem, calc(38% + 2.5rem), 26.25rem);
-  position: sticky; top: 0;
-  height: fit-content; max-height: calc(100vh - 130px); overflow-y: auto;
-  height: calc(100cqh - 14px); max-height: calc(100cqh - 14px);
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
   padding: 14px 16px 14px;
   border: 1px solid var(--line); border-radius: 12px;
   background: var(--card-bg); box-shadow: 0 1px 3px rgba(20,24,50,.06);
@@ -1555,24 +1563,31 @@
   font: inherit; cursor: pointer;
 }
 .cd-live-link:hover { text-decoration: underline; }
-.conn-detail-pane .cc-issues { margin-top: 12px; max-width: none; }
-/* The test verdict sits directly under the header — give it the same
-   breathing room the issues block gets, not the row-level 5px. */
-.conn-detail-pane .cc-test { margin-top: 12px; }
+/* Alerts sit above the panel card, not inside it. */
+.cd-alerts { flex: 0 0 auto; margin-top: 0; max-width: none; }
 .conn-detail-backdrop { display: none; }
 
 @media (max-width: 720px) {
   /* The slide-over sits above the page but below every modal layer —
      sheets (z 8/9) opened from the panel (issue endpoint, the tool
      picker, confirms) must cover it. */
-  .conn-detail-pane {
-    --cd-gutter-x: 18px;
+  .conn-detail-col {
     display: none;
     position: fixed; top: 0; right: 0; bottom: 0; z-index: 7;
     width: min(400px, 92vw); height: auto; max-height: none;
-    border: none; border-left: 1px solid var(--line); border-radius: 0;
+    gap: 0;
+    border-left: 1px solid var(--line);
     background: var(--panel);
     box-shadow: -16px 0 40px rgba(10,15,40,.28);
+  }
+  /* Inside the slide-over the alerts keep the pane's gutter; the pane
+     itself drops its card chrome — the column carries it. */
+  .cd-alerts { padding: 16px 18px 0; }
+  .cd-alerts + .conn-detail-pane { padding-top: 12px; }
+  .conn-detail-pane {
+    --cd-gutter-x: 18px;
+    border: none; border-radius: 0;
+    background: transparent; box-shadow: none;
     padding: 16px 18px 8px;
   }
   /* The tray window is narrower than the menu's usual 250px minimum. Keep
@@ -1581,7 +1596,7 @@
   .cd-actions .tile-menu {
     width: min(250px, calc(92vw - 37px)); min-width: 0;
   }
-  .catalog.detail-open .conn-detail-pane { display: block; animation: cd-slide .2s ease; }
+  .catalog.detail-open .conn-detail-col { display: flex; animation: cd-slide .2s ease; }
   .catalog.detail-open .conn-detail-backdrop {
     display: block; position: fixed; inset: 0; z-index: 6;
     border: 0; padding: 0; background: rgba(15,17,30,.38); cursor: default;
@@ -1590,12 +1605,12 @@
      the app chrome stays visible above the overlay, which covers only the
      content below it. (The tray dropdown has no title bar — there the pair
      keeps covering the whole surface.) */
-  .dw-titlebar + .dw-body .conn-detail-pane { top: var(--titlebar-h); }
+  .dw-titlebar + .dw-body .conn-detail-col { top: var(--titlebar-h); }
   .dw-titlebar + .dw-body .catalog.detail-open .conn-detail-backdrop { top: var(--titlebar-h); }
 }
 @keyframes cd-slide { from { transform: translateX(36px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .catalog.detail-open .conn-detail-pane { animation: none; }
+  .catalog.detail-open .conn-detail-col { animation: none; }
 }
 /* Catalog groups in the add view: room above each heading so the label
    reads as the start of its group, not the tail of the previous card. */
@@ -1630,6 +1645,13 @@
   color: var(--accent-ink);
 }
 .cc-issue.info > svg { color: var(--accent); }
+/* The passing verdict wears the same card shape in the success palette. */
+.cc-issue.ok {
+  background: var(--ok-wash);
+  border-left-color: var(--ok-solid);
+  color: var(--ok-ink);
+}
+.cc-issue.ok > svg { color: var(--ok-ink); }
 /* Issue text is the same quoted machine speech as a verdict (see .cc-test),
    so it breaks mid-token rather than overflowing the attention card. */
 .cc-issue-body {
