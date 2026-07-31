@@ -574,6 +574,159 @@ async fn rust_host_keeps_catalog_overflow_searchable_and_callable() {
             .contains("tool41"),
         "{called}"
     );
+
+    // Registered tools stay in the search index too, answered with the
+    // direct name they are exposed under rather than the generic invoker.
+    let searched = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        5,
+        "tools/call",
+        json!({
+            "name": "agentmfa_search_tools",
+            "arguments": {"query": "tool00"},
+        }),
+    )
+    .await;
+    let results = tool_payload(&searched);
+    assert_eq!(results["results"][0]["tool"], "tool00");
+    assert_eq!(
+        results["results"][0]["call"]["tool"],
+        "agentmfa_catalog_tool00"
+    );
+
+    let called = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        6,
+        "tools/call",
+        json!({
+            "name": "agentmfa_call_tool",
+            "arguments": {"connection": "catalog", "tool": "tool00", "arguments": {}},
+        }),
+    )
+    .await;
+    assert!(
+        called["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("tool00"),
+        "{called}"
+    );
+}
+
+#[tokio::test]
+async fn rust_host_serves_tool_calls_before_the_first_listing() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream = axum::Router::new()
+        .route("/ping", axum::routing::get(|| async { "pong" }))
+        .route(
+            "/mcp",
+            axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+                let id = body["id"].clone();
+                let result = match body["method"].as_str() {
+                    Some("initialize") => json!({
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "notes", "version": "1"},
+                    }),
+                    Some("tools/list") => json!({
+                        "tools": [{
+                            "name": "search",
+                            "description": "Search notes",
+                            "inputSchema": {"type": "object"},
+                        }],
+                    }),
+                    Some("tools/call") => json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("found: {}", body["params"]["arguments"]),
+                        }],
+                    }),
+                    _ => Value::Null,
+                };
+                axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+            }),
+        );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, upstream).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::new(
+        Paths::under(dir.path()),
+        Arc::new(MemoryVault::new()),
+        BrokerConfig::default(),
+        Arc::new(NoopEvents),
+    )
+    .await
+    .unwrap();
+    broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "prod-db".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(upstream_port),
+                trusted_ca_bundle_path: None,
+                template: String::new(),
+                mcp_path: None,
+                test_path: None,
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    add_mcp_connection(&broker, "notes", upstream_port);
+    let token = broker.identity.token();
+    let host = mcp_host::serve(broker).await.unwrap();
+    let client = reqwest::Client::new();
+
+    // No tools/list first: a client that remembers its tools from an earlier
+    // session — the stdio bridge replays a pending call this way after it
+    // recovers an evicted session — must still get them served.
+    let session = initialize(&client, &host.mcp_url(), &token).await;
+    let called = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        2,
+        "tools/call",
+        json!({
+            "name": "agentmfa_prod-db_request",
+            "arguments": {"method": "GET", "path": "/ping"},
+        }),
+    )
+    .await;
+    assert_eq!(tool_payload(&called)["status"], 200, "{called}");
+
+    let searched = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        3,
+        "tools/call",
+        json!({
+            "name": "agentmfa_notes_search",
+            "arguments": {"query": "roadmap"},
+        }),
+    )
+    .await;
+    assert!(
+        searched["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("roadmap"),
+        "{searched}"
+    );
 }
 
 #[tokio::test]

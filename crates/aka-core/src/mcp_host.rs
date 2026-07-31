@@ -376,8 +376,15 @@ fn origin_is_loopback(origin: Option<&HeaderValue>) -> bool {
     let Ok(origin) = url::Url::parse(origin) else {
         return false;
     };
-    matches!(origin.scheme(), "http" | "https")
-        && matches!(origin.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
+    if !matches!(origin.scheme(), "http" | "https") {
+        return false;
+    }
+    match origin.host() {
+        Some(url::Host::Domain(domain)) => domain == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip == std::net::Ipv4Addr::LOCALHOST,
+        Some(url::Host::Ipv6(ip)) => ip == std::net::Ipv6Addr::LOCALHOST,
+        None => false,
+    }
 }
 
 async fn handle(State(state): State<HostState>, request: Request<Body>) -> Response {
@@ -1042,13 +1049,19 @@ fn alternate_tool_name(candidate: &str, identity: &str, attempt: usize) -> Strin
     )
 }
 
-fn native_tools(connections: &[BrokerConnection]) -> Vec<(String, BrokerConnection)> {
+fn native_tools<'a>(
+    connections: &[BrokerConnection],
+    reserved: impl IntoIterator<Item = &'a str>,
+) -> Vec<(String, BrokerConnection)> {
     let mut taken = std::collections::HashSet::from([
         "agentmfa_status".to_string(),
         "agentmfa_connect".to_string(),
         "agentmfa_search_tools".to_string(),
         "agentmfa_call_tool".to_string(),
     ]);
+    // A session's discovered upstream tool names are already on the surface;
+    // a native connection wired afterwards must not collide with them.
+    taken.extend(reserved.into_iter().map(str::to_string));
     let mut tools = Vec::new();
     for connection in connections
         .iter()
@@ -1137,12 +1150,50 @@ fn describe(connection: &BrokerConnection) -> String {
     }
 }
 
+fn native_output_schema(connection: &BrokerConnection) -> Value {
+    match connection.kind.as_str() {
+        "api" => json!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "integer"},
+                "headers": {"type": "object"},
+                "body": {"type": "string"},
+                "body_encoding": {"enum": ["utf8", "base64"]},
+            },
+            "additionalProperties": true,
+        }),
+        "pg" => json!({
+            "type": "object",
+            "properties": {
+                "dsn": {"type": "string"},
+                "ticket": {"type": "string"},
+                "expires_in_seconds": {"type": "integer"},
+            },
+            "additionalProperties": true,
+        }),
+        _ => json!({
+            "type": "object",
+            "properties": {
+                "auth_sock": {"type": "string"},
+                "destination": {"type": "string"},
+                "host": {"type": "string"},
+                "port": {"type": "integer"},
+                "user": {"type": "string"},
+                "host_key_fingerprint": {"type": ["string", "null"]},
+                "expires_in_seconds": {"type": "integer"},
+            },
+            "additionalProperties": true,
+        }),
+    }
+}
+
 fn native_tool_definition(name: &str, connection: &BrokerConnection) -> Value {
     json!({
         "name": name,
         "title": connection.name,
         "description": describe(connection),
         "inputSchema": tool_schema(connection),
+        "outputSchema": native_output_schema(connection),
         "annotations": {
             "idempotentHint": false,
             "openWorldHint": connection.kind == "api",
@@ -1297,7 +1348,10 @@ async fn list_tools(
     let listed = connections(state, token, label).await;
     let native = match &listed {
         Ok(connections) => {
-            let native = native_tools(connections);
+            let native = native_tools(
+                connections,
+                session.protocol_catalog.tools.keys().map(String::as_str),
+            );
             state
                 .sessions
                 .replace_native_tools(session_id, client_id, native.clone());
@@ -1374,10 +1428,10 @@ async fn call_tool(
             status_result(state, session_id, client_id, session, token, label).await
         }
         Some("agentmfa_connect") => connect_result(state, token, label, &arguments).await,
-        Some("agentmfa_search_tools") => {
+        Some("agentmfa_search_tools") if session.protocol_catalog.discovered => {
             search_upstream_tools(&session.protocol_catalog, &arguments)
         }
-        Some("agentmfa_call_tool") => {
+        Some("agentmfa_call_tool") if session.protocol_catalog.discovered => {
             call_search_only_tool(state, token, label, &session.protocol_catalog, &arguments).await
         }
         Some(name) if session.protocol_catalog.tools.contains_key(name) => {
@@ -1390,7 +1444,7 @@ async fn call_tool(
             )
             .await
         }
-        Some(name) => {
+        Some(name) if session.native_tools.contains_key(name) => {
             native_result(
                 state,
                 token,
@@ -1400,6 +1454,42 @@ async fn call_tool(
                 session.native_tools.get(name).cloned(),
             )
             .await
+        }
+        Some(name) => {
+            // The session does not know the tool. On a fresh session — or one
+            // the bridge recovered after an eviction — the client may call a
+            // remembered tool without listing first, and the Node host served
+            // that because it built the whole surface at session open. Rebuild
+            // the surfaces once, then dispatch against what came back.
+            let (native, catalog) =
+                refreshed_surfaces(state, session_id, client_id, session, token, label).await;
+            match name {
+                "agentmfa_search_tools" => search_upstream_tools(&catalog, &arguments),
+                "agentmfa_call_tool" => {
+                    call_search_only_tool(state, token, label, &catalog, &arguments).await
+                }
+                name if catalog.tools.contains_key(name) => {
+                    call_upstream_tool(
+                        state,
+                        token,
+                        label,
+                        catalog.tools.get(name).unwrap(),
+                        arguments,
+                    )
+                    .await
+                }
+                name => {
+                    native_result(
+                        state,
+                        token,
+                        label,
+                        name,
+                        arguments,
+                        native.get(name).cloned(),
+                    )
+                    .await
+                }
+            }
         }
         None => tool_error("Tool name is required"),
     };
@@ -1413,6 +1503,48 @@ async fn call_tool(
     )
 }
 
+/// Bring a session's native tools and protocol catalog up to date, the same
+/// way `tools/list` does, and hand both back for immediate dispatch.
+async fn refreshed_surfaces(
+    state: &HostState,
+    session_id: &str,
+    client_id: uuid::Uuid,
+    session: &Session,
+    token: &str,
+    label: &str,
+) -> (HashMap<String, BrokerConnection>, ProtocolCatalog) {
+    let listed = connections(state, token, label).await;
+    let native = match &listed {
+        Ok(connections) => {
+            let native = native_tools(
+                connections,
+                session.protocol_catalog.tools.keys().map(String::as_str),
+            );
+            state
+                .sessions
+                .replace_native_tools(session_id, client_id, native.clone());
+            native
+        }
+        Err(_) => session
+            .native_tools
+            .iter()
+            .map(|(name, connection)| (name.clone(), connection.clone()))
+            .collect(),
+    };
+    let catalog = ensure_protocol_catalog(
+        state,
+        session_id,
+        client_id,
+        session,
+        token,
+        label,
+        listed.as_deref().ok(),
+        native.iter().map(|(name, _)| name.as_str()),
+    )
+    .await;
+    (native.into_iter().collect(), catalog)
+}
+
 async fn status_result(
     state: &HostState,
     session_id: &str,
@@ -1423,7 +1555,10 @@ async fn status_result(
 ) -> Value {
     match connections(state, token, label).await {
         Ok(connections) => {
-            let registered = native_tools(&connections);
+            let registered = native_tools(
+                &connections,
+                session.protocol_catalog.tools.keys().map(String::as_str),
+            );
             state
                 .sessions
                 .replace_native_tools(session_id, client_id, registered.clone());
@@ -1557,6 +1692,25 @@ async fn connect_result(
     }
 }
 
+/// Every upstream tool this session knows about — search-only first, then the
+/// registered ones with the name they are exposed under. The search and
+/// generic-call meta-tools work over the whole index, the way the Node host's
+/// did, so a registered tool found by search is answered with its direct name.
+fn upstream_tool_index(
+    catalog: &ProtocolCatalog,
+) -> impl Iterator<Item = (Option<&str>, &UpstreamToolBinding)> {
+    catalog
+        .search_only
+        .iter()
+        .map(|binding| (None, binding))
+        .chain(
+            catalog
+                .tools
+                .iter()
+                .map(|(exposed, binding)| (Some(exposed.as_str()), binding)),
+        )
+}
+
 fn search_upstream_tools(catalog: &ProtocolCatalog, arguments: &Map<String, Value>) -> Value {
     let Some(query) = arguments.get("query").and_then(Value::as_str) else {
         return tool_error("query is required");
@@ -1565,10 +1719,8 @@ fn search_upstream_tools(catalog: &ProtocolCatalog, arguments: &Map<String, Valu
         .split_whitespace()
         .map(str::to_ascii_lowercase)
         .collect();
-    let mut scored: Vec<(usize, &UpstreamToolBinding)> = catalog
-        .search_only
-        .iter()
-        .filter_map(|binding| {
+    let mut scored: Vec<(usize, Option<&str>, &UpstreamToolBinding)> = upstream_tool_index(catalog)
+        .filter_map(|(registered_as, binding)| {
             let description = binding.definition["description"]
                 .as_str()
                 .unwrap_or_default()
@@ -1580,24 +1732,37 @@ fn search_upstream_tools(catalog: &ProtocolCatalog, arguments: &Map<String, Valu
                     usize::from(name.contains(term)) * 2 + usize::from(description.contains(term))
                 })
                 .sum();
-            (score > 0).then_some((score, binding))
+            (score > 0).then_some((score, registered_as, binding))
         })
         .collect();
-    scored.sort_by_key(|item| std::cmp::Reverse(item.0));
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.2.upstream_name.cmp(&right.2.upstream_name))
+    });
     let results: Vec<Value> = scored
         .into_iter()
         .take(20)
-        .map(|(_, binding)| {
+        .map(|(_, registered_as, binding)| {
             json!({
                 "tool": binding.upstream_name,
                 "connection": binding.connection.name,
                 "description": binding.definition["description"],
-                "call": {
-                    "tool": "agentmfa_call_tool",
-                    "arguments": {
-                        "connection": binding.connection.name,
-                        "tool": binding.upstream_name,
-                    },
+                "parameters": framed_upstream_text(
+                    &binding.definition["inputSchema"].to_string(),
+                    4_096,
+                )
+                .0,
+                "call": match registered_as {
+                    Some(exposed) => json!({"tool": exposed}),
+                    None => json!({
+                        "tool": "agentmfa_call_tool",
+                        "arguments": {
+                            "connection": binding.connection.name,
+                            "tool": binding.upstream_name,
+                        },
+                    }),
                 },
             })
         })
@@ -1618,7 +1783,7 @@ async fn call_search_only_tool(
 ) -> Value {
     let connection = arguments.get("connection").and_then(Value::as_str);
     let tool = arguments.get("tool").and_then(Value::as_str);
-    let Some(binding) = catalog.search_only.iter().find(|binding| {
+    let Some((_, binding)) = upstream_tool_index(catalog).find(|(_, binding)| {
         Some(binding.connection.name.as_str()) == connection
             && Some(binding.upstream_name.as_str()) == tool
     }) else {
@@ -1658,9 +1823,62 @@ async fn native_result(
         Ok(response) if response.status.is_success() => {
             tool_text(project_for_mcp(&connection, response.body))
         }
-        Ok(response) => tool_error(&broker_failure(&response)),
+        Ok(response) => broker_tool_refusal(&connection, &response),
         Err(error) => tool_error(&format!("AgentMFA call failed: {error}")),
     }
+}
+
+/// A broker refusal, told to the agent as what to do about it rather than a
+/// bare status: the agent should learn it lacks access (or that a human said
+/// no) instead of retrying a transport failure blindly.
+fn broker_tool_refusal(connection: &BrokerConnection, response: &BrokerResponse) -> Value {
+    let reason = response.body["reason"].as_str().unwrap_or("broker_error");
+    let detail = response.body["detail"].as_str();
+    if response.status == StatusCode::FORBIDDEN {
+        return match reason {
+            "approval_denied" => tool_error(&format!(
+                "The user refused this call to \"{}\". Do not retry it; \
+                 ask the user before trying a changed request.",
+                connection.name
+            )),
+            "approval_unavailable" => tool_error(&format!(
+                "Confirmation is enabled for \"{}\", but no AgentMFA approval \
+                 window is attached. Ask the user to open AgentMFA.",
+                connection.name
+            )),
+            _ => tool_error(&format!(
+                "AgentMFA policy refused \"{}\". {}",
+                connection.name,
+                detail.map(str::to_string).unwrap_or_else(|| format!(
+                    "Ask the user to enable \"{}\" for agents in AgentMFA.",
+                    connection.name
+                )),
+            )),
+        };
+    }
+    if response.status == StatusCode::REQUEST_TIMEOUT || reason == "approval_timeout" {
+        return tool_error(&format!(
+            "Nobody answered the confirmation for \"{}\" in time. \
+             Retrying will ask the user again.",
+            connection.name
+        ));
+    }
+    if response.status == StatusCode::TOO_MANY_REQUESTS {
+        let retry = response
+            .body
+            .get("retry_after_seconds")
+            .and_then(Value::as_u64)
+            .map(|seconds| seconds.to_string())
+            .or_else(|| response.retry_after.clone());
+        return tool_error(&format!(
+            "AgentMFA rate limited this call: {}.{}",
+            detail.unwrap_or(reason),
+            retry
+                .map(|seconds| format!(" Retry after {seconds} seconds."))
+                .unwrap_or_default(),
+        ));
+    }
+    tool_error(&broker_failure(response))
 }
 
 fn project_for_mcp(connection: &BrokerConnection, value: Value) -> Value {
@@ -1839,10 +2057,13 @@ impl<'a> UpstreamClient<'a> {
             if let Some(rpc_method) = payload.get("method").and_then(Value::as_str) {
                 headers.insert("mcp-method".into(), Value::String(rpc_method.into()));
             }
+            // Printable ASCII only: this is a routing hint, and a name that
+            // is not header-safe would fail the whole relay call instead of
+            // merely going unrouted (the body still carries the real value).
             if let Some(name) = payload
                 .pointer("/params/name")
                 .and_then(Value::as_str)
-                .filter(|name| name.is_ascii())
+                .filter(|name| name.bytes().all(|byte| (0x20..=0x7e).contains(&byte)))
             {
                 headers.insert("mcp-name".into(), Value::String(name.into()));
             }
@@ -2846,20 +3067,33 @@ async fn upstream_operation(
                     correlation_token: correlation_token.to_string(),
                 },
             );
-            let answer = broker_call(
-                state,
-                token,
-                label,
-                http::Method::POST,
-                "/v1/elicit",
-                Some(json!({
-                    "connection": connection.name,
-                    "correlation_token": correlation_token,
-                })),
-            )
-            .await;
+            // The wait for a human answer spends the same 8 minute budget as
+            // the upstream rounds themselves, so a parked elicitation cannot
+            // hold the call open past it.
+            let remaining = TOTAL_BUDGET
+                .checked_sub(started.elapsed())
+                .ok_or_else(|| "the MCP input flow exceeded its 8 minute time budget".to_string());
+            let answer = match remaining {
+                Ok(remaining) => tokio::time::timeout(
+                    remaining,
+                    broker_call(
+                        state,
+                        token,
+                        label,
+                        http::Method::POST,
+                        "/v1/elicit",
+                        Some(json!({
+                            "connection": connection.name,
+                            "correlation_token": correlation_token,
+                        })),
+                    ),
+                )
+                .await
+                .map_err(|_| "the MCP input flow exceeded its 8 minute time budget".to_string()),
+                Err(error) => Err(error),
+            };
             clear_elicitation_cancellation(state, correlation_token);
-            let answer = answer?;
+            let answer = answer??;
             if !answer.status.is_success() {
                 return Err(broker_failure(&answer));
             }
@@ -2892,7 +3126,10 @@ async fn protocol_catalog_for_request(
         return session.protocol_catalog.clone();
     }
     let listed = connections(state, token, label).await.ok();
-    let native = listed.as_deref().map(native_tools).unwrap_or_default();
+    let native = listed
+        .as_deref()
+        .map(|connections| native_tools(connections, std::iter::empty()))
+        .unwrap_or_default();
     ensure_protocol_catalog(
         state,
         session_id,
@@ -3207,6 +3444,44 @@ fn unauthorized_with_reason(id: Value, _reason: TokenError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_origins_include_bracketed_ipv6() {
+        let value = |origin: &str| HeaderValue::from_str(origin).unwrap();
+        assert!(origin_is_loopback(None));
+        assert!(origin_is_loopback(Some(&value("http://127.0.0.1:7777"))));
+        assert!(origin_is_loopback(Some(&value("http://localhost:7777"))));
+        assert!(origin_is_loopback(Some(&value("https://[::1]:7777"))));
+        assert!(!origin_is_loopback(Some(&value(
+            "https://attacker.example"
+        ))));
+        assert!(!origin_is_loopback(Some(&value("file:///tmp/page.html"))));
+        assert!(!origin_is_loopback(Some(&value("http://127.0.0.2"))));
+        assert!(!origin_is_loopback(Some(&value("not a url"))));
+    }
+
+    #[test]
+    fn native_tools_avoid_names_already_claimed_by_upstream_tools() {
+        let connection = BrokerConnection {
+            name: "notes".into(),
+            kind: "api".into(),
+            target: "https://api.example".into(),
+            endpoint: "/v1/http".into(),
+            wired: true,
+            mcp_path: None,
+            allowed_tools: None,
+            recent_ssh_refusal: None,
+        };
+        let unreserved = native_tools(std::slice::from_ref(&connection), std::iter::empty());
+        assert_eq!(unreserved[0].0, "agentmfa_notes_request");
+        let reserved = native_tools(
+            std::slice::from_ref(&connection),
+            ["agentmfa_notes_request"],
+        );
+        assert_eq!(reserved.len(), 1);
+        assert_ne!(reserved[0].0, "agentmfa_notes_request");
+        assert!(reserved[0].0.len() <= 64);
+    }
 
     #[test]
     fn native_tool_results_are_bounded_on_utf8_boundaries() {
