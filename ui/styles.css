@@ -758,7 +758,6 @@
 }
   .start-view-body{ margin-top: 18px; }
   .start-global + .start-view-body{ margin-top: 14px; }
-  .start-view-body > .agent-block:first-child{ margin-top: 0; }
   .start-steps{ margin: 0; padding: 0; list-style: none; }
   .start-step{ display: flex; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); }
   .start-num{
@@ -948,31 +947,6 @@
 .menu-divider{ height: 1px; margin: 4px 6px; background: var(--line-soft); }
   .menu-item:disabled{ opacity: .5; cursor: default; }
   .menu-item:disabled:hover{ background: transparent; }
-  /* delete-confirm state of a tile: same object, danger dress, Cancel/Delete */
-  /* ---- agents tab: one block per agent (identity card + a row per service
-   stating what the agent can do right now, with the revoke control beside
-   the state it revokes) ------------------------------------------------- */
-.agent-block{
-  margin-top: 10px; border: 1px solid var(--line); border-radius: 11px;
-  background: var(--card-bg); box-shadow: 0 1px 3px rgba(20,24,50,.06);
-}
-  .agent-card{ display: flex; align-items: center; gap: 10px; padding: 11px 12px; }
-  .agent-avatar{
-  flex: 0 0 34px; width: 34px; height: 34px; border-radius: 9px;
-  background: var(--b-agent-bg); color: var(--b-agent-ink);
-  display: flex; align-items: center; justify-content: center;
-}
-  .agent-avatar svg{ width: 17px; height: 17px; }
-  .agent-id{ flex: 1; min-width: 0; }
-  .agent-id .s-sub{ max-width: none; font-family: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .agent-menu-wrap{ position: relative; flex: 0 0 auto; }
-  .agent-menu-btn.on{ background: var(--hover-2); color: var(--ink-2); }
-  .agent-menu{
-  position: absolute; right: 0; top: calc(100% + 5px); z-index: 16;
-  min-width: 218px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
-  background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
-  box-shadow: 0 10px 28px rgba(10,15,40,.22);
-}
   .menu-item.danger, .menu-item.danger svg{ color: var(--danger-ink); }
   .acc-rows{ border-top: 1px solid var(--line-soft); }
   .acc-row{
@@ -1838,13 +1812,6 @@
   text-overflow: ellipsis; white-space: nowrap;
 }
 .act-chip-time { font-variant-numeric: tabular-nums; }
-
-/* --------------------------- Shared key card ----------------------------- */
-/* This computer's broker key, shown on the Secrets page. Reuses .agent-block. */
-.connect-keynote{ font-size: 0.78125rem; color: var(--muted); border-top: 1px solid var(--line);
-  padding: 6px 14px 7px; line-height: 1.55; }
-/* Trails the credential stores, so its separation is above it, not below. */
-.shared-key-card{ margin-top: 4px; }
 
 /* Connection state at a glance: green = agents on, grey = off, amber = needs attention. */
 /* The enable/disable switch — the detail header's master control. */

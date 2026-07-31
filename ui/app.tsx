@@ -104,7 +104,6 @@ import {
   EndpointStrip,
 } from '/src/features/endpoint-view';
 import { StartViewPage, startBlankId } from '/src/features/getting-started-view';
-import { SharedKeyCard } from '/src/features/identity-card';
 import { Sheet } from '/src/sheet';
 
 const EDIT_SECRET_MASK = '••••••••••••';
@@ -258,7 +257,6 @@ function showRequestInbox(): void {
   state.tab = 'inbox';
   state.confirm = null;
   state.menuOpen = false;
-  state.agentMenuOpen = null;
   state.startMenuOpen = null;
   state.addPalette = null;
   state.catalogActionMenuOpen = null;
@@ -2042,7 +2040,7 @@ function SamplesCard(): ReactNode {
           <span className="samples-spark" aria-hidden="true"><Icon markup={ICONS.sparkles} /></span>
           <div className="samples-title">
             <b>Try a sample tool</b>
-            <span>Two live public APIs. One click, zero setup, nothing to configure.</span>
+            <span>Live public APIs you can test against. One click, zero setup.</span>
           </div>
           <button className="icon-btn samples-dismiss" data-act="dismiss-samples"
             title="Hide sample tools" aria-label="Hide sample tools">
@@ -2180,13 +2178,6 @@ function SecretsView(): ReactNode {
     return entryMatch || savedSecretMatch;
   });
   const rows = connectedCatalogFirst(entries, state.connections);
-  // This computer's shared broker key lives here with the other credentials;
-  // the Get started walkthrough stays focused on the next action. It trails
-  // the stores because it is infrastructure — the credentials people came
-  // here to manage lead the page.
-  const keyCard = !needle && state.identity
-    ? <SharedKeyCard identity={state.identity} />
-    : null;
   return (
     <div className="catalog">
       {rows.length
@@ -2196,7 +2187,6 @@ function SecretsView(): ReactNode {
             </div>
           ))
         : <div className="muted-note">No secrets match your search.</div>}
-      {keyCard}
     </div>
   );
 }
@@ -2740,7 +2730,7 @@ function viewLoadKeys(tab: Tab): LoadKey[] {
   switch (tab) {
     case 'start': return ['connections', 'identity', 'settings'];
     case 'connections': return ['connections'];
-    case 'secrets': return ['secrets', 'identity'];
+    case 'secrets': return ['secrets'];
     case 'activity': return ['activity', 'sessions'];
     case 'inbox': return ['approvals', 'elicitations', 'requests'];
   }
@@ -5665,7 +5655,6 @@ function handleConnectionContextMenu(e: ReactMouseEvent<HTMLDivElement>): void {
   state.connMenuOpen = id;
   state.connMenuPoint = { x: e.clientX, y: e.clientY };
   state.catalogActionMenuOpen = null;
-  state.agentMenuOpen = null;
   render();
 }
 
@@ -5685,11 +5674,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
   }
   if (state.brokerMenuOpen && !target?.closest('.broker-switch-wrap')) {
     state.brokerMenuOpen = false;
-    if (!btn) { render(); return; }
-    // fall through: the clicked action runs and its render reflects the close
-  }
-  if (state.agentMenuOpen && !target?.closest('.agent-menu-wrap')) {
-    state.agentMenuOpen = null;
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
@@ -5723,7 +5707,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       clearSensitivePresentation();
       if (tab && TABS.includes(tab as Tab)) state.tab = tab as Tab;
       state.confirm = null;
-      state.agentMenuOpen = null;
       state.startMenuOpen = null;
       state.addPalette = null;
       state.catalogActionMenuOpen = null;
@@ -5843,16 +5826,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       render();
       break;
     }
-    case 'copy-key':
-      if (await run(() => invoke('copy_key'))) {
-        toast('📋 Copied for 30s');
-        flashCopied('shared-key');
-      }
-      break;
-    case 'toggle-agent-menu':
-      state.agentMenuOpen = state.agentMenuOpen === id ? null : id;
-      render();
-      break;
     case 'toggle-conn-menu':
       state.connMenuPoint = null;
       state.connMenuOpen = state.connMenuOpen === id ? null : id;
@@ -5953,7 +5926,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     }
     case 'open-settings': state.menuOpen = false; setSheet({ kind: 'settings' }); render(); break;
     case 'copy-agent-setup':
-      if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
       break;
     case 'clear-activity-ask':
@@ -6633,7 +6605,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
 
     case 'rotate-key-ask': {
-      if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
       state.confirm = { kind: 'rotate-key' };
       render();
       break;
@@ -7166,7 +7137,6 @@ function handleAppKeyDown(e: KeyboardEvent): void {
   if (e.key === 'Escape') {
     if (state.addPalette) { state.addPalette = null; render(); return; }
     if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
-    if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
     if (state.startMenuOpen) { closeStartMenu(state.startMenuOpen); return; }
     if (state.connMenuOpen) {
       state.connMenuOpen = null;
@@ -7489,7 +7459,6 @@ async function boot() {
     state.confirmDiscard = false;
     state.confirm = null;
     state.catalogActionMenuOpen = null;
-    state.agentMenuOpen = null;
     state.startMenuOpen = null;
     state.addPalette = null;
     state.connMenuOpen = null;

@@ -281,6 +281,23 @@ test('connection detail headings have no leading connection icon', async () => {
   assert.doesNotMatch(detail, /ICONS\.chevronsLeftRightEllipsis/);
 });
 
+test('Secrets leaves agent-key management to Settings', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const secrets = app.match(
+    /function SecretsView\(\): ReactNode \{([\s\S]*?)function ActivityRow/,
+  )?.[1];
+  const settings = app.match(
+    /function SettingsSheet\(\): ReactNode \{([\s\S]*?)\/\* --------------------------------- helpers/,
+  )?.[1];
+
+  assert.ok(secrets, 'Secrets view is present');
+  assert.doesNotMatch(secrets, /identity|agent key|rotate-key|SharedKeyCard/);
+  assert.match(app, /case 'secrets': return \['secrets'\]/);
+  assert.ok(settings, 'Settings sheet is present');
+  assert.match(settings, /This computer’s agent key/);
+  assert.match(settings, /data-act="rotate-key-ask"/);
+});
+
 test('selected master rows have no left accent border', async () => {
   const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
   const selected = styles.match(/\.flat-conn-wrap\.sel \{([^}]*)\}/)?.[1];
@@ -482,7 +499,6 @@ test('popover disclosures do not claim an unimplemented ARIA menu model', async 
   const sources = await Promise.all([
     readFile(new URL('../app.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/features/getting-started-view.tsx', import.meta.url), 'utf8'),
-    readFile(new URL('../src/features/identity-card.tsx', import.meta.url), 'utf8'),
   ]);
   const popovers = sources.join('\n');
   assert.doesNotMatch(popovers, /role="menu(?:item|itemradio)?"/);

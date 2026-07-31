@@ -212,7 +212,6 @@ export interface AppState {
   connImportSource: string;
   connImportError: string | null;
   menuOpen: boolean;
-  agentMenuOpen: string | null;
   connMenuOpen: string | null;
   connMenuPoint: ConnMenuPoint | null;
   /** The Add-a-tool palette: open when non-null, with its typed query and
@@ -322,7 +321,6 @@ function createInitialState(): AppState {
     connImportSource: '',
     connImportError: null,
     menuOpen: false,
-    agentMenuOpen: null,
     connMenuOpen: null,
     connMenuPoint: null,
     addPalette: null,
