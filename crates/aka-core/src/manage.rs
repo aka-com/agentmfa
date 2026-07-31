@@ -1551,8 +1551,11 @@ impl ManagementBackend for LocalBackend {
         self.broker
             .validate_ssh_connection_credential(&spec, None)
             .await?;
-        self.blocking(move |broker| broker.ui_add_connection(spec).map(|_| ()))
-            .await
+        let id = self
+            .blocking(move |broker| broker.ui_add_connection(spec).map(|conn| conn.id))
+            .await?;
+        self.broker.auto_issue_api_endpoint(&id).await;
+        Ok(())
     }
 
     async fn add_connection_with_secret(
@@ -1564,12 +1567,15 @@ impl ManagementBackend for LocalBackend {
         self.broker
             .validate_ssh_connection_credential(&spec, Some(&value))
             .await?;
-        self.blocking(move |broker| {
-            broker
-                .ui_add_connection_with_secret(&secret_name, value, spec)
-                .map(|_| ())
-        })
-        .await
+        let id = self
+            .blocking(move |broker| {
+                broker
+                    .ui_add_connection_with_secret(&secret_name, value, spec)
+                    .map(|conn| conn.id)
+            })
+            .await?;
+        self.broker.auto_issue_api_endpoint(&id).await;
+        Ok(())
     }
 
     async fn update_connection(
@@ -1775,8 +1781,13 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn set_tool_access(&self, connection_id: Uuid, enabled: bool) -> ManageResult<bool> {
-        self.blocking(move |broker| broker.ui_set_tool_access(&connection_id, enabled))
-            .await
+        let changed = self
+            .blocking(move |broker| broker.ui_set_tool_access(&connection_id, enabled))
+            .await?;
+        if enabled {
+            self.broker.auto_issue_api_endpoint(&connection_id).await;
+        }
+        Ok(changed)
     }
 
     async fn set_allowed_tools(

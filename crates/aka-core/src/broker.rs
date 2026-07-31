@@ -1686,6 +1686,36 @@ impl Broker {
         self.endpoints.list()
     }
 
+    /// A direct endpoint is how agents consume a plain HTTP API, so one is
+    /// minted automatically when such a connection is created or its agent
+    /// access re-enabled — "Get connection address…" should only ever mean
+    /// the endpoint was explicitly revoked. MCP upstreams are consumed
+    /// through the MCP host instead, and SSH/Postgres issuance stays
+    /// explicit: those endpoints hand out login and database capabilities.
+    /// Never rotates — an existing record (even expired: renewal is the
+    /// user's call) is left alone — and a failure is a warning, not an
+    /// error: the connection was created or enabled either way, and issuing
+    /// remains available from the panel.
+    pub async fn auto_issue_api_endpoint(self: &Arc<Self>, connection_id: &Uuid) {
+        let Ok(connection) = self.store.connection_by_id(connection_id) else {
+            return;
+        };
+        if !matches!(
+            &connection.config,
+            ConnectionConfig::Api { mcp_path: None, .. }
+        ) || !self.access.allows(connection_id)
+            || self.endpoints.get_for_connection(connection_id).is_some()
+        {
+            return;
+        }
+        if let Err(error) = self.ui_issue_endpoint(connection_id).await {
+            tracing::warn!(
+                "auto-issue of a direct endpoint for {} failed: {error}",
+                connection.name
+            );
+        }
+    }
+
     /// Issue (or rotate) a direct endpoint for a connection: mint the
     /// endpoint secret, bind its listener, and hand back the pasteable DSN.
     /// The secret is retained on the record so later copies of the address
