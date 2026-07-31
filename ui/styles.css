@@ -1314,6 +1314,13 @@
   border-radius: 999px; background: var(--wash); color: var(--muted);
   font-size: 0.71875rem; font-weight: 600; white-space: nowrap; opacity: .8;
 }
+/* The connection mechanism, badged per row now that sections group by
+   domain rather than by how a tool connects. */
+.cat-mech {
+  flex: 0 0 auto; padding: 2px 7px; border: 1px solid var(--line-soft);
+  border-radius: 5px; background: var(--wash); color: var(--muted);
+  font-size: 0.625rem; font-weight: 700; letter-spacing: 0.03em;
+}
 .cat-count {
   display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
   padding: 5px 11px 5px 13px; border: 1px solid transparent; border-radius: 999px;

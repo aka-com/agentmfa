@@ -40,36 +40,54 @@ test('every entry lives in a known section; only connection entries are addable'
   }
 });
 
-test('infrastructure precedes MCP Apps and generic endpoints live under Custom Apps', () => {
+test('infrastructure leads the domains and generic endpoints live under Custom Apps', () => {
+  assert.equal(CATALOG_SECTIONS[0], 'Infrastructure');
   assert.ok(
-    CATALOG_SECTIONS.indexOf('Infrastructure') < CATALOG_SECTIONS.indexOf('MCP Apps'),
+    CATALOG_SECTIONS.indexOf('Developer Tools') < CATALOG_SECTIONS.indexOf('Custom Apps'),
   );
-  assert.ok(CATALOG_SECTIONS.indexOf('MCP Apps') < CATALOG_SECTIONS.indexOf('Custom Apps'));
-  assert.ok(CATALOG_SECTIONS.indexOf('API Apps') < CATALOG_SECTIONS.indexOf('Custom Apps'));
+  assert.ok(CATALOG_SECTIONS.indexOf('Business') < CATALOG_SECTIONS.indexOf('Custom Apps'));
   assert.deepEqual(
     CATALOG.filter((entry) => entry.section === 'Custom Apps').map((entry) => entry.id),
     ['mcp', 'http'],
   );
 });
 
-test('setup-required apps lead the disconnected MCP app rows', () => {
-  const apps = CATALOG.filter((entry) => entry.section === 'MCP Apps').map((entry) => entry.id);
+test('sections group by domain, not by connection mechanism', () => {
+  assert.deepEqual(
+    CATALOG.filter((entry) => entry.section === 'Developer Tools').map((entry) => entry.id),
+    ['github', 'linear', 'sentry', 'vercel', 'cloudflare'],
+  );
+  assert.deepEqual(
+    CATALOG.filter((entry) => entry.section === 'AI Models').map((entry) => entry.id),
+    ['anthropic', 'openai'],
+  );
+  assert.deepEqual(
+    CATALOG.filter((entry) => entry.section === 'Communication').map((entry) => entry.id),
+    ['slack', 'gmail'],
+  );
+  assert.deepEqual(
+    CATALOG.filter((entry) => entry.section === 'Productivity').map((entry) => entry.id),
+    ['notion', 'airtable'],
+  );
+  assert.deepEqual(
+    CATALOG.filter((entry) => entry.section === 'Business').map((entry) => entry.id),
+    ['stripe'],
+  );
+});
+
+test('setup-required apps lead the disconnected rows', () => {
   const displayed = connectedCatalogFirst(
-    CATALOG.filter((entry) => entry.section === 'MCP Apps'),
+    [
+      ...CATALOG.filter((entry) => entry.section === 'Productivity'),
+      ...CATALOG.filter((entry) => entry.section === 'Communication'),
+    ],
     [],
   );
+  // Slack and Gmail enter last but jump ahead of the ready-to-add rows.
   assert.deepEqual(displayed.slice(0, 2).map((entry) => entry.id), ['slack', 'gmail']);
   assert.deepEqual(
     CATALOG.filter((entry) => entry.requiresSetup).map((entry) => entry.id),
     ['slack', 'gmail'],
-  );
-  assert.ok(apps.indexOf('airtable') < apps.indexOf('linear'));
-});
-
-test('key-only vendors live in API Apps, not MCP Apps', () => {
-  assert.deepEqual(
-    CATALOG.filter((entry) => entry.section === 'API Apps').map((entry) => entry.id),
-    ['anthropic', 'openai', 'vercel'],
   );
 });
 
@@ -268,33 +286,39 @@ test('every connection is counted by exactly one row', () => {
 });
 
 test('connected tools sort above setup-required tools', () => {
-  const apps = CATALOG.filter((entry) => entry.section === 'MCP Apps');
-  const sorted = connectedCatalogFirst(apps, [
-    conn('api', 'api.stripe.com', 'billing'),
-    conn('api', 'sentry.io', 'errors'),
-  ]);
-  assert.deepEqual(sorted.slice(0, 2).map((entry) => entry.id), ['sentry', 'stripe']);
-  assert.deepEqual(sorted.slice(2, 4).map((entry) => entry.id), ['slack', 'gmail']);
+  const rows = [
+    ...CATALOG.filter((entry) => entry.section === 'Communication'),
+    ...CATALOG.filter((entry) => entry.section === 'Productivity'),
+  ];
+  const notion = conn('api', 'mcp.notion.com', 'notes');
+  notion.mcp_path = '/mcp';
+  const sorted = connectedCatalogFirst(rows, [notion]);
+  assert.deepEqual(
+    sorted.map((entry) => entry.id),
+    ['notion', 'slack', 'gmail', 'airtable'],
+  );
 });
 
 test('collapsed app groups show at least three rows and never hide connected tools', () => {
-  const apps = CATALOG.filter((entry) => entry.section === 'MCP Apps');
+  const apps = CATALOG.filter((entry) => entry.section === 'Developer Tools');
   const oneConnected = collapsedCatalogGroup(apps, [
-    conn('api', 'api.stripe.com', 'billing'),
+    conn('api', 'sentry.io', 'errors'),
   ]);
   assert.equal(oneConnected.visible.length, 3);
-  assert.equal(oneConnected.visible[0]?.id, 'stripe');
+  assert.equal(oneConnected.visible[0]?.id, 'sentry');
   assert.equal(oneConnected.hiddenCount, apps.length - 3);
 
+  const github = conn('api', 'api.githubcopilot.com', 'gh-work');
+  github.mcp_path = '/mcp';
   const fourConnected = collapsedCatalogGroup(apps, [
-    conn('api', 'api.airtable.com', 'crm'),
+    github,
     conn('api', 'sentry.io', 'errors'),
-    conn('api', 'api.stripe.com', 'billing'),
+    conn('api', 'api.vercel.com', 'deploys'),
     conn('api', 'api.linear.app', 'tickets'),
   ]);
   assert.deepEqual(
     fourConnected.visible.map((entry) => entry.id),
-    ['airtable', 'linear', 'sentry', 'stripe'],
+    ['github', 'linear', 'sentry', 'vercel'],
   );
   assert.equal(fourConnected.hiddenCount, apps.length - 4);
 });
@@ -307,26 +331,28 @@ test('search filters by name and description, empty query returns all', () => {
   assert.equal(filterCatalog('zzz-nothing').length, 0);
 });
 
-test('the registry tail follows the curated MCP app rows and is searchable', () => {
+test('the registry tail follows the curated rows of its domain and is searchable', () => {
   const all = visibleCatalog('');
   for (const entry of REGISTRY_CATALOG) {
     assert.ok(all.some((row) => row.id === entry.id), entry.id);
   }
-  const mcpApps = all.filter((entry) => entry.section === 'MCP Apps').map((entry) => entry.id);
-  const lastCuratedMcpApp = CATALOG.filter((entry) => entry.section === 'MCP Apps').at(-1)!.id;
-  assert.ok(mcpApps.indexOf(lastCuratedMcpApp) < mcpApps.indexOf('mcp-vercel'));
-  assert.equal(mcpApps.indexOf('mcp-figma'), mcpApps.indexOf('mcp-vercel') + 1);
-  assert.equal(mcpApps.indexOf('mcp-atlassian'), mcpApps.indexOf('mcp-figma') + 1);
+  const dev = all.filter((entry) => entry.section === 'Developer Tools').map((entry) => entry.id);
+  const lastCuratedDev = CATALOG.filter((entry) => entry.section === 'Developer Tools').at(-1)!.id;
+  assert.ok(dev.indexOf(lastCuratedDev) < dev.indexOf('mcp-vercel'));
+  assert.equal(dev.indexOf('mcp-neon'), dev.indexOf('mcp-vercel') + 1);
+  assert.equal(dev.indexOf('mcp-semgrep'), dev.indexOf('mcp-neon') + 1);
+  assert.equal(dev.indexOf('mcp-globalping'), dev.indexOf('mcp-semgrep') + 1);
 
   const hits = visibleCatalog('paypal');
   assert.ok(hits.some((entry) => entry.id === 'mcp-paypal'));
 
-  // Registry rows are ordinary addable MCP rows.
+  // Registry rows are ordinary addable MCP rows, each placed in a domain.
   for (const entry of REGISTRY_CATALOG) {
     assert.equal(entry.via, 'connection', entry.id);
     assert.equal(entry.connType, 'api', entry.id);
     assert.equal(entry.mcp, true, entry.id);
-    assert.equal(entry.section, 'MCP Apps', entry.id);
+    assert.notEqual(entry.section, 'Secrets', entry.id);
+    assert.notEqual(entry.section, 'Custom Apps', entry.id);
     assert.notEqual(entry.icon, 'plug', entry.id);
     assert.ok(ICONS[entry.icon], `${entry.id}: ${entry.icon}`);
     assert.ok(CATALOG_SECTIONS.includes(entry.section), entry.id);

@@ -1410,6 +1410,10 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
         <span className="cat-ico" aria-hidden="true"><Icon markup={ICONS[entry.icon] || ''} /></span>
         <div className="cat-tx"><b>{entry.name}</b>
           <span>{entry.description}</span></div>
+        {entry.mcp
+          ? <span className="cat-mech"
+              title="Added by connecting to the vendor’s MCP server">MCP</span>
+          : null}
         {entry.limitedSupport
           ? <span className="cat-limited" tabIndex={0}
               data-tippy-content={`${entry.name} only accepts OAuth sign-ins from pre-approved clients. Use the API connector, or contact your representative at the company for support.`}>
@@ -1459,9 +1463,10 @@ function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolea
 }
 
 // Sections that collapse to their connected/minimum rows behind a "More
-// tools" disclosure. API Apps holds few rows today but is expected
-// to grow, so it collapses the same way as the larger sections.
-const COLLAPSIBLE_SECTIONS: string[] = ['MCP Apps', 'API Apps'];
+// tools" disclosure: every app domain. Infrastructure and the custom
+// endpoints stay fully expanded — they are the short, load-bearing rows.
+const COLLAPSIBLE_SECTIONS: string[] =
+  ['Developer Tools', 'AI Models', 'Productivity', 'Communication', 'Business'];
 
 function ConnectionTestResult({ connection }: { connection: ConnectionSummary }): ReactNode {
   const test = state.connTests[connection.id];
@@ -1904,7 +1909,7 @@ function paletteGroups(query: string): PaletteGroup[] {
   const isConnected = (entry: CatalogEntry): boolean =>
     connectionsForEntry(entry, state.connections).length > 0;
   const alwaysAddable = (entry: CatalogEntry): boolean =>
-    entry.section === 'Infrastructure' || ['http', 'mcp'].includes(entry.id);
+    entry.connType === 'pg' || entry.connType === 'ssh' || ['http', 'mcp'].includes(entry.id);
   return PALETTE_SECTIONS.flatMap((section) => {
     const rows = entries.filter((entry) => entry.section === section
       && !entry.disabled
@@ -2099,7 +2104,7 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
   // moves to the palette and the list shows only what agents can reach.
   const showDirectory = !state.connections.length;
   const alwaysAddable = (entry: CatalogEntry): boolean =>
-    entry.section === 'Infrastructure' || ['http', 'mcp'].includes(entry.id);
+    entry.connType === 'pg' || entry.connType === 'ssh' || ['http', 'mcp'].includes(entry.id);
   const sections = !showDirectory ? [] : PALETTE_SECTIONS.flatMap((section) => {
     const sectionEntries = entries.filter(
       (entry) => entry.section === section && (!isConnected(entry) || alwaysAddable(entry)),
