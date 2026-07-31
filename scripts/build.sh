@@ -158,7 +158,13 @@ if [[ "$(uname)" == "Darwin" ]]; then
   target_args=(--target universal-apple-darwin)
 fi
 
-# CI=true makes the DMG bundler skip the Finder/AppleScript window-layout
-# step, which needs Apple-Events automation access and can hang a headless
-# or unattended build.
+# The DMG bundler's Finder/AppleScript pass styles the image's window (icon
+# view, positioned app + Applications alias). It needs Apple-Events
+# automation access — Finder running, a one-time "control Finder" consent —
+# and hangs a headless or unattended build waiting for either, which is what
+# CI=true skips. Style only from an interactive terminal; a caller-set CI
+# always wins.
+if [[ -z "${CI:-}" && -t 1 ]]; then
+  exec "$repo_root/node_modules/.bin/tauri" build --config "$bundle_config" --bundles app,dmg "${target_args[@]}" "$@"
+fi
 exec env CI=true "$repo_root/node_modules/.bin/tauri" build --config "$bundle_config" --bundles app,dmg "${target_args[@]}" "$@"
