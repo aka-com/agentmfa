@@ -83,14 +83,20 @@ struct UpstreamToolBinding {
 #[derive(Clone)]
 struct UpstreamResourceBinding {
     connection: BrokerConnection,
+    /// Original upstream URI, forwarded verbatim on `resources/read`.
     uri: String,
+    /// Connection-namespaced URI published to agents; see [`expose_resource_uri`].
+    exposed_uri: String,
     definition: Value,
 }
 
 #[derive(Clone)]
 struct UpstreamTemplateBinding {
     connection: BrokerConnection,
+    /// Original upstream URI template, forwarded verbatim on completion.
     uri_template: String,
+    /// Connection-namespaced template published to agents.
+    exposed_uri_template: String,
     definition: Value,
     supports_completion: bool,
 }
@@ -2398,6 +2404,19 @@ fn namespace(connection: &BrokerConnection) -> String {
         .collect()
 }
 
+/// Wraps an upstream resource URI (or URI template) in a per-connection
+/// namespace, so identical URIs from two connections can neither collide in
+/// the catalog nor route a read through the other connection's credential.
+/// The original URI is kept verbatim after the prefix and restored by
+/// [`strip_resource_uri`] before anything is forwarded upstream.
+fn expose_resource_uri(connection: &BrokerConnection, uri: &str) -> String {
+    format!("agentmfa://{}/{uri}", namespace(connection))
+}
+
+fn strip_resource_uri<'a>(connection: &BrokerConnection, exposed: &'a str) -> Option<&'a str> {
+    exposed.strip_prefix(&format!("agentmfa://{}/", namespace(connection)))
+}
+
 fn upstream_tool_candidate(connection: &BrokerConnection, tool: &str) -> String {
     let tool: String = tool
         .chars()
@@ -2643,11 +2662,17 @@ async fn ensure_protocol_catalog(
                 let Some(uri) = resource.get("uri").and_then(Value::as_str) else {
                     continue;
                 };
-                if !taken_resources.insert(uri.to_string()) || catalog.resources.len() >= 100 {
+                let exposed_uri = expose_resource_uri(connection, uri);
+                if !taken_resources.insert(exposed_uri.clone()) || catalog.resources.len() >= 100 {
+                    tracing::warn!(
+                        connection = %connection.name,
+                        uri,
+                        "dropping upstream resource: duplicate exposed URI or catalog cap"
+                    );
                     continue;
                 }
                 let mut definition = Map::new();
-                definition.insert("uri".into(), Value::String(uri.to_string()));
+                definition.insert("uri".into(), Value::String(exposed_uri.clone()));
                 definition.insert(
                     "name".into(),
                     Value::String(
@@ -2679,6 +2704,7 @@ async fn ensure_protocol_catalog(
                 catalog.resources.push(UpstreamResourceBinding {
                     connection: connection.clone(),
                     uri: uri.to_string(),
+                    exposed_uri,
                     definition: Value::Object(definition),
                 });
             }
@@ -2695,12 +2721,18 @@ async fn ensure_protocol_catalog(
                         .unwrap_or(uri_template)
                 );
                 if !taken_templates.insert(exposed_name.clone()) || catalog.templates.len() >= 100 {
+                    tracing::warn!(
+                        connection = %connection.name,
+                        uri_template,
+                        "dropping upstream resource template: duplicate name or catalog cap"
+                    );
                     continue;
                 }
+                let exposed_uri_template = expose_resource_uri(connection, uri_template);
                 let mut definition = Map::new();
                 definition.insert(
                     "uriTemplate".into(),
-                    Value::String(uri_template.to_string()),
+                    Value::String(exposed_uri_template.clone()),
                 );
                 definition.insert("name".into(), Value::String(exposed_name.clone()));
                 insert_catalog_string(
@@ -2724,6 +2756,7 @@ async fn ensure_protocol_catalog(
                 catalog.templates.push(UpstreamTemplateBinding {
                     connection: connection.clone(),
                     uri_template: uri_template.to_string(),
+                    exposed_uri_template,
                     definition: Value::Object(definition),
                     supports_completion: discovery.capabilities.get("completions").is_some(),
                 });
@@ -2812,7 +2845,7 @@ async fn call_upstream_tool(
     )
     .await
     {
-        Ok(result) => sanitize_upstream_result(result, 128 * 1024),
+        Ok(result) => sanitize_upstream_result(result, 128 * 1024, Some(&binding.connection)),
         Err(error) => tool_error(&format!(
             "The upstream MCP tool on \"{}\" failed: {error}",
             binding.connection.name
@@ -2836,7 +2869,26 @@ fn framed_upstream_text(text: &str, budget: usize) -> (String, bool) {
     )
 }
 
-fn sanitize_upstream_result(value: Value, limit: usize) -> Value {
+/// Rewrites an upstream-provided resource URI on a result object to its
+/// exposed, connection-namespaced form, so an agent that passes it back to
+/// `resources/read` routes to the connection that produced it. Only a URI
+/// already carrying *this* connection's namespace is left alone: a foreign
+/// `agentmfa://` prefix is wrapped like any other upstream URI, so an
+/// upstream cannot spoof a link that routes through another connection.
+fn expose_result_uri(object: &mut Map<String, Value>, connection: &BrokerConnection) {
+    if let Some(Value::String(uri)) = object.get("uri") {
+        if strip_resource_uri(connection, uri).is_none() {
+            let exposed = expose_resource_uri(connection, uri);
+            object.insert("uri".into(), Value::String(exposed));
+        }
+    }
+}
+
+fn sanitize_upstream_result(
+    value: Value,
+    limit: usize,
+    connection: Option<&BrokerConnection>,
+) -> Value {
     let mut result = match value {
         Value::Object(result) => result,
         other => Map::from_iter([
@@ -2887,6 +2939,15 @@ fn sanitize_upstream_result(value: Value, limit: usize) -> Value {
                         resource.insert("text".into(), Value::String(framed));
                         truncated |= was_truncated;
                     }
+                    if let Some(connection) = connection {
+                        expose_result_uri(resource, connection);
+                    }
+                }
+                // Resource URIs the agent may pass back to `resources/read`
+                // (resource_link items, `resources/read` contents) must carry
+                // the exposed namespace or the follow-up read will not route.
+                if let Some(connection) = connection {
+                    expose_result_uri(object, connection);
                 }
             }
             let bytes = item.to_string().len();
@@ -2926,6 +2987,12 @@ fn sanitize_upstream_result(value: Value, limit: usize) -> Value {
                     );
                     content.insert("text".into(), Value::String(framed));
                     truncated |= was_truncated;
+                }
+                if let Some(connection) = connection {
+                    if let Some(Value::Object(resource)) = content.get_mut("resource") {
+                        expose_result_uri(resource, connection);
+                    }
+                    expose_result_uri(content, connection);
                 }
             }
             let bytes = message.to_string().len();
@@ -3168,7 +3235,7 @@ async fn list_resources(
         catalog
             .resources
             .iter()
-            .map(|item| item.uri.clone())
+            .map(|item| item.exposed_uri.clone())
             .collect(),
     );
     protocol_result(
@@ -3195,7 +3262,7 @@ async fn list_resource_templates(
         catalog
             .templates
             .iter()
-            .map(|item| item.uri_template.clone())
+            .map(|item| item.exposed_uri_template.clone())
             .collect(),
     );
     protocol_result(
@@ -3219,34 +3286,46 @@ async fn read_resource(
         .unwrap_or_default();
     let catalog =
         protocol_catalog_for_request(state, session_id, client_id, session, token, label).await;
-    let connection = catalog
+    // Match on the exposed (connection-namespaced) URI, then forward the
+    // original upstream URI to that binding's connection — the connection is
+    // taken from the binding, never re-derived from the URI string.
+    let target = catalog
         .resources
         .iter()
-        .find(|resource| resource.uri == uri)
-        .map(|resource| &resource.connection)
+        .find(|resource| resource.exposed_uri == uri)
+        .map(|resource| (&resource.connection, resource.uri.clone()))
         .or_else(|| {
             catalog
                 .templates
                 .iter()
-                .find(|template| uri_template_matches(&template.uri_template, uri))
-                .map(|template| &template.connection)
+                .filter(|template| uri_template_matches(&template.exposed_uri_template, uri))
+                .find_map(|template| {
+                    strip_resource_uri(&template.connection, uri)
+                        .map(|upstream_uri| (&template.connection, upstream_uri.to_string()))
+                })
         });
-    let result = match connection {
-        Some(connection) => {
-            upstream_operation(
-                state,
-                token,
-                label,
-                connection,
-                "resources/read",
-                json!({"uri": uri}),
-            )
-            .await
-        }
-        None => Err(format!("Resource {uri} not found")),
+    let Some((connection, upstream_uri)) = target else {
+        return rpc_error(
+            StatusCode::OK,
+            -32602,
+            &format!("Resource {uri} not found"),
+            rpc_id(request),
+        );
     };
-    match result {
-        Ok(result) => protocol_result(request, sanitize_upstream_result(result, 128 * 1024)),
+    match upstream_operation(
+        state,
+        token,
+        label,
+        connection,
+        "resources/read",
+        json!({"uri": upstream_uri}),
+    )
+    .await
+    {
+        Ok(result) => protocol_result(
+            request,
+            sanitize_upstream_result(result, 128 * 1024, Some(connection)),
+        ),
         Err(error) => rpc_error(StatusCode::OK, -32602, &error, rpc_id(request)),
     }
 }
@@ -3346,7 +3425,10 @@ async fn get_prompt(
     )
     .await
     {
-        Ok(result) => protocol_result(request, sanitize_upstream_result(result, 128 * 1024)),
+        Ok(result) => protocol_result(
+            request,
+            sanitize_upstream_result(result, 128 * 1024, Some(&prompt.connection)),
+        ),
         Err(error) => rpc_error(StatusCode::OK, -32603, &error, rpc_id(request)),
     }
 }
@@ -3391,7 +3473,9 @@ async fn complete(
             catalog
                 .templates
                 .iter()
-                .find(|template| template.uri_template == uri && template.supports_completion)
+                .find(|template| {
+                    template.exposed_uri_template == uri && template.supports_completion
+                })
                 .map(|template| {
                     (
                         &template.connection,
@@ -3492,6 +3576,96 @@ mod tests {
         assert!(text.contains("\"_truncated\""));
     }
 
+    fn test_connection(name: &str) -> BrokerConnection {
+        BrokerConnection {
+            name: name.into(),
+            kind: "api".into(),
+            target: "https://api.example".into(),
+            endpoint: "/v1/http".into(),
+            wired: true,
+            mcp_path: Some("/mcp".into()),
+            allowed_tools: None,
+            recent_ssh_refusal: None,
+        }
+    }
+
+    #[test]
+    fn resource_uris_round_trip_through_the_connection_namespace() {
+        let docs = test_connection("docs");
+        let exposed = expose_resource_uri(&docs, "docs://page/42");
+        assert_eq!(exposed, "agentmfa://docs/docs://page/42");
+        assert_eq!(strip_resource_uri(&docs, &exposed), Some("docs://page/42"));
+        // A different connection's prefix does not strip.
+        assert_eq!(strip_resource_uri(&test_connection("wiki"), &exposed), None);
+        // Non-identifier characters in the connection name are sanitized the
+        // same way tool namespaces are.
+        let spaced = test_connection("internal docs");
+        assert_eq!(
+            expose_resource_uri(&spaced, "x"),
+            "agentmfa://internal_docs/x"
+        );
+        assert_eq!(
+            strip_resource_uri(&spaced, "agentmfa://internal_docs/x"),
+            Some("x")
+        );
+    }
+
+    #[test]
+    fn exposed_templates_match_exposed_uris() {
+        let docs = test_connection("docs");
+        let template = expose_resource_uri(&docs, "docs://page/{id}");
+        assert!(uri_template_matches(
+            &template,
+            &expose_resource_uri(&docs, "docs://page/42")
+        ));
+        assert!(!uri_template_matches(
+            &template,
+            &expose_resource_uri(&test_connection("wiki"), "docs://page/42")
+        ));
+        // The raw upstream form no longer matches the exposed template.
+        assert!(!uri_template_matches(&template, "docs://page/42"));
+    }
+
+    #[test]
+    fn upstream_result_resource_uris_are_rewritten_to_the_exposed_form() {
+        let docs = test_connection("docs");
+        let result = sanitize_upstream_result(
+            json!({
+                "content": [
+                    {"type": "resource_link", "uri": "docs://home", "name": "home"},
+                    {"type": "resource", "resource": {"uri": "docs://page/1", "text": "body"}},
+                ],
+                "contents": [
+                    {"uri": "docs://page/2", "mimeType": "text/plain", "text": "body"},
+                    {"uri": "agentmfa://docs/docs://page/3", "text": "already exposed"},
+                    {"uri": "agentmfa://wiki/secret://x", "text": "spoofed foreign namespace"},
+                ],
+            }),
+            128 * 1024,
+            Some(&docs),
+        );
+        assert_eq!(result["content"][0]["uri"], "agentmfa://docs/docs://home");
+        assert_eq!(
+            result["content"][1]["resource"]["uri"],
+            "agentmfa://docs/docs://page/1"
+        );
+        assert_eq!(
+            result["contents"][0]["uri"],
+            "agentmfa://docs/docs://page/2"
+        );
+        // This connection's own namespace is not double-wrapped…
+        assert_eq!(
+            result["contents"][1]["uri"],
+            "agentmfa://docs/docs://page/3"
+        );
+        // …but a spoofed foreign namespace is wrapped like any other URI, so
+        // it can only route back through the connection that produced it.
+        assert_eq!(
+            result["contents"][2]["uri"],
+            "agentmfa://docs/agentmfa://wiki/secret://x"
+        );
+    }
+
     #[test]
     fn upstream_results_are_framed_and_cannot_spoof_the_boundary() {
         let result = sanitize_upstream_result(
@@ -3503,6 +3677,7 @@ mod tests {
                 "unknown_large_field": "y".repeat(100_000),
             }),
             4_096,
+            None,
         );
         let text = result["content"][0]["text"].as_str().unwrap();
         assert_eq!(text.matches(UNTRUSTED_BEGIN).count(), 1);

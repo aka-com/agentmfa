@@ -884,7 +884,10 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
                     "contents": [{
                         "uri": body["params"]["uri"],
                         "mimeType": "text/plain",
-                        "text": "resource body",
+                        "text": format!(
+                            "resource body for {}",
+                            body["params"]["uri"].as_str().unwrap_or("?")
+                        ),
                     }],
                 }),
                 Some("prompts/get") => json!({
@@ -951,7 +954,10 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
         json!({}),
     )
     .await;
-    assert_eq!(resources["result"]["resources"][0]["uri"], "docs://home");
+    assert_eq!(
+        resources["result"]["resources"][0]["uri"],
+        "agentmfa://docs/docs://home"
+    );
 
     let templates = rpc(
         &client,
@@ -965,7 +971,7 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
     .await;
     assert_eq!(
         templates["result"]["resourceTemplates"][0]["uriTemplate"],
-        "docs://page/{id}"
+        "agentmfa://docs/docs://page/{id}"
     );
 
     let read = rpc(
@@ -975,17 +981,39 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
         &session,
         4,
         "resources/read",
-        json!({"uri": "docs://page/42"}),
+        json!({"uri": "agentmfa://docs/docs://page/42"}),
     )
     .await;
+    // The upstream received the original URI, stripped of the namespace…
     assert!(read["result"]["contents"][0]["text"]
         .as_str()
         .unwrap()
-        .contains("resource body"));
+        .contains("resource body for docs://page/42"));
     assert!(read["result"]["contents"][0]["text"]
         .as_str()
         .unwrap()
         .contains("BEGIN UNTRUSTED UPSTREAM MCP CONTENT"));
+    // …and the URI handed back to the agent is re-namespaced.
+    assert_eq!(
+        read["result"]["contents"][0]["uri"],
+        "agentmfa://docs/docs://page/42"
+    );
+
+    // The raw upstream URI is not readable — only the exposed form routes.
+    let unrouted = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        8,
+        "resources/read",
+        json!({"uri": "docs://page/42"}),
+    )
+    .await;
+    assert!(unrouted["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
 
     let prompts = rpc(
         &client,
@@ -1026,7 +1054,7 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
         7,
         "completion/complete",
         json!({
-            "ref": {"type": "ref/resource", "uri": "docs://page/{id}"},
+            "ref": {"type": "ref/resource", "uri": "agentmfa://docs/docs://page/{id}"},
             "argument": {"name": "id", "value": ""},
         }),
     )
