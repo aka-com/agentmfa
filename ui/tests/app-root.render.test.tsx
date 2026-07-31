@@ -113,6 +113,35 @@ test('the application root boots against the mock bridge', () => {
   assert.ok(testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }));
 });
 
+test('dismissed sample tools can be restored from settings', async () => {
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(document.body, 'button', { name: 'Hide sample tools' }),
+  );
+  assert.equal(
+    testingLibrary.queryByRole(document.body, 'button', { name: 'Hide sample tools' }),
+    null,
+  );
+
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }),
+  );
+  const openSettings = document.querySelector<HTMLButtonElement>(
+    'button[data-act="open-settings"]',
+  );
+  assert.ok(openSettings);
+  testingLibrary.fireEvent.click(openSettings);
+  const dialog = await testingLibrary.findByRole(document.body, 'dialog', { name: 'Settings' });
+  const showSamples = testingLibrary.getByRole(dialog, 'checkbox', { name: 'Show sample tools' });
+  assert.equal(showSamples.getAttribute('aria-checked'), 'false');
+  testingLibrary.fireEvent.click(showSamples);
+  assert.equal(showSamples.getAttribute('aria-checked'), 'true');
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(dialog, 'button', { name: 'Done' }),
+  );
+
+  assert.ok(testingLibrary.getByRole(document.body, 'button', { name: 'Hide sample tools' }));
+});
+
 test('key rotation requires an ordinary destructive confirmation', async () => {
   testingLibrary.fireEvent.click(
     testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }),

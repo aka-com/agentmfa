@@ -8,6 +8,7 @@ import {
   START_OPTIONS,
   clientMatchesLabel,
   connectClientById, connectGuideSteps,
+  connectModeSentenceLabel,
   connectModesFor,
   directEndpointAddress,
   directStartTask,
@@ -17,6 +18,9 @@ import {
   sshBrokerFlags,
   sshDirectCommand,
   sshInvocationCommand,
+  startAddAnotherLabel,
+  startAddLead,
+  startAddedLead,
   startOptionById,
   startProgress,
   startTask,
@@ -67,6 +71,59 @@ test('the picker omits Custom API and ends with Slack API then Custom MCP', () =
   // The menu carries no kind tags, so the odd-one-out names its transport.
   assert.equal(startOptionById('slack').label, 'Slack API');
   assert.equal(START_OPTIONS.at(-1)?.label, 'Custom MCP');
+});
+
+test('every option says what one of it is, so “another” never stands alone', () => {
+  for (const option of START_OPTIONS) {
+    assert.ok(option.unit, `${option.id} declares a unit`);
+    // A unit that repeats the picker label verbatim ("another Slack API")
+    // names the transport instead of the thing a second one would be.
+    assert.notEqual(option.unit, option.label, option.id);
+  }
+});
+
+test('the repeat action names its object rather than a bare “another”', () => {
+  assert.equal(
+    startAddAnotherLabel(startOptionById('notion'), 'Connect'),
+    'Connect another Notion workspace',
+  );
+  assert.equal(
+    startAddAnotherLabel(startOptionById('postgres'), 'Add'),
+    'Add another Postgres database',
+  );
+  // The label carries the verb the catalog row would use, so an OAuth row
+  // reads Connect and a form-backed row reads Add.
+  assert.equal(
+    startAddAnotherLabel(startOptionById('mcp'), 'Add'),
+    'Add another MCP server',
+  );
+});
+
+test('a finished step 1 reports what it produced instead of repeating itself', () => {
+  const notion = startOptionById('notion');
+  const notionServer = {
+    ...conn('api', 'notion-work', true), host: 'mcp.notion.com', mcp_path: '/mcp',
+  };
+  const lead = startAddedLead(notion, startProgress(notion, [notionServer]));
+  assert.equal(lead, 'Agents reach Notion as “notion-work” through AgentMFA.');
+  // The pre-connection imperative is what made the done state read as though
+  // nothing had happened yet.
+  assert.doesNotMatch(lead, /^Connect to /);
+  assert.notEqual(lead, startAddLead(notion));
+
+  const postgres = startOptionById('postgres');
+  assert.equal(
+    startAddedLead(postgres, startProgress(postgres, [conn('pg', 'prod-db', true)])),
+    'Agents reach this Postgres database as “prod-db” through AgentMFA.',
+  );
+});
+
+test('a step 1 whose tool agents cannot call says so, and does not claim reach', () => {
+  const ssh = startOptionById('ssh');
+  const lead = startAddedLead(ssh, startProgress(ssh, [conn('ssh', 'prod-ssh')]));
+  assert.match(lead, /“prod-ssh” is connected, but agents may not call it yet/);
+  assert.match(lead, /agent access/);
+  assert.doesNotMatch(lead, /Agents reach/);
 });
 
 test('progress tracks added and enabled tools independently', () => {
@@ -240,6 +297,21 @@ test('Direct is offered first, and only for kinds with a direct endpoint', () =>
   // With the guides tab gone, Other MCP is offered as a step-2 mode.
   assert.ok(connectModesFor(startOptionById('postgres')).includes('mcp'));
   assert.ok(connectModesFor(startOptionById('notion')).includes('mcp'));
+});
+
+test('the hero picker names protocol-specific direct and HTTP clients', () => {
+  assert.equal(
+    connectModeSentenceLabel('direct', startOptionById('postgres')),
+    'any database client',
+  );
+  assert.equal(
+    connectModeSentenceLabel('direct', startOptionById('ssh')),
+    'any SSH client',
+  );
+  assert.equal(
+    connectModeSentenceLabel('cli', startOptionById('postgres')),
+    'any HTTP client',
+  );
 });
 
 test('the on-screen task redacts the DSN password and the socket filename', () => {

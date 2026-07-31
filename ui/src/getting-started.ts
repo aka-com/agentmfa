@@ -21,6 +21,14 @@ export interface StartOption {
   /** This option is backed by an MCP connection. */
   mcp?: boolean;
   /**
+   * What one connection of this kind is, in the words the service itself
+   * uses — a Notion *workspace*, a GitHub *account*. Names the object of the
+   * repeat action ("Connect another Notion workspace"), which is otherwise
+   * the page's most ambiguous word: the tool picker sits directly above, so
+   * a bare "another" reads as another service entirely.
+   */
+  unit: string;
+  /**
    * The first ask's body — chosen to be immediately useful, not a
    * hello-world. The lead-in (the broker tool's name, or the direct
    * endpoint itself) is prepended by startTask/directStartTask.
@@ -35,6 +43,7 @@ export const START_OPTIONS: StartOption[] = [
     icon: 'postgres',
     connType: 'pg',
     catalogId: 'postgres',
+    unit: 'Postgres database',
     taskBody: `list the 10 largest tables with their row counts, and flag any foreign key that has no index.`,
   },
   {
@@ -43,6 +52,7 @@ export const START_OPTIONS: StartOption[] = [
     icon: 'terminal',
     connType: 'ssh',
     catalogId: 'ssh',
+    unit: 'SSH server',
     taskBody: `report disk and memory usage, then show the last 20 lines of any log that contains errors.`,
   },
   {
@@ -52,6 +62,7 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'notion',
     mcp: true,
+    unit: 'Notion workspace',
     taskBody: `summarize the pages I changed this week and list any open action items.`,
   },
   {
@@ -61,6 +72,7 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'github',
     mcp: true,
+    unit: 'GitHub account',
     taskBody: `summarize the pull requests and issues that changed this week.`,
   },
   {
@@ -70,6 +82,7 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'stripe',
     mcp: true,
+    unit: 'Stripe account',
     taskBody: `summarize payment activity from the last seven days and flag anything that needs attention.`,
   },
   {
@@ -79,6 +92,7 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'sentry',
     mcp: true,
+    unit: 'Sentry organization',
     taskBody: `summarize the highest-impact unresolved issues from this week.`,
   },
   // The odd ones out sit at the bottom: Slack rides the plain API (its name
@@ -89,6 +103,7 @@ export const START_OPTIONS: StartOption[] = [
     icon: 'slack',
     connType: 'api',
     catalogId: 'slack',
+    unit: 'Slack workspace',
     taskBody: `summarize the important conversations from this week and list the decisions that were made.`,
   },
   {
@@ -98,6 +113,7 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'mcp',
     mcp: true,
+    unit: 'MCP server',
     taskBody: `list the tools it exposes, then use them to summarize what changed this week.`,
   },
 ];
@@ -107,12 +123,12 @@ export function startOptionById(id: string): StartOption {
 }
 
 /**
- * Step 1's lead: what is about to be hooked up, named the way the user
- * thinks of it. Databases and servers are things you point at, so they read
- * as kinds ("this Postgres database"); a service is a name you recognize.
+ * How a sentence names the thing being connected, the way the user thinks of
+ * it. Databases and servers are things you point at, so they read as kinds
+ * ("this Postgres database"); a service is a name you recognize.
  */
-export function startAddLead(option: StartOption): string {
-  const subject = option.connType === 'pg'
+function startSubject(option: StartOption): string {
+  return option.connType === 'pg'
     ? 'this Postgres database'
     : option.connType === 'ssh'
     ? 'this SSH server'
@@ -123,7 +139,40 @@ export function startAddLead(option: StartOption): string {
     : option.id === 'slack'
     ? 'Slack'
     : option.label;
-  return `Connect to ${subject} via AgentMFA.`;
+}
+
+/** Step 1's lead before anything exists: what the step is about to do. */
+export function startAddLead(option: StartOption): string {
+  return `Connect to ${startSubject(option)} via AgentMFA.`;
+}
+
+/**
+ * Step 1's lead once a tool exists. The imperative no longer applies — the
+ * checkmark above it says the step is finished — so the line reports what the
+ * step produced, and names the tool, which is the handle step 3's prompt
+ * hands the agent. Naming it is also what gives the repeat action below a
+ * referent: "another" beside a named connection is plainly a second one.
+ *
+ * A tool agents may not call is not a finished step, whatever the badge says,
+ * so that case says so rather than claiming reach it doesn't have.
+ */
+export function startAddedLead(option: StartOption, progress: StartProgress): string {
+  const named = progress.toolName ? `“${progress.toolName}”` : 'It';
+  if (!progress.wired) {
+    return `${named} is connected, but agents may not call it yet — turn on`
+      + ' agent access from the Tools tab.';
+  }
+  return `Agents reach ${startSubject(option)} as ${named} through AgentMFA.`;
+}
+
+/**
+ * The label for step 1's action once a tool exists. Says what a second one
+ * would be — a Notion *workspace*, an SSH *server* — because a bare "Connect
+ * another" sits a few lines under the picker that swaps the whole service,
+ * and reads as though it opens that instead.
+ */
+export function startAddAnotherLabel(option: StartOption, verb: string): string {
+  return `${verb} another ${option.unit}`;
 }
 
 /**
@@ -143,15 +192,25 @@ export const CONNECT_MODE_LABELS: Record<ConnectModeId, string> = {
   cli: 'HTTP/API client',
 };
 
-/** How the hero sentence names each mode: “Connect Postgres to <this>.” */
+/** How the hero sentence names each mode: “Connect to Postgres from <this>.” */
 export const CONNECT_MODE_SENTENCE_LABELS: Record<ConnectModeId, string> = {
-  direct: 'your agent directly',
+  direct: 'any database client',
   'claude-code': 'Claude Code',
   'claude-desktop': 'Claude Desktop',
   codex: 'Codex',
   mcp: 'another MCP client',
-  cli: 'anything else',
+  cli: 'any HTTP client',
 };
+
+/** Direct endpoints are protocol-specific, so their hero label is too. */
+export function connectModeSentenceLabel(
+  mode: ConnectModeId,
+  option: StartOption,
+): string {
+  return mode === 'direct' && option.connType === 'ssh'
+    ? 'any SSH client'
+    : CONNECT_MODE_SENTENCE_LABELS[mode];
+}
 
 // Every way an agent can ride the shared key, in display order.
 const SHARED_KEY_MODES: ConnectModeId[] =

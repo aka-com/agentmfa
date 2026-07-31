@@ -349,6 +349,29 @@ test('direct connection guides tell the user to hand the address to their agent'
   assert.doesNotMatch(startView, /Connect directly to this (?:database|remote server) via AgentMFA\./);
 });
 
+test('a finished step 1 keeps its action but gives up the primary button', async () => {
+  const startView = await readFile(
+    new URL('../src/features/getting-started-view.tsx', import.meta.url),
+    'utf8',
+  );
+  const addBody = startView.match(/const addBody = <>([\s\S]*?)<\/>;/)?.[1];
+
+  assert.ok(addBody, 'step 1 body is present');
+  // Only the step the user still has to do gets the filled button, so the
+  // page reads as one next action rather than three.
+  const className = addBody.match(/<button className=\{([\s\S]*?)\}\s/)?.[1];
+  assert.ok(className, 'the action computes its class');
+  assert.match(className, /step1Done/);
+  assert.match(className, /primary/);
+  assert.doesNotMatch(addBody, /className="btn primary sm"/);
+  // The lead switches with the step, so a finished one stops reading as an
+  // instruction to do what it already did.
+  assert.match(addBody, /startAddedLead\(option, progress\)/);
+  // And the label names what a second one would be, not a bare "another".
+  assert.match(addBody, /startAddAnotherLabel\(option, addVerb\)/);
+  assert.doesNotMatch(addBody, /\$\{addVerb\} another/);
+});
+
 test('the first-use task does not restate automatic agent access', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
 

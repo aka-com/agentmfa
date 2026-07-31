@@ -77,6 +77,9 @@ export function readSamplesDismissed(): boolean {
   try { return localStorage.getItem(DISMISS_KEY) === '1'; } catch { return false; }
 }
 
-export function persistSamplesDismissed(): void {
-  try { localStorage.setItem(DISMISS_KEY, '1'); } catch { /* see above */ }
+export function persistSamplesDismissed(dismissed = true): void {
+  try {
+    if (dismissed) localStorage.setItem(DISMISS_KEY, '1');
+    else localStorage.removeItem(DISMISS_KEY);
+  } catch { /* see above */ }
 }

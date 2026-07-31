@@ -699,12 +699,13 @@
        line of type, and a wrapped sentence must not stack them edge to edge. */
     line-height: 1.75; text-wrap: balance;
   }
+  .start-sentence-from{ margin: 0 1px; }
   .start-blank-wrap{ position: relative; display: inline-block; margin: 0 3px; }
   .start-blank{
     font: inherit; line-height: normal; letter-spacing: inherit; color: var(--accent-ink);
     background: var(--accent-wash); border: none; border-radius: 9px;
-    padding: 4px 11px 5px 13px; cursor: pointer;
-    display: inline-flex; align-items: center; gap: 7px; vertical-align: baseline;
+    padding: 4px 9px 5px 13px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; vertical-align: baseline;
   }
   /* The wash and chevron are the whole affordance — no underline, no border;
      hover and the open state deepen the wash instead. */
@@ -851,7 +852,7 @@
 .sec-table .ghost-copy{ transform: translateY(-3.5px); }
   .dropdown-surface .sec-table .ghost-copy{ transform: none; }
   .rowdel{ text-align: right; white-space: nowrap; }
-  .used-by-cell{ font-size: 0.875rem; }
+  .used-by-cell{ font-size: 0.8125rem; }
   .used-by-links{ display: flex; align-items: flex-start; flex-direction: column; gap: 2px; }
   .used-by-link{ max-width: 180px; padding: 0; border: 0; background: none;
     color: var(--accent-text); font: inherit; text-align: left;
@@ -1492,11 +1493,11 @@
    and the text ink — "Connect to this database", "AgentMFA MCP",
    "Details" — one register, no tracked-caps machinery labels. */
 .cd-connect-lbl {
-  display: flex; align-items: center; gap: 7px; margin-bottom: 3px;
+  display: flex; align-items: center; gap: 7px; margin-bottom: 8px;
   font-size: 0.8125rem; font-weight: 600;
 }
 .cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
-.cd-help { margin-top: 7px; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
+.cd-help { margin-top: 8px; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
 /* Traffic confirmation: a labelled switch row, so the promise ("Confirm
    each request") sits beside the control that makes it rather than in a
    tooltip. The sub-line names the unit, which differs per kind. */
@@ -1507,9 +1508,9 @@
 .cd-confirm-row .switch { flex: 0 0 auto; margin-top: 2px; }
 /* Secondary per-tool policies share the same row grammar inside Advanced. */
 .cd-statements { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
-.cd-ep-auth { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.cd-ep-auth { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .cd-confirm-window {
-  display: flex; align-items: center; gap: 7px; margin-top: 9px;
+  display: flex; align-items: center; gap: 7px; margin-top: 8px;
   padding: 7px 10px; border-radius: 8px; font-size: 0.75rem;
   color: var(--ink-2); background: var(--amber-wash); border: 1px solid var(--amber-border);
 }
@@ -1518,8 +1519,11 @@
 .cd-confirm-cooldown { background: var(--danger-wash); border-color: var(--danger-border); }
 .cd-confirm-cooldown svg { color: var(--danger-ink); }
 .cd-confirm-note { margin-top: 8px; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
-.cd-advanced { padding-top: 12px; }
-.cd-advanced-options { margin-top: 10px; }
+/* Advanced continues the settings group the confirm row starts: no hairline
+   of its own, just the group's 12px row spacing (see the rows inside it). */
+.cd-advanced { margin-top: 12px; padding-top: 0; }
+.cd-advanced::before { display: none; }
+.cd-advanced-options { margin-top: 12px; }
 .cd-advanced-options > .cd-confirm-row {
   margin-top: 0; padding-top: 0; border-top: 0;
 }
@@ -1637,6 +1641,11 @@
 .credentials-expansion .sec-table td {
   border-bottom-color: color-mix(in srgb, var(--line-soft) 65%, transparent);
 }
+/* The column-label rule is the same hairline as the credential-to-credential
+   rules; the header should organize the table without becoming a section. */
+.credentials-expansion .sec-table th {
+  border-bottom-color: color-mix(in srgb, var(--line-soft) 65%, transparent);
+}
 /* Align the credential table with the connection rows' text spine — the
    column headers included, so "Credential" sits directly under the row title
    it belongs to and directly over the names it labels. */
@@ -1657,6 +1666,11 @@
    table's last-row hairline is the divider above it, so the row itself draws
    no border of its own. */
 .cat-conns .cat-add-secret { border-top: 0; }
+/* With no rows, the empty note cannot provide the divider the last table row
+   normally supplies above the add action. */
+.credentials-expansion > .muted-note + .cat-add-secret {
+  border-top: 1px solid color-mix(in srgb, var(--line-soft) 65%, transparent);
+}
 .credentials-expansion .cat-add-secret:hover { background: var(--hover); }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
@@ -1848,7 +1862,7 @@
    showing — copying is the one thing everyone does with this string, so
    the affordance is explicit rather than a hover reveal. Reissue/revoke
    stay behind the row's options menu. */
-.ep-strip{ display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.ep-strip{ display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .ep-strip .ep-field{
   flex: 1; min-width: 0; display: flex; flex-direction: column;
   align-items: stretch; gap: 8px;
@@ -1883,7 +1897,7 @@
 .ep-strip .ep-field.collapsed .ep-copy{ align-self: center; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); font-size: 0.75rem; }
 .ep-expiry{
-  display: flex; align-items: center; gap: 8px; margin-top: 6px;
+  display: flex; align-items: center; gap: 8px; margin-top: 8px;
   color: var(--muted); font-size: 0.75rem;
 }
 .ep-expiry.expired{ color: var(--danger); font-weight: 600; }

@@ -4709,6 +4709,13 @@ function SettingsSheet(): ReactNode {
         data-act="toggle-autostart" role="checkbox"
         aria-label="Launch AgentMFA at login"
         aria-checked={state.launchAtLogin}></button></div>;
+  const sampleToolsRow = <div className="set-row"><div className="set-txt">
+      <div className="st-title">Show sample tools</div>
+      <div className="st-sub">Display the Hacker News and Stack Overflow starter card on the Tools page.</div></div>
+      <button className={`switch ${state.samplesDismissed ? '' : 'on'}`}
+        data-act="toggle-sample-tools" role="checkbox"
+        aria-label="Show sample tools"
+        aria-checked={!state.samplesDismissed}></button></div>;
   // The settings read is the sheet's only source of broker truth, and this
   // sheet is the only place that truth is consumed — a failed read has no
   // other surface. Never present defaults or stale values as the broker's
@@ -4761,7 +4768,7 @@ function SettingsSheet(): ReactNode {
       <h3 id="settings-title">Settings</h3>
       {notificationRow}{notificationWarning}{notificationPreviewRow}
       {notificationSoundRow}{notificationFocusRow}{notificationEscalationRow}
-      {autostartRow}
+      {autostartRow}{sampleToolsRow}
       {brokerKeyRow}
       {settingsFailed ? settingsFailureRow : <>{hostKeyRow}{dockRow}</>}
       <div className="sheet-actions"><button className="btn primary" data-act="sheet-cancel">Done</button></div>
@@ -6138,6 +6145,12 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'dismiss-samples':
       state.samplesDismissed = true;
       persistSamplesDismissed();
+      render();
+      break;
+    case 'toggle-sample-tools':
+      state.samplesDismissed = !state.samplesDismissed;
+      persistSamplesDismissed(state.samplesDismissed);
+      toast(state.samplesDismissed ? 'Sample tools hidden' : 'Sample tools shown on Tools');
       render();
       break;
     case 'edit-conn': {

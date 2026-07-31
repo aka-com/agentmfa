@@ -77,4 +77,27 @@ test('dismissal storage degrades to not-dismissed without localStorage', () => {
   // Node test processes have no localStorage; the guards must absorb that.
   assert.equal(readSamplesDismissed(), false);
   assert.doesNotThrow(() => persistSamplesDismissed());
+  assert.doesNotThrow(() => persistSamplesDismissed(false));
+});
+
+test('dismissal storage can be cleared to show the samples again', () => {
+  let stored: string | null = null;
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: () => stored,
+      setItem: (_key: string, value: string) => { stored = value; },
+      removeItem: () => { stored = null; },
+    },
+  });
+  try {
+    persistSamplesDismissed();
+    assert.equal(readSamplesDismissed(), true);
+    persistSamplesDismissed(false);
+    assert.equal(readSamplesDismissed(), false);
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original);
+    else delete (globalThis as { localStorage?: Storage }).localStorage;
+  }
 });

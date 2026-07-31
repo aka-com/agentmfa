@@ -1,5 +1,5 @@
 // The Get started walkthrough. The hero is an editable sentence — “Connect
-// <tool> to <client>” — whose two blanks are the only choices the page asks
+// to <tool> from <client>” — whose two blanks are the only choices the page asks
 // for. Below it, the same three steps as always (add the tool, connect the
 // agent, ask for something useful), all open all the time: status colors
 // the badge — checked, current, upcoming — but never hides a step's
@@ -13,17 +13,19 @@ import { EndpointStrip } from './endpoint-view';
 import {
   CLI_INSTALL_COMMAND,
   CONNECT_MODE_LABELS,
-  CONNECT_MODE_SENTENCE_LABELS,
   START_OPTIONS,
   clientMatchesLabel,
   connectClientById,
+  connectModeSentenceLabel,
   connectModesFor,
   directEndpointAddress,
   directStartTask,
   redactedStartTask,
   resolveConnectMode,
   sshInvocationCommand,
+  startAddAnotherLabel,
   startAddLead,
+  startAddedLead,
   startOptionById,
   startProgress,
   startTask,
@@ -157,10 +159,10 @@ function StartSentence({ option, connectMode }: {
   return (
     <div className="start-hero">
       <h3 className="start-sentence">
-        {'Connect '}
+        {'Connect to '}
         <SentenceBlank kind="tool" label={option.label} menu={<ToolMenu option={option} />} />
-        {' to '}
-        <SentenceBlank kind="client" label={CONNECT_MODE_SENTENCE_LABELS[connectMode]}
+        <span className="start-sentence-from">{' from '}</span>
+        <SentenceBlank kind="client" label={connectModeSentenceLabel(connectMode, option)}
           menu={<ClientMenu option={option} connectMode={connectMode} />} />
       </h3>
     </div>
@@ -302,11 +304,17 @@ function StartWalkthrough(): ReactNode {
     : startTask(option, progress);
   const shownTask = redactedStartTask(task);
 
+  // A finished step keeps its action — a second workspace, a second database
+  // — but loses the filled button: the eye should land on step 2, which is
+  // what the user still has to do, not on a repeat of what they just did.
   const addBody = <>
-    <p>{startAddLead(option)}</p>
+    <p>{step1Done ? startAddedLead(option, progress) : startAddLead(option)}</p>
     <div className="start-actions">
-      <button className="btn primary sm" data-act={addAction} data-id={option.catalogId}>
-        {step1Done ? `${addVerb} another` : `${addVerb} ${option.label}`}
+      <button className={`btn ${step1Done ? '' : 'primary '}sm`}
+        data-act={addAction} data-id={option.catalogId}>
+        {step1Done
+          ? startAddAnotherLabel(option, addVerb)
+          : `${addVerb} ${option.label}`}
       </button>
     </div>
   </>;
