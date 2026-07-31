@@ -72,9 +72,10 @@ pub struct IssuedEndpointInfo {
     /// (`DATABASE_URL="…"`) rather than a shell command, so the embedded
     /// secret is not steered toward argv/shell history.
     pub example: String,
-    /// Absolute endpoint deadline. Renewal extends this without changing the
-    /// address or secret.
-    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Absolute endpoint deadline; `None` when the connection is not opted
+    /// into expiry. Renewal extends it without changing the address or
+    /// secret.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A begun remotely-relayed OAuth flow: what the shell needs to open the
@@ -1995,7 +1996,85 @@ impl Broker {
             )
             .connection(connection.name)
             .field("endpoint_id", renewed.id.to_string())
-            .field("expires_at", renewed.expires_at.to_rfc3339()),
+            .field(
+                "expires_at",
+                renewed
+                    .expires_at
+                    .map(|at| at.to_rfc3339())
+                    .unwrap_or_default(),
+            ),
+        );
+        self.events.wirings_changed();
+        Ok(info)
+    }
+
+    /// Opt a connection's endpoint into (or out of) expiry. Turning expiry on
+    /// starts a fresh lifetime window; turning it off removes the deadline.
+    /// An endpoint that already lapsed has no live listener (expired
+    /// endpoints are not rebound at startup), so like renewal this reclaims
+    /// the stable socket/port before the credential becomes valid again.
+    pub async fn ui_set_endpoint_expiry(
+        self: &Arc<Self>,
+        connection_id: &Uuid,
+        expire: bool,
+    ) -> Result<IssuedEndpointInfo> {
+        let connection = self.store.connection_by_id(connection_id)?;
+        if !self.access.allows(connection_id) {
+            return Err(CoreError::EndpointRequiresWiring);
+        }
+        let endpoint = self
+            .endpoints
+            .get_for_connection(connection_id)
+            .ok_or(CoreError::EndpointNotFound)?;
+        let listener_live = self
+            .endpoint_listeners
+            .lock()
+            .unwrap()
+            .contains_key(&endpoint.id);
+        if !listener_live {
+            self.bind_endpoint_listener(&endpoint, &connection).await?;
+        }
+
+        let updated = {
+            let _gate = self.config_gate.lock().unwrap();
+            if !self.access.allows(connection_id) {
+                return Err(CoreError::EndpointRequiresWiring);
+            }
+            let current = self.endpoints.get_for_connection(connection_id);
+            if current
+                .as_ref()
+                .is_none_or(|current| current.id != endpoint.id)
+            {
+                if !listener_live {
+                    if let Some(handle) =
+                        self.endpoint_listeners.lock().unwrap().remove(&endpoint.id)
+                    {
+                        handle.stop();
+                    }
+                }
+                return Err(CoreError::EndpointNotFound);
+            }
+            self.endpoints.set_expiry(&endpoint.id, expire)?
+        };
+        let info = self.endpoint_info(&connection, &updated).await?;
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::Wired,
+                format!(
+                    "Connection expiry {}: {}",
+                    if expire { "enabled" } else { "disabled" },
+                    connection.name
+                ),
+            )
+            .connection(connection.name)
+            .field("endpoint_id", updated.id.to_string())
+            .field(
+                "expires_at",
+                updated
+                    .expires_at
+                    .map(|at| at.to_rfc3339())
+                    .unwrap_or_default(),
+            ),
         );
         self.events.wirings_changed();
         Ok(info)

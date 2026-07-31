@@ -146,8 +146,11 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                 kind: e.kind.as_str().to_string(),
                 dsn,
                 require_auth: e.require_auth,
-                expires_at: e.expires_at.to_rfc3339(),
-                expires_in_secs: Some(secs_until(e.expires_at)),
+                expires_at: e
+                    .expires_at
+                    .map(|at| at.to_rfc3339())
+                    .unwrap_or_default(),
+                expires_in_secs: e.expires_at.map(secs_until),
             }
         }),
     };
@@ -455,8 +458,13 @@ fn issued_endpoint_dto(info: IssuedEndpointInfo) -> IssuedEndpointDto {
         tcp_dsn: info.tcp_dsn,
         secret: info.secret,
         example: info.example,
-        expires_at: info.expires_at.to_rfc3339(),
-        expires_in_secs: Some(secs_until(info.expires_at)),
+        // On the wire "no deadline" is the empty string, which every
+        // consumer already parses as expiry-unknown → never expires.
+        expires_at: info
+            .expires_at
+            .map(|at| at.to_rfc3339())
+            .unwrap_or_default(),
+        expires_in_secs: info.expires_at.map(secs_until),
     }
 }
 
@@ -1200,6 +1208,12 @@ pub struct EndpointRequireAuthBody {
     pub require_auth: bool,
 }
 
+/// `POST /v1/manage/connections/{id}/endpoint/expiry`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct EndpointExpiryBody {
+    pub expire: bool,
+}
+
 /// `POST /v1/manage/connections/{id}/audit-statements`. `audit_statements:
 /// null` restores the broker-wide default.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -1389,6 +1403,14 @@ pub trait ManagementBackend: Send + Sync {
     /// Extend an existing endpoint without changing the address or secret.
     /// `POST /v1/manage/connections/{id}/endpoint/renew`.
     async fn renew_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto>;
+    /// Opt the connection's endpoint into (or out of) expiry: on starts a
+    /// fresh lifetime window, off removes the deadline.
+    /// `POST /v1/manage/connections/{id}/endpoint/expiry`.
+    async fn set_endpoint_expiry(
+        &self,
+        connection_id: Uuid,
+        expire: bool,
+    ) -> ManageResult<IssuedEndpointDto>;
     /// Read the connection's already-issued direct endpoint without minting or
     /// rotating; `None` when none is issued. Ungated display read — it takes no
     /// native gate and writes no audit entry. `GET
@@ -1833,6 +1855,18 @@ impl ManagementBackend for LocalBackend {
         Ok(self
             .broker
             .ui_renew_endpoint(&connection_id)
+            .await
+            .map(issued_endpoint_dto)?)
+    }
+
+    async fn set_endpoint_expiry(
+        &self,
+        connection_id: Uuid,
+        expire: bool,
+    ) -> ManageResult<IssuedEndpointDto> {
+        Ok(self
+            .broker
+            .ui_set_endpoint_expiry(&connection_id, expire)
             .await
             .map(issued_endpoint_dto)?)
     }

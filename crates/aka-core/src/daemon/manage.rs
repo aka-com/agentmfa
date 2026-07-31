@@ -30,7 +30,8 @@ use super::{bearer_token, err_missing_token, request_peer, ApiJson, AppState};
 use crate::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, AuditStatementsBody, ConfirmBody,
     ConnectionAddBody, ConnectionConfigPatchBody, ConnectionRenameBody, ConnectionUpdateBody,
-    ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody, EndpointRequireAuthBody,
+    ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody, EndpointExpiryBody,
+    EndpointRequireAuthBody,
     ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody,
     OAuthStartBody, ResponseCredentialsBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
@@ -190,6 +191,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/connections/{id}/endpoint/copy", post(copy_endpoint))
         .route("/connections/{id}/endpoint/renew", post(renew_endpoint))
+        .route("/connections/{id}/endpoint/expiry", post(set_endpoint_expiry))
         .route(
             "/connections/{id}/endpoint/require-auth",
             post(set_endpoint_require_auth),
@@ -942,6 +944,15 @@ async fn renew_endpoint(
     Path(id): Path<Uuid>,
 ) -> Response {
     respond(state.manage.renew_endpoint(id).await)
+}
+
+async fn set_endpoint_expiry(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<EndpointExpiryBody>,
+) -> Response {
+    respond(state.manage.set_endpoint_expiry(id, body.expire).await)
 }
 
 async fn get_endpoint(

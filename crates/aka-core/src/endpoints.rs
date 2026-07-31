@@ -39,13 +39,11 @@ use crate::integrity::StateIntegrity;
 use crate::types::{ConnectionKind, DirectEndpoint};
 use crate::{CoreError, Result};
 
-/// Direct endpoints are deliberately longer-lived than tickets so they remain
-/// practical in ordinary client configuration, but they are not perpetual
-/// bearer credentials.
+/// The deadline window an endpoint gets when its connection is opted into
+/// expiry (off by default — an endpoint without a deadline never expires).
+/// Deliberately longer-lived than tickets so an expiring endpoint remains
+/// practical in ordinary client configuration.
 pub const ENDPOINT_LIFETIME: Duration = Duration::days(30);
-/// Existing installations get one bounded renewal window rather than having
-/// every previously perpetual endpoint fail immediately after an upgrade.
-pub const LEGACY_ENDPOINT_GRACE: Duration = Duration::days(7);
 
 /// A minted endpoint plus its plaintext secret.
 ///
@@ -85,30 +83,13 @@ impl EndpointRegistry {
     /// Per-agent-era duplicates for one connection collapse to the newest
     /// record (their other secrets stop resolving).
     pub fn open(path: PathBuf, max_total: usize, integrity: Arc<StateIntegrity>) -> Result<Self> {
-        let (mut endpoints, migrated_legacy_expiry): (Vec<DirectEndpoint>, bool) =
-            match integrity.read_verified(&path)? {
-                Some(bytes) => {
-                    let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
-                    let deadline = (Utc::now() + LEGACY_ENDPOINT_GRACE).to_rfc3339();
-                    let mut migrated = false;
-                    if let Some(records) = value.as_array_mut() {
-                        for record in records {
-                            let Some(record) = record.as_object_mut() else {
-                                continue;
-                            };
-                            if !record.contains_key("expires_at") {
-                                record.insert(
-                                    "expires_at".to_string(),
-                                    serde_json::Value::String(deadline.clone()),
-                                );
-                                migrated = true;
-                            }
-                        }
-                    }
-                    (serde_json::from_value(value)?, migrated)
-                }
-                None => (Vec::new(), false),
-            };
+        // Records without an `expires_at` (including pre-expiry legacy ones)
+        // deserialize to `None` and simply never expire — which matches the
+        // opt-in default they were issued under.
+        let mut endpoints: Vec<DirectEndpoint> = match integrity.read_verified(&path)? {
+            Some(bytes) => serde_json::from_slice(&bytes)?,
+            None => Vec::new(),
+        };
         let before = endpoints.len();
         endpoints.sort_by_key(|e| std::cmp::Reverse(e.created_at));
         let mut seen: Vec<Uuid> = Vec::new();
@@ -120,7 +101,7 @@ impl EndpointRegistry {
                 true
             }
         });
-        if migrated_legacy_expiry || endpoints.len() != before {
+        if endpoints.len() != before {
             integrity.write(&path, &serde_json::to_vec_pretty(&endpoints)?)?;
         }
         Ok(Self {
@@ -177,7 +158,8 @@ impl EndpointRegistry {
             port: None,
             require_auth: false,
             created_at: Utc::now(),
-            expires_at: Utc::now() + ENDPOINT_LIFETIME,
+            // No deadline unless the user opts the connection into expiry.
+            expires_at: None,
         };
         next.push(endpoint.clone());
         self.persist(&next)?;
@@ -194,11 +176,28 @@ impl EndpointRegistry {
             return Err(CoreError::EndpointNotFound);
         };
         let mut next = endpoints.clone();
-        next[pos].expires_at = Utc::now() + ENDPOINT_LIFETIME;
+        next[pos].expires_at = Some(Utc::now() + ENDPOINT_LIFETIME);
         let renewed = next[pos].clone();
         self.persist(&next)?;
         *endpoints = next;
         Ok(renewed)
+    }
+
+    /// Opt an endpoint into (or out of) expiry. Turning it on starts a fresh
+    /// [`ENDPOINT_LIFETIME`] window; turning it off removes the deadline —
+    /// which is also how an already-expired endpoint is brought back, so the
+    /// caller must reclaim its listener first, exactly as for a renewal.
+    pub fn set_expiry(&self, id: &Uuid, expire: bool) -> Result<DirectEndpoint> {
+        let mut endpoints = self.endpoints.lock().unwrap();
+        let Some(pos) = endpoints.iter().position(|endpoint| &endpoint.id == id) else {
+            return Err(CoreError::EndpointNotFound);
+        };
+        let mut next = endpoints.clone();
+        next[pos].expires_at = expire.then(|| Utc::now() + ENDPOINT_LIFETIME);
+        let updated = next[pos].clone();
+        self.persist(&next)?;
+        *endpoints = next;
+        Ok(updated)
     }
 
     /// Require (or stop requiring) the `authenticate@agentmfa.dev` extension
@@ -379,8 +378,9 @@ mod tests {
             "the plaintext endpoint secret must not be persisted"
         );
         assert!(on_disk.contains(&issued.endpoint.secret_hash));
-        assert!(issued.endpoint.expires_at > Utc::now() + Duration::days(29));
-        assert!(on_disk.contains("\"expires_at\""));
+        // Expiry is opt-in: a fresh mint has no deadline and writes none.
+        assert!(issued.endpoint.expires_at.is_none());
+        assert!(!on_disk.contains("\"expires_at\""));
     }
 
     /// A record written before the secret moved to the vault still loads its
@@ -425,14 +425,14 @@ mod tests {
         let issued = r.issue(Uuid::new_v4(), ConnectionKind::Pg).unwrap();
         {
             let mut endpoints = r.endpoints.lock().unwrap();
-            endpoints[0].expires_at = Utc::now() - Duration::seconds(1);
+            endpoints[0].expires_at = Some(Utc::now() - Duration::seconds(1));
         }
         assert!(r.resolve_secret(&issued.secret).is_none());
 
         let renewed = r.renew(&issued.endpoint.id).unwrap();
         assert_eq!(renewed.id, issued.endpoint.id);
         assert_eq!(renewed.secret_hash, issued.endpoint.secret_hash);
-        assert!(renewed.expires_at > Utc::now() + Duration::days(29));
+        assert!(renewed.expires_at.unwrap() > Utc::now() + Duration::days(29));
         assert!(r.resolve_secret(&issued.secret).is_some());
     }
 
@@ -443,7 +443,7 @@ mod tests {
         let issued = r.issue(connection_id, ConnectionKind::Pg).unwrap();
         {
             let mut endpoints = r.endpoints.lock().unwrap();
-            endpoints[0].expires_at = Utc::now() - Duration::seconds(1);
+            endpoints[0].expires_at = Some(Utc::now() - Duration::seconds(1));
         }
 
         assert!(matches!(
@@ -563,9 +563,31 @@ mod tests {
         let r = EndpointRegistry::open(path, 64, integrity).unwrap();
         assert_eq!(r.list().len(), 1);
         assert_eq!(r.list()[0].id, newer);
-        assert!(r.list()[0].expires_at <= Utc::now() + LEGACY_ENDPOINT_GRACE);
-        let migrated = std::fs::read_to_string(r.path.clone()).unwrap();
-        assert!(migrated.contains("\"expires_at\""));
+        // A record without a deadline never expires — expiry is opt-in.
+        assert!(r.list()[0].expires_at.is_none());
+        assert!(!r.list()[0].is_expired());
+    }
+
+    #[test]
+    fn set_expiry_starts_and_removes_the_deadline() {
+        let (r, _dir) = registry();
+        let issued = r.issue(Uuid::new_v4(), ConnectionKind::Pg).unwrap();
+        assert!(issued.endpoint.expires_at.is_none());
+
+        let on = r.set_expiry(&issued.endpoint.id, true).unwrap();
+        assert!(on.expires_at.unwrap() > Utc::now() + Duration::days(29));
+
+        // Turning expiry off also revives a lapsed credential…
+        {
+            let mut endpoints = r.endpoints.lock().unwrap();
+            endpoints[0].expires_at = Some(Utc::now() - Duration::seconds(1));
+        }
+        assert!(r.resolve_secret(&issued.secret).is_none());
+        let off = r.set_expiry(&issued.endpoint.id, false).unwrap();
+        assert!(off.expires_at.is_none());
+        // …with the same id and secret.
+        assert_eq!(off.id, issued.endpoint.id);
+        assert!(r.resolve_secret(&issued.secret).is_some());
     }
 
     #[test]

@@ -85,16 +85,16 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
   const copied = state.copied === `ep:${c.id}`;
   const expired = endpointExpired(endpoint.expires_at, endpoint.expires_in_secs);
   const expiryDate = new Date(endpoint.expires_at);
+  // An endpoint without a deadline (expiry toggled off — the default)
+  // carries an empty expires_at; it gets no expiry line at all.
   const expiryKnown = !Number.isNaN(expiryDate.getTime());
   const expiryLabel = expired
     ? 'Expired'
-    : !expiryKnown
-      ? 'Expiry unavailable'
-      : `Expires ${expiryDate.toLocaleDateString(undefined, {
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-        })}`;
+    : `Expires ${expiryDate.toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      })}`;
   const expanded = Boolean(state.epExpanded[c.id]);
   const endpointAddress = directEndpointAddress(c.type, endpoint, state.sshSockets[c.id]);
   const endpointText = endpointAddress
@@ -133,14 +133,16 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
   }
   return <>
     <div className="ep-strip">{address}</div>
-    <div className={`ep-expiry ${expired ? 'expired' : ''}`}>
-      <span>{expiryLabel}</span>
-      {expiryKnown
-        ? <button className="btn ghost sm" data-act="renew-endpoint" data-conn={c.id}>
-            {expired ? 'Renew address' : 'Renew'}
-          </button>
-        : null}
-    </div>
+    {expiryKnown || expired
+      ? <div className={`ep-expiry ${expired ? 'expired' : ''}`}>
+          <span>{expiryLabel}</span>
+          {expiryKnown
+            ? <button className="btn ghost sm" data-act="renew-endpoint" data-conn={c.id}>
+                {expired ? 'Renew address' : 'Renew'}
+              </button>
+            : null}
+        </div>
+      : null}
   </>;
 }
 
@@ -179,6 +181,34 @@ export function EndpointAuthRow({ connection: c }: {
       title={on ? 'The socket requires the endpoint secret' : 'The socket requires no secret'}
       aria-label={`${on ? 'Stop requiring' : 'Require'} the endpoint secret for ${c.name}`}
       data-act={on ? 'endpoint-auth-off' : 'endpoint-auth-on'} data-conn={c.id}></button>
+  </div>;
+}
+
+/**
+ * Opt this connection's issued address into (or out of) a 30-day expiry.
+ * Off by default: the address works until revoked. Turning it on starts a
+ * fresh window; the pane's expiry line (and Renew) only render while this
+ * is on.
+ */
+export function EndpointExpiryRow({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
+  const endpoint = c.agent_access.endpoint;
+  if (!endpoint || !ENDPOINTABLE[c.type]) return null;
+  const on = Boolean(endpoint.expires_at);
+  return <div className="cd-confirm-row cd-ep-expiry">
+    <div className="cd-confirm-txt">
+      <div className="cd-confirm-lbl">Connection expiry</div>
+      <div className="cd-confirm-sub">
+        {on
+          ? 'The connection address stops working on its deadline unless renewed.'
+          : 'The connection address keeps working until you revoke it.'}
+      </div>
+    </div>
+    <button className={`switch ${on ? 'on' : ''}`} role="switch" aria-checked={on}
+      title={on ? 'The address expires on its deadline' : 'The address does not expire'}
+      aria-label={`${on ? 'Disable' : 'Enable'} connection expiry for ${c.name}`}
+      data-act={on ? 'endpoint-expiry-off' : 'endpoint-expiry-on'} data-conn={c.id}></button>
   </div>;
 }
 

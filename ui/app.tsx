@@ -103,6 +103,7 @@ import {
   ConnectionToggle,
   ENDPOINTABLE,
   EndpointAuthRow,
+  EndpointExpiryRow,
   EndpointStrip,
 } from '/src/features/endpoint-view';
 import { ConnectedToolsList } from '/src/features/connected-tools-list';
@@ -1728,6 +1729,7 @@ function ConnectionAdvancedSection({ connection: c }: {
           <ConnectionToolScope connection={c} />
           <ResponseCredentialRelay connection={c} />
           <StatementRecording connection={c} />
+          <EndpointExpiryRow connection={c} />
           <EndpointAuthRow connection={c} />
         </div>
       : null}
@@ -7005,6 +7007,22 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         connectionId: btn.dataset.conn || '', requireAuth: false,
       }))) {
         toast('🔓 The agent socket no longer requires the endpoint secret');
+      }
+      await refresh('connections');
+      break;
+    case 'endpoint-expiry-on':
+      if (await run(() => invoke('set_endpoint_expiry', {
+        connectionId: btn.dataset.conn || '', expire: true,
+      }))) {
+        toast('⏳ The connection address now expires');
+      }
+      await refresh('connections');
+      break;
+    case 'endpoint-expiry-off':
+      if (await run(() => invoke('set_endpoint_expiry', {
+        connectionId: btn.dataset.conn || '', expire: false,
+      }))) {
+        toast('♾️ The connection address no longer expires');
       }
       await refresh('connections');
       break;

@@ -1526,9 +1526,9 @@
 .cd-confirm-sub { margin-top: 5px; color: var(--muted); font-size: 0.75rem; line-height: 1.35; }
 /* The switch centers on the label's first line (18px line vs 22px switch). */
 .cd-confirm-row .switch { flex: 0 0 auto; margin-top: -2px; }
-/* Secondary per-tool policies share the same row grammar inside Advanced. */
-.cd-statements { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
-.cd-ep-auth { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+/* Secondary per-tool policies share the same row grammar inside Advanced;
+   spacing alone separates them — no hairlines between options. */
+.cd-statements, .cd-ep-auth, .cd-ep-expiry { margin-top: 12px; }
 .cd-confirm-window {
   display: flex; align-items: center; gap: 7px; margin-top: 8px;
   padding: 7px 10px; border-radius: 8px; font-size: 0.75rem;
@@ -1547,9 +1547,7 @@
 .cd-advanced-options > .cd-confirm-row {
   margin-top: 0; padding-top: 0; border-top: 0;
 }
-.cd-advanced-options > .cd-confirm-row + .cd-confirm-row {
-  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
-}
+.cd-advanced-options > .cd-confirm-row + .cd-confirm-row { margin-top: 12px; }
 .cd-tool-scope { align-items: center; }
 .cd-tool-scope .cat-meta-tools { flex: 0 0 auto; }
 .cd-off-note { margin-top: 12px; }

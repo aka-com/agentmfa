@@ -26,7 +26,8 @@ use aka_core::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, AuditStatementsBody, BackendProfile,
     ConfirmBody, ConnectionAddBody, ConnectionConfigPatch, ConnectionConfigPatchBody,
     ConnectionRenameBody, ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody,
-    ElicitationResponseBody, EndpointRequireAuthBody, ManageResult, ManagementBackend,
+    ElicitationResponseBody, EndpointExpiryBody, EndpointRequireAuthBody, ManageResult,
+    ManagementBackend,
     McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody,
     ResponseCredentialsBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
@@ -1057,6 +1058,18 @@ impl ManagementBackend for RemoteBackend {
     async fn issue_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto> {
         self.post_empty(&format!("/v1/manage/connections/{connection_id}/endpoint"))
             .await
+    }
+
+    async fn set_endpoint_expiry(
+        &self,
+        connection_id: Uuid,
+        expire: bool,
+    ) -> ManageResult<IssuedEndpointDto> {
+        self.post(
+            &format!("/v1/manage/connections/{connection_id}/endpoint/expiry"),
+            &EndpointExpiryBody { expire },
+        )
+        .await
     }
 
     async fn renew_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto> {

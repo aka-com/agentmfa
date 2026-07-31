@@ -228,6 +228,7 @@ interface MockArgs {
   tools?: string[] | null;
   auditStatements?: boolean | null;
   requireAuth: boolean;
+  expire: boolean;
   clientSecret?: string | null;
   token?: string | null;
   source: string;
@@ -586,10 +587,13 @@ function connDto(c: MockConnection): ConnectionSummary {
               dsn: record.endpoint.dsn ?? null,
               require_auth: record.endpoint.require_auth ?? false,
               expires_at: record.endpoint.expires_at,
-              expires_in_secs: Math.max(
-                0,
-                Math.ceil((new Date(record.endpoint.expires_at).getTime() - Date.now()) / 1000),
-              ),
+              // No deadline (expiry off) carries no remaining seconds.
+              expires_in_secs: record.endpoint.expires_at
+                ? Math.max(
+                    0,
+                    Math.ceil((new Date(record.endpoint.expires_at).getTime() - Date.now()) / 1000),
+                  )
+                : null,
             }
           : null,
       };
@@ -1301,8 +1305,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       // A reissue rotates the secret without deciding anything about whether
       // the socket is authenticated, so the flag rides through it.
       const requireAuth = record.endpoint?.require_auth ?? false;
-      const expiresAt = record.endpoint?.expires_at
-        ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      // Expiry is opt-in: a fresh endpoint has no deadline ('' on the wire).
+      const expiresAt = record.endpoint?.expires_at ?? '';
       if (kind === 'ssh' && requireAuth) {
         shownSecret = secret;
         example = `mfa ssh-agent ${connection.name}`;
@@ -1325,8 +1329,23 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         secret: shownSecret,
         example,
         expires_at: expiresAt,
-        expires_in_secs: 30 * 24 * 60 * 60,
+        expires_in_secs: expiresAt
+          ? Math.max(0, Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 1000))
+          : null,
       };
+    }
+    case 'set_endpoint_expiry': {
+      const record = db.access.find((a) => a.connection_id === args.connectionId);
+      if (!record?.endpoint) throw 'this tool has no direct endpoint';
+      record.endpoint.expires_at = args.expire
+        ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+        : '';
+      const info = await mockInvoke('get_endpoint', args);
+      const connection = db.connections.find((c) => c.id === args.connectionId);
+      audit('wired', `Connection expiry ${args.expire ? 'enabled' : 'disabled'}${
+        connection ? `: ${connection.name}` : ''}`);
+      emit('aka://wirings-changed', {});
+      return info;
     }
     case 'renew_endpoint': {
       const record = db.access.find((a) => a.connection_id === args.connectionId);
@@ -1362,10 +1381,12 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         secret,
         example,
         expires_at: endpoint.expires_at,
-        expires_in_secs: Math.max(
-          0,
-          Math.ceil((new Date(endpoint.expires_at).getTime() - Date.now()) / 1000),
-        ),
+        expires_in_secs: endpoint.expires_at
+          ? Math.max(
+              0,
+              Math.ceil((new Date(endpoint.expires_at).getTime() - Date.now()) / 1000),
+            )
+          : null,
       };
     }
     case 'set_endpoint_require_auth': {

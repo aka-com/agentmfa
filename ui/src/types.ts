@@ -642,6 +642,7 @@ export interface CommandMap {
   respond_approval: CommandSpec<{ id: string; decision: ApprovalDecision }, boolean>;
   issue_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
   renew_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
+  set_endpoint_expiry: CommandSpec<{ connectionId: string; expire: boolean }, IssuedEndpoint>;
   get_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint | null>;
   copy_endpoint_text: CommandSpec<
     { connectionId: string; format: string; taskBody?: string },

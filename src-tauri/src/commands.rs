@@ -1413,6 +1413,23 @@ pub async fn issue_endpoint(
         .map_err(|e| e.to_string())
 }
 
+/// Opt a connection's endpoint into (or out of) expiry: on starts a fresh
+/// lifetime window, off removes the deadline.
+#[tauri::command]
+pub async fn set_endpoint_expiry(
+    state: State<'_, AppState>,
+    connection_id: String,
+    expire: bool,
+) -> CmdResult<IssuedEndpointDto> {
+    let connection_id = parse_id(&connection_id)?;
+    state
+        .brokers
+        .backend()
+        .set_endpoint_expiry(connection_id, expire)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Renew a direct endpoint without rotating its address or secret. The broker
 /// performs the native confirmation because this extends standing access.
 #[tauri::command]
@@ -1987,6 +2004,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_allowed_tools,
         set_audit_statements,
         set_endpoint_require_auth,
+        set_endpoint_expiry,
         list_mcp_tools,
         issue_endpoint,
         renew_endpoint,

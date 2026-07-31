@@ -684,10 +684,10 @@ pub struct ToolAccess {
 /// every agent shares. The plaintext is retained only in the vault so a
 /// pasteable address can be reconstructed after a gated, audited copy-back;
 /// `endpoints.json` carries only its hash. Revoke or reissue invalidates it
-/// instantly, and every endpoint expires on its persisted deadline unless the
-/// user explicitly renews it. The listener re-checks both that deadline and
-/// the connection's agent access on every request/connection, exactly as the
-/// control plane does.
+/// instantly, and an endpoint the user has opted into expiry stops
+/// authenticating on its persisted deadline unless explicitly renewed. The
+/// listener re-checks both that deadline and the connection's agent access
+/// on every request/connection, exactly as the control plane does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectEndpoint {
     pub id: Uuid,
@@ -736,20 +736,18 @@ pub struct DirectEndpoint {
     pub require_auth: bool,
     pub created_at: DateTime<Utc>,
     /// Absolute, restart-safe deadline for accepting this endpoint
-    /// credential. Records from before endpoint expiry was introduced receive
-    /// a one-time compatibility grace period when they are first loaded.
-    #[serde(default = "legacy_direct_endpoint_expiry")]
-    pub expires_at: DateTime<Utc>,
-}
-
-fn legacy_direct_endpoint_expiry() -> DateTime<Utc> {
-    Utc::now() + chrono::Duration::days(7)
+    /// credential. `None` — the default — means the endpoint does not
+    /// expire; the user opts a connection into expiry from its panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl DirectEndpoint {
     /// Whether this endpoint may no longer authenticate a new connection.
+    /// An endpoint without a deadline never expires.
     pub fn is_expired(&self) -> bool {
-        Utc::now() >= self.expires_at
+        self.expires_at
+            .is_some_and(|expires_at| Utc::now() >= expires_at)
     }
 }
 
