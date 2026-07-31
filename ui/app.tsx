@@ -104,6 +104,7 @@ import {
   EndpointAuthRow,
   EndpointStrip,
 } from '/src/features/endpoint-view';
+import { ConnectedToolsList } from '/src/features/connected-tools-list';
 import { StartViewPage, startBlankId } from '/src/features/getting-started-view';
 import { Sheet } from '/src/sheet';
 
@@ -140,6 +141,9 @@ let dropdownFormHeartbeat: number | null = null;
 let dragConnId: string | null = null;
 let dragConnOrder: string[] | null = null;
 let connectionReorderGeneration = 0;
+/** Kept in the virtual window across one keyboard-reorder render. */
+let keyboardReorderConnId: string | null = null;
+let keyboardReorderFocusGeneration = 0;
 /** False until boot() has loaded the first broker data; AppRoot keeps
  * showing the loading splash instead of painting an empty window. */
 let booted = false;
@@ -198,6 +202,8 @@ function clearBrokerOwnedState(): void {
   state.connDetailOpen = false;
   dragConnId = null;
   dragConnOrder = null;
+  keyboardReorderConnId = null;
+  keyboardReorderFocusGeneration += 1;
 }
 
 /** The one place sheet transitions happen, so a future cross-cutting
@@ -2106,14 +2112,16 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
           {mode !== 'dropdown' ? <SamplesCard /> : null}
           {state.connections.length
             ? <div className="cat-section">
-                <div className={`cat-rows${reorderable ? ' reorderable' : ''}${dragConnId ? ' drag-active' : ''}`}
-                  data-conn-list={reorderable ? 'on' : ''}>
-                  {matching.length
-                    ? matching.map((connection) =>
+                {matching.length
+                  ? <ConnectedToolsList items={matching} reorderable={reorderable}
+                      dragging={Boolean(dragConnId)}
+                      keepMountedId={keyboardReorderConnId}
+                      renderItem={(connection) =>
                         <FlatConnectionRow key={connection.id} connection={connection}
-                          reorderable={reorderable} />)
-                    : <div className="muted-note">No tools match your search.</div>}
-                </div>
+                          reorderable={reorderable} />} />
+                  : <div className="cat-rows">
+                      <div className="muted-note">No tools match your search.</div>
+                    </div>}
               </div>
             : null}
           {mode === 'dropdown' && state.connections.length
@@ -7120,10 +7128,21 @@ function moveConnByKeyboard(id: string, delta: number): void {
   const byId = new Map(state.connections.map((c) => [c.id, c] as const));
   state.connections = ids.map((cid) => byId.get(cid)!)
     .filter((c): c is ConnectionSummary => Boolean(c));
+  keyboardReorderConnId = id;
+  const focusGeneration = ++keyboardReorderFocusGeneration;
   render();
-  document.querySelector<HTMLElement>(
-    `[data-conn-row="${CSS.escape(id)}"] .flat-conn-row`,
-  )?.focus();
+  const restoreFocus = (): void => {
+    if (focusGeneration !== keyboardReorderFocusGeneration) return;
+    const row = document.querySelector<HTMLElement>(
+      `[data-conn-row="${CSS.escape(id)}"] .flat-conn-row`,
+    );
+    row?.focus({ preventScroll: true });
+    row?.scrollIntoView({ block: 'nearest' });
+    keyboardReorderConnId = null;
+    render();
+  };
+  if (document.hidden) setTimeout(restoreFocus, 0);
+  else requestAnimationFrame(restoreFocus);
   const generation = ++connectionReorderGeneration;
   void persistConnOrder(ids, previous, generation);
 }

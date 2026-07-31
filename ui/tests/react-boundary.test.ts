@@ -184,6 +184,23 @@ test('the activity log mounts a window of rows, not the whole log', async () => 
   assert.match(styles, /\.act-pad\{ flex: 0 0 auto; \}/);
 });
 
+test('the connected Tools list delegates rows to a windowed feature component', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const feature = await readFile(
+    new URL('../src/features/connected-tools-list.tsx', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(app, /<ConnectedToolsList items=\{matching\}/);
+  assert.doesNotMatch(app, /matching\.map\(\(connection\)/);
+  assert.match(feature, /virtualListWindow\(\{/);
+  assert.match(feature, /const start = dragging \? 0/);
+  assert.match(feature, /pinnedIndex >= 0 \? Math\.min\(view\.start, pinnedIndex\)/);
+  assert.match(feature, /items\.slice\(start, end\)\.map\(renderItem\)/);
+  assert.match(app, /keepMountedId=\{keyboardReorderConnId\}/);
+  assert.match(app, /row\?\.scrollIntoView\(\{ block: 'nearest' \}\)/);
+});
+
 test('portaled listbox tabbing closes the menu relative to its trigger', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const portalTab = app.match(

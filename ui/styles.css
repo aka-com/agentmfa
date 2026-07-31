@@ -1389,7 +1389,9 @@
 
 /* ---- flat tools list (steady state) ----------------------------------- */
 /* One row per connection; the catalog waits behind "+ Add tool". */
-.flat-conn-wrap + .flat-conn-wrap { border-top: 1px solid var(--line); }
+.flat-conn-wrap + .flat-conn-wrap,
+.tool-list-pad + .flat-conn-wrap { border-top: 1px solid var(--line); }
+.tool-list-pad { width: 100%; }
 /* The one add path: a row at the bottom of the tools list that expands
    the catalog of not-yet-connected tools in place beneath it. Quiet by
    design: default gray icon chip, a single vertically centered line. */
