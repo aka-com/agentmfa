@@ -1153,6 +1153,16 @@ function connectionKind(c: ConnectionSummary): ConnKind {
   return c.mcp_path ? 'mcp' : 'api';
 }
 
+/** The kind spoken to the user, beside the enabled state in the panel head. */
+function kindLabel(c: ConnectionSummary): string {
+  switch (connectionKind(c)) {
+    case 'db': return 'PostgreSQL';
+    case 'ssh': return 'SSH';
+    case 'mcp': return 'MCP server';
+    case 'api': return 'HTTP API';
+  }
+}
+
 // The fix affordances an issue row can carry: compact buttons stacked under
 // the issue text. A fix names the action ("Fix settings", "Reconnect…"),
 // never the remedy in prose — the message stays diagnosis-only so it reads
@@ -1166,7 +1176,7 @@ interface IssueFix {
 interface ConnectionIssue {
   text: string;
   detail?: string;
-  fix?: IssueFix;
+  fixes?: IssueFix[];
   tone?: 'info';
 }
 const fixBtn = (action: string, id: string, label: string, primary = false): IssueFix =>
@@ -1200,7 +1210,7 @@ function connectionIssues(
           : c.sslmode === 'require'
             ? 'TLS encrypts this connection, but the server identity is not verified.'
             : `TLS is relaxed to ${c.sslmode}.`,
-      fix: editFix(c),
+      fixes: [editFix(c)],
     });
   }
   if (c.type === 'ssh' && !c.host_key_fingerprint) {
@@ -1212,10 +1222,10 @@ function connectionIssues(
   if (c.last_status === 'needs_reconnect') {
     issues.push({
       text: c.last_detail || 'The credential was rejected; reconnect to refresh it.',
-      fix: c.mcp_path
-        ? fixBtn('reconnect-mcp', c.id, 'Reconnect…')
+      fixes: c.mcp_path
+        ? [fixBtn('reconnect-mcp', c.id, 'Reconnect…')]
         : c.oauth_spec
-        ? fixBtn('oauth-reconnect', c.id, 'Reconnect…')
+        ? [fixBtn('oauth-reconnect', c.id, 'Reconnect…')]
         : undefined,
     });
   }
@@ -1250,9 +1260,12 @@ function connectionIssues(
     // editor could plausibly fix — a wrong host, port, credential, or TLS
     // expectation — the card leads with Fix settings. 'other' and the
     // passively-recorded (kindless) verdict carry no targeted fix of their
-    // own; testing remains available from the panel's options menu.
+    // own. Every failure card carries Test again, so retrying never means
+    // hunting through the panel's options menu.
     const kind = fresh && !fresh.ok ? fresh.kind : undefined;
     const fixable = !c.mcp_path && kind !== undefined && kind !== 'other';
+    const retry = fixBtn(c.mcp_path ? 'mcp-status' : 'test-conn', c.id, 'Test again');
+    const fixes = fixable ? [editFix(c), retry] : [retry];
     // The TLS refusal gets a short headline with the protocol-speak
     // ("refused to start TLS", the sslmode by name) demoted to a detail
     // line. The stored broker verdict carries no kind, so the raw message
@@ -1263,9 +1276,9 @@ function connectionIssues(
           text: 'TLS handshake failed',
           detail: `The server refused TLS; this connection requires ${
             c.sslmode ? `"${c.sslmode}"` : 'it'}.`,
-          fix: fixable ? editFix(c) : undefined,
+          fixes,
         }
-      : { text: failure, fix: fixable ? editFix(c) : undefined });
+      : { text: failure, fixes });
   }
   return issues;
 }
@@ -1498,10 +1511,12 @@ function ConnectionAlerts({ connection: c }: { connection: ConnectionSummary }):
         <div className="cc-issue-body">
           <span className="cc-issue-headline">{issue.text}</span>
           {issue.detail ? <span className="cc-issue-detail">{issue.detail}</span> : null}
-          {issue.fix
+          {issue.fixes?.length
             ? <div className="cc-issue-fixes">
-                <button className={`btn sm ${issue.fix.primary ? 'primary' : ''}`}
-                  data-act={issue.fix.action} data-id={issue.fix.id}>{issue.fix.label}</button>
+                {issue.fixes.map((fix) => (
+                  <button key={fix.action} className={`btn sm ${fix.primary ? 'primary' : ''}`}
+                    data-act={fix.action} data-id={fix.id}>{fix.label}</button>
+                ))}
               </div>
             : null}
         </div>
@@ -1815,10 +1830,9 @@ function ConnectionDetail({ connection: c }: {
         {entry ? <Icon markup={ICONS[entry.icon] || ''} /> : null}
       </span>
       <div className="cd-title"><b title={c.name}>{connectionRowName(c)}</b>
-        <span>{enabled ? 'Enabled' : 'Off'}</span>
+        <span>{kindLabel(c)} · {enabled ? 'Enabled' : 'Off'}</span>
       </div>
       <div className="cd-actions">
-        <ConnectionToggle connection={c} />
         <div className="tile-menu-wrap">
           <button className={`icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}`}
             title="Tool options" aria-label={`Options for ${c.name}`}
@@ -1831,6 +1845,7 @@ function ConnectionDetail({ connection: c }: {
               </div>
             : null}
         </div>
+        <ConnectionToggle connection={c} />
       </div>
     </div>
     {!enabled ? <div className="cd-help cd-off-note">This tool is disabled.</div> : null}
@@ -1867,13 +1882,21 @@ function FlatConnectionRow({ connection: c, reorderable = false }: {
   const entry = entryForConnection(c);
   const selected = selectedConnection()?.id === c.id;
   const issues = connectionIssues(c).filter((issue) => issue.tone !== 'info');
+  // The status is a word, never a bare dot: Off / Connected, or the worst
+  // problem by name so the list answers "what's wrong" without a click.
   const health = !c.agent_access.enabled
-    ? <span className="cc-dot off" role="img" title="Off"
-        aria-label="Off — agents may not use this tool"></span>
+    ? <span className="cc-pill off" title="Agents may not use this tool">Off</span>
     : !issues.length
-    ? <span className="cc-dot ok" role="img" title="Ready" aria-label="Ready"></span>
-    : <span className="cc-dot warn" role="img" title={issues.map((issue) => issue.text).join(' ')}
-        aria-label={`${issues.length} issue${issues.length === 1 ? '' : 's'}`}></span>;
+    ? <span className="cc-pill ok" title="Ready">Connected</span>
+    : <span className={`cc-pill ${c.last_status === 'failed' ? 'err' : 'warn'}`}
+        title={issues.map((issue) => issue.text).join(' ')}
+        aria-label={`${issues.length} issue${issues.length === 1 ? '' : 's'}`}>
+        {c.last_status === 'failed'
+          ? 'Unreachable'
+          : c.last_status === 'needs_reconnect'
+          ? 'Reconnect'
+          : 'Warning'}
+      </span>;
   return <div
     className={`flat-conn-wrap ${selected ? 'sel' : ''}${reorderable ? ' reorderable' : ''}${dragConnId === c.id ? ' dragging' : ''}`}
     data-conn-row={c.id} draggable={reorderable || undefined}>
@@ -6018,6 +6041,11 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.epMenuOpen && !target?.closest('.ep-copy-wrap')) {
+    state.epMenuOpen = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.formMenuOpen && !target?.closest('.cred-select') && !target?.closest('.cred-menu')) {
     state.formMenuOpen = null;
     if (!btn) { render(); return; }
@@ -6037,6 +6065,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.catalogActionMenuOpen = null;
       state.connMenuOpen = null;
       state.connMenuPoint = null;
+      state.epMenuOpen = null;
       // The slide-over is a transient view; coming back to Tools starts
       // at the list, not with the panel already over it.
       state.connDetailOpen = false;
@@ -6215,8 +6244,15 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       if (id) { state.epExpanded[id] = true; render(); }
       break;
     }
+    case 'toggle-ep-menu': {
+      const id = btn.dataset.conn ?? null;
+      state.epMenuOpen = state.epMenuOpen === id ? null : id;
+      render();
+      break;
+    }
     case 'copy-endpoint-dsn': {
       const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
+      state.epMenuOpen = null;
       if (conn && await run(() => invoke('copy_endpoint_text', {
         connectionId: conn.id,
         format: 'direct',
@@ -6229,6 +6265,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'copy-endpoint-format': {
       const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
       const format = btn.dataset.format ?? '';
+      state.epMenuOpen = null;
       if (conn && format && await run(() => invoke('copy_endpoint_text', {
         connectionId: conn.id,
         format,
@@ -7503,6 +7540,7 @@ function handleAppKeyDown(e: KeyboardEvent): void {
       render();
       return;
     }
+    if (state.epMenuOpen) { state.epMenuOpen = null; render(); return; }
     // The detail slide-over only exists in the narrow layout; in the wide
     // layout the flag is inert and Escape passes through.
     if (state.connDetailOpen && window.matchMedia(NARROW_LAYOUT).matches) {

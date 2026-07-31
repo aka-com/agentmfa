@@ -205,6 +205,7 @@ export interface AppState {
   loadStatus: Record<LoadKey, LoadStatus>;
   reveal: Record<string, string>;
   epExpanded: Record<string, boolean>;
+  epMenuOpen: string | null;
   sshSockets: Record<string, string>;
   sheet: SheetState | null;
   draft: ConnectionDraft;
@@ -317,6 +318,7 @@ function createInitialState(): AppState {
     loadStatus: defaultLoadStatus(),
     reveal: {},
     epExpanded: {},
+    epMenuOpen: null,
     sshSockets: {},
     sheet: null,
     draft: {},

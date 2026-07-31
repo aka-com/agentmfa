@@ -24,34 +24,50 @@ function BreakableAddress({ address }: { address: string }): ReactNode {
   ))}</>;
 }
 
-function EndpointFormatRow({ connection, address }: {
-  connection: ConnectionSummary;
-  address: string;
-}): ReactNode {
-  const formats = ENDPOINT_FORMATS[connection.type].filter(
+/** The formats a connection's endpoint can be copied as, beyond the raw
+ * address. Empty when nothing but the address applies. */
+function copyFormats(connection: ConnectionSummary, address: string) {
+  return ENDPOINT_FORMATS[connection.type].filter(
     (format) =>
       format.needsSecret || format.needsAltAddress || format.build(connection, address) != null,
   );
-  if (!formats.length) return null;
-  return (
-    <div className="ep-formats" role="group" aria-label="Copy the connection for other applications">
-      <span className="ep-formats-lbl">Copy for</span>
-      {formats.map((format) => {
-        const copied = state.copied === `epf:${connection.id}:${format.key}`;
-        return <button key={format.key}
-          className={`btn sm ep-fmt ${copied ? 'is-copied' : ''}`} title={format.title}
-          aria-label={`${copied ? 'Copied. ' : ''}${format.title} for ${connection.name}`}
-          data-act="copy-endpoint-format" data-conn={connection.id} data-format={format.key}>
-          <span className="ep-fmt-label">{format.label}</span>
-          {copied
-            ? <span className="ep-fmt-check" aria-hidden="true">
-                <AppIcon icon={ICONS.check} />
-              </span>
-            : null}
-        </button>;
-      })}
-    </div>
-  );
+}
+
+/** One Copy ▾ control: the plain address first, then every format the kind
+ * supports. Replaces the wrapping chip row — one button, a menu of targets. */
+function EndpointCopyMenu({ connection: c, address, copyTitle }: {
+  connection: ConnectionSummary;
+  address: string;
+  copyTitle: string;
+}): ReactNode {
+  const formats = copyFormats(c, address);
+  const open = state.epMenuOpen === c.id;
+  const copied = state.copied === `ep:${c.id}`
+    || formats.some((format) => state.copied === `epf:${c.id}:${format.key}`);
+  return <div className="ep-copy-wrap">
+    <button className="btn sm ep-copy" title={copyTitle}
+      aria-label={`${copyTitle} for ${c.name}`} aria-haspopup="menu" aria-expanded={open}
+      data-act="toggle-ep-menu" data-conn={c.id}>
+      {copied
+        ? <><AppIcon icon={ICONS.check} /> Copied</>
+        : <><AppIcon icon={ICONS.copy} /> Copy <AppIcon icon={ICONS.chevronDown} /></>}
+    </button>
+    {open
+      ? <div className="tile-menu ep-copy-menu" role="menu"
+          aria-label={`Copy formats for ${c.name}`}>
+          <button className="menu-item" role="menuitem"
+            data-act="copy-endpoint-dsn" data-conn={c.id}>
+            {c.type === 'ssh' ? 'SSH command' : 'Connection address'}
+          </button>
+          {formats.map((format) => (
+            <button key={format.key} className="menu-item" role="menuitem" title={format.title}
+              data-act="copy-endpoint-format" data-conn={c.id} data-format={format.key}>
+              {format.label}
+            </button>
+          ))}
+        </div>
+      : null}
+  </div>;
 }
 
 export function EndpointStrip({ connection: c, withFormats = false }: {
@@ -88,12 +104,14 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
     : null;
   const copyTitle = c.type === 'ssh' ? 'Copy the SSH command' : 'Copy the connection command';
   const copyButton = endpointText && !expired
-    ? <button className="btn sm ep-copy" title={copyTitle}
-        aria-label={`${copyTitle} for ${c.name}`} data-act="copy-endpoint-dsn" data-conn={c.id}>
-        {copied
-          ? <><AppIcon icon={ICONS.check} /> Copied</>
-          : <><AppIcon icon={ICONS.copy} /> Copy</>}
-      </button>
+    ? withFormats && endpointAddress
+      ? <EndpointCopyMenu connection={c} address={endpointAddress} copyTitle={copyTitle} />
+      : <button className="btn sm ep-copy" title={copyTitle}
+          aria-label={`${copyTitle} for ${c.name}`} data-act="copy-endpoint-dsn" data-conn={c.id}>
+          {copied
+            ? <><AppIcon icon={ICONS.check} /> Copied</>
+            : <><AppIcon icon={ICONS.copy} /> Copy</>}
+        </button>
     : null;
   let address: ReactNode;
   if (!endpointText) {
@@ -123,9 +141,6 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
           </button>
         : null}
     </div>
-    {withFormats && !expired && endpointText && endpointAddress
-      ? <EndpointFormatRow connection={c} address={endpointAddress} />
-      : null}
   </>;
 }
 

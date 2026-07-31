@@ -1354,6 +1354,20 @@
 .cc-dot.ok { background: var(--ok-solid); }
 .cc-dot.warn { background: var(--warning-dot); }
 .cc-dot.off { background: var(--muted-2); opacity: .55; }
+/* The row's status speaks a word — Off / Connected, or the worst problem by
+   name — in the pill grammar the rest of the app uses for verdicts. */
+.cc-pill {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
+  padding: 2px 9px; border-radius: 999px;
+  font-size: 0.6875rem; font-weight: 600; white-space: nowrap;
+}
+.cc-pill::before {
+  content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor;
+}
+.cc-pill.ok { color: var(--ok-ink); background: var(--ok-wash); }
+.cc-pill.warn { color: var(--amber-ink); background: var(--amber-wash); }
+.cc-pill.err { color: var(--danger-ink); background: var(--danger-wash); }
+.cc-pill.off { color: var(--muted); background: var(--wash); }
 /* Databases used to borrow the interactive accent; they now carry their own
    blue so the accent keeps meaning "you can click this". Streams used to fall
    through to the default gray chip, which read as switched-off next to a live
@@ -1940,12 +1954,14 @@
 /* Collapsed by default in the detail pane: a masked one-liner with Copy
    beside it. Clicking the line expands to the full wrapping DSN. */
 .ep-strip .ep-field.collapsed{ flex-direction: row; align-items: center; }
+/* The masked line wraps rather than truncates — the address is the
+   section's payload, so every character stays visible even collapsed. */
 .ep-strip .ep-field .ep-addr-masked{
-  flex: 1; min-width: 0; overflow: hidden; padding: 0; border: none;
+  flex: 1; min-width: 0; padding: 0; border: none;
   background: none; cursor: pointer; text-align: left;
   color: var(--ink-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.75rem; line-height: 1.35;
-  white-space: nowrap; text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 .ep-strip .ep-field .ep-addr-masked:hover{ color: var(--ink); }
 .ep-strip .ep-field.collapsed .ep-copy{ align-self: center; }
@@ -1956,20 +1972,13 @@
 }
 .ep-expiry.expired{ color: var(--danger); font-weight: 600; }
 .ep-expiry .btn{ min-height: 24px; padding: 2px 7px; }
-/* Per-application copy row under the detail pane's endpoint field: each
-   button copies the same endpoint rendered for one common client (psql,
-   libpq keywords, .env, ssh config, …). */
-.ep-formats{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
-.ep-formats .ep-formats-lbl{ color: var(--muted); font-size: 0.75rem; margin-right: 2px; }
-.ep-formats .ep-fmt{
-  position: relative; display: inline-flex; align-items: center; justify-content: center;
-  white-space: nowrap;
-}
-.ep-formats .ep-fmt.is-copied .ep-fmt-label{ visibility: hidden; }
-.ep-formats .ep-fmt-check{
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-}
-.ep-formats .ep-fmt svg{ width: 14px; height: 14px; }
+/* One Copy ▾ control replaces the per-application chip row: the button
+   copies nothing by itself, its menu lists the plain address and every
+   client rendering (psql, libpq keywords, .env, ssh config, …). */
+.ep-copy-wrap{ position: relative; flex: 0 0 auto; }
+.ep-copy-wrap .ep-copy{ white-space: nowrap; }
+.ep-copy-wrap .ep-copy svg{ width: 12px; height: 12px; }
+.ep-copy-menu{ min-width: 180px; }
 
 /* --------------------------- Add-a-tool palette --------------------------- */
 /* Adding is a search: one header button (or the dropdown's trailing row)
