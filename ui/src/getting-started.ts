@@ -139,8 +139,8 @@ export const CONNECT_MODE_LABELS: Record<ConnectModeId, string> = {
   'claude-code': 'Claude Code',
   'claude-desktop': 'Claude Desktop',
   codex: 'Codex',
-  mcp: 'Other MCP client',
-  cli: 'HTTP API',
+  mcp: 'Other MCP',
+  cli: 'HTTP/API client',
 };
 
 /** How the hero sentence names each mode: “Connect Postgres to <this>.” */
@@ -338,8 +338,8 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   },
   {
     id: 'mcp',
-    name: 'Other MCP client',
-    sub: 'Any client that speaks MCP over HTTP',
+    name: 'Other MCP',
+    sub: 'Any client',
     mark: '⌁',
     icon: 'plug',
     lead: () =>
@@ -361,8 +361,8 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   },
   {
     id: 'cli',
-    name: 'HTTP API',
-    sub: 'curl, scripts, your own agent loop',
+    name: 'HTTP/API client',
+    sub: 'Any client',
     mark: '>_',
     icon: 'terminal',
     lead: () => 'Paste this into any agent:',
@@ -374,7 +374,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
         title: 'Point your harness at the broker',
         detail: `The socket and key live in ${env.socket.replace(/\/broker\.sock$/, '')}. Everything is plain HTTP with a bearer header.`,
         snippet: SNIPPETS.cli(env),
-        followup: 'Speaking MCP over HTTP instead? See “Other MCP client” above.',
+        followup: 'Speaking MCP over HTTP instead? See “Other MCP” above.',
       },
     ],
   },

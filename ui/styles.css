@@ -701,7 +701,7 @@
   }
   .start-blank-wrap{ position: relative; display: inline-block; margin: 0 3px; }
   .start-blank{
-    font: inherit; letter-spacing: inherit; color: var(--accent-ink);
+    font: inherit; line-height: normal; letter-spacing: inherit; color: var(--accent-ink);
     background: var(--accent-wash); border: none; border-radius: 9px;
     padding: 4px 11px 5px 13px; cursor: pointer;
     display: inline-flex; align-items: center; gap: 7px; vertical-align: baseline;
@@ -762,14 +762,14 @@
     background: var(--chip-bg); color: var(--ink-2); font-size: 0.78125rem; font-weight: 700;
   }
   /* Every step stays open; the badge is what carries state — filled for the
-     current step, checked when finished, dashed while still ahead. */
+     current step, checked when finished, outlined while still ahead. */
   .start-step.now .start-num{ background: var(--accent); color: #fff; }
   .start-step.done .start-num{
     background: var(--ok-wash); border: 1px solid var(--ok-border); color: var(--ok-ink);
   }
   .start-step.done .start-num svg{ width: 13px; height: 13px; }
   .start-step.todo .start-num{
-    background: transparent; border: 1.5px dashed var(--line-mid); color: var(--muted);
+    background: transparent; border: 1.5px solid var(--line-mid); color: var(--muted);
   }
   .start-step.todo .start-body > b{ color: var(--muted); font-weight: 600; }
   .start-waiting{

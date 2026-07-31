@@ -107,8 +107,8 @@ function ClientMenu({ option, connectMode }: {
         const client = connectClientById(mode);
         const sub = mode === 'direct'
           ? (option.connType === 'ssh'
-              ? 'SSH agent socket — works with plain ssh'
-              : 'Postgres DSN — works with any client')
+              ? 'Connect via local SSH socket'
+              : 'Connect via local Postgres endpoint')
           : client?.sub;
         // Rules split the menu into direct / named agents / escape hatches.
         const startsGroup = (mode === 'claude-code' && index > 0) || mode === 'mcp';

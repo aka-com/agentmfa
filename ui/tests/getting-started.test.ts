@@ -237,7 +237,7 @@ test('Direct is offered first, and only for kinds with a direct endpoint', () =>
   for (const mode of connectModesFor(startOptionById('postgres'))) {
     assert.ok(CONNECT_MODE_LABELS[mode], mode);
   }
-  // With the guides tab gone, Other MCP client is offered as a step-2 mode.
+  // With the guides tab gone, Other MCP is offered as a step-2 mode.
   assert.ok(connectModesFor(startOptionById('postgres')).includes('mcp'));
   assert.ok(connectModesFor(startOptionById('notion')).includes('mcp'));
 });
@@ -289,8 +289,18 @@ test('every shared-key mode renders from a client definition; direct has none', 
     assert.ok(client!.steps(ENV).length, mode);
   }
   // The two escape hatches keep their spelled-out labels.
-  assert.equal(CONNECT_MODE_LABELS.mcp, 'Other MCP client');
-  assert.equal(CONNECT_MODE_LABELS.cli, 'HTTP API');
+  assert.equal(CONNECT_MODE_LABELS.mcp, 'Other MCP');
+  assert.equal(CONNECT_MODE_LABELS.cli, 'HTTP/API client');
+  assert.deepEqual(
+    ['mcp', 'cli'].map((mode) => {
+      const client = connectClientById(mode)!;
+      return [client.name, client.sub];
+    }),
+    [
+      ['Other MCP', 'Any client'],
+      ['HTTP/API client', 'Any client'],
+    ],
+  );
 });
 
 test('stdio connection guides and quick-start clients require the separate CLI', () => {
@@ -308,7 +318,7 @@ test('stdio connection guides and quick-start clients require the separate CLI',
   assert.equal(connectClientById('cli')!.note, undefined);
   assert.equal(
     connectClientById('cli')!.steps(ENV)[0].followup,
-    'Speaking MCP over HTTP instead? See “Other MCP client” above.',
+    'Speaking MCP over HTTP instead? See “Other MCP” above.',
   );
   for (const client of requiringCli) {
     const [install, ...steps] = connectGuideSteps(client, ENV);
