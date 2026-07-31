@@ -816,7 +816,7 @@ impl crate::events::BrokerEvents for FanoutEvents {
                     // attached", and saying so saves the operator a hunt.
                     tracing::warn!(
                         connection = %pending.connection,
-                        "refusing confirmed traffic: a management client is attached but holds no \
+                        "confirmed traffic has no decision surface: a management client is attached but holds no \
                          request-inbox lease (a passive observer, or an app too old to negotiate \
                          one — update it)"
                     );

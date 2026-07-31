@@ -17,8 +17,8 @@
 //!   the user.
 //! - It **fails closed**. With no surface able to ask (a headless
 //!   `mfa serve`, a shell that never implemented the hook), traffic on a
-//!   confirm-on connection is refused rather than waved through: the user
-//!   asked to be asked.
+//!   confirm-on connection gets only a short reconnect grace, then is refused
+//!   rather than waved through: the user asked to be asked.
 //! - A refusal **cools down**. An agent that retries in a loop would
 //!   otherwise re-prompt in a loop, so a denial also refuses the calls that
 //!   follow it for a short while, without asking again.
@@ -82,6 +82,10 @@ const APPROVAL_TEXT_CAP: usize = 400;
 /// poll, a prompt every one of whose waiters disconnected would sit in the
 /// queue (and the user's Inbox) until its deadline.
 const WAITER_LIVENESS_PERIOD: Duration = Duration::from_secs(3);
+/// Polling is deliberately short-lived and bounded by `surface_grace`; the
+/// surface interface is synchronous, so this avoids adding an unbounded
+/// notification subscription to every shell implementation.
+const SURFACE_RECHECK_PERIOD: Duration = Duration::from_millis(25);
 
 /// Every string a prompt shows funnels through here: bounded, and stripped
 /// of characters that could visually rewrite the question.
@@ -342,6 +346,9 @@ impl Verdict {
 pub struct ApprovalConfig {
     /// How long a prompt waits for an answer.
     pub timeout: Duration,
+    /// How long an unavailable prompt remains queued for a decision surface
+    /// to reconnect. Never extends the prompt's original deadline.
+    pub surface_grace: Duration,
     /// How long "approve for now" covers the connection.
     pub window: Duration,
     /// How long a denial refuses what follows without asking again.
@@ -450,6 +457,73 @@ impl Approvals {
                 state: Mutex::new(State::default()),
             }),
         }
+    }
+
+    /// Own one prompt after the initial synchronous surface handoff. When no
+    /// surface was available, keep the existing pending record briefly and
+    /// re-offer it if a real surface lease returns. This task also owns
+    /// deadline/caller-disconnect cleanup, so cancellation of the first waiter
+    /// cannot strand a coalesced prompt or abandon its reconnect attempt.
+    fn monitor_prompt(
+        &self,
+        info: PendingApproval,
+        deadline: Instant,
+        initially_unavailable: bool,
+    ) {
+        let approvals = self.clone();
+        tokio::spawn(async move {
+            let id = info.id;
+            let deadline = tokio::time::Instant::from_std(deadline);
+
+            if initially_unavailable {
+                let grace_deadline = deadline
+                    .min(tokio::time::Instant::now() + approvals.inner.config.surface_grace);
+                loop {
+                    let now = tokio::time::Instant::now();
+                    if now >= grace_deadline {
+                        let (verdict, resolution) = if now >= deadline {
+                            (Verdict::TimedOut, RequestResolution::TimedOut)
+                        } else {
+                            (Verdict::Unavailable, RequestResolution::NoSurface)
+                        };
+                        approvals.resolve(&id, verdict, resolution);
+                        return;
+                    }
+                    tokio::time::sleep_until(grace_deadline.min(now + SURFACE_RECHECK_PERIOD))
+                        .await;
+                    if !approvals.pending().iter().any(|prompt| prompt.id == id) {
+                        return;
+                    }
+                    if approvals.inner.events.has_approval_surface() {
+                        match approvals.inner.events.approval_requested(&info) {
+                            ApprovalHandling::Taken => break,
+                            ApprovalHandling::Waived => {
+                                approvals.resolve(&id, Verdict::Allowed, RequestResolution::Waived);
+                                return;
+                            }
+                            ApprovalHandling::Unavailable => {
+                                // The lease disappeared between the readiness
+                                // probe and handoff. Keep the remaining grace.
+                            }
+                        }
+                    }
+                }
+            }
+
+            loop {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    approvals.resolve(&id, Verdict::TimedOut, RequestResolution::TimedOut);
+                    return;
+                }
+                tokio::time::sleep_until(deadline.min(now + WAITER_LIVENESS_PERIOD)).await;
+                // `pending` sweeps both a passed deadline and a fully
+                // disconnected waiter list.
+                if !approvals.pending().iter().any(|prompt| prompt.id == id) {
+                    return;
+                }
+            }
+        });
     }
 
     /// Ask the user about one unit of traffic, and wait for the answer.
@@ -584,46 +658,12 @@ impl Approvals {
 
                     match inner.events.approval_requested(&info) {
                         ApprovalHandling::Taken => {
-                            // The request future can disappear (a direct
-                            // client disconnects) while the UI still holds
-                            // this prompt. Keep deadline retirement owned by
-                            // the registry, not solely by that future — and
-                            // poll waiter liveness on the way, so a prompt
-                            // nobody is waiting on anymore leaves the queue
-                            // in seconds rather than at its deadline.
-                            let approvals = self.clone();
-                            tokio::spawn(async move {
-                                let deadline = tokio::time::Instant::from_std(deadline);
-                                loop {
-                                    let now = tokio::time::Instant::now();
-                                    if now >= deadline {
-                                        approvals.resolve(
-                                            &id,
-                                            Verdict::TimedOut,
-                                            RequestResolution::TimedOut,
-                                        );
-                                        return;
-                                    }
-                                    tokio::time::sleep_until(
-                                        deadline.min(now + WAITER_LIVENESS_PERIOD),
-                                    )
-                                    .await;
-                                    // `pending` sweeps: a passed deadline and
-                                    // a fully disconnected waiter list both
-                                    // retire the prompt inside it.
-                                    if !approvals.pending().iter().any(|prompt| prompt.id == id) {
-                                        return;
-                                    }
-                                }
-                            });
+                            self.monitor_prompt(info, deadline, false);
                             (rx, id, deadline)
                         }
                         ApprovalHandling::Unavailable => {
-                            // Nothing can ask. Refuse now rather than leave
-                            // the agent hanging until the deadline.
-                            self.resolve(&id, Verdict::Unavailable, RequestResolution::NoSurface);
-                            self.audit_decision(&request, Verdict::Unavailable, Some("no_surface"));
-                            return Verdict::Unavailable;
+                            self.monitor_prompt(info, deadline, true);
+                            (rx, id, deadline)
                         }
                         ApprovalHandling::Waived => {
                             // A harness that stands in for the user: let it
@@ -650,7 +690,8 @@ impl Approvals {
                     Verdict::TimedOut
                 }
             };
-        self.audit_decision(&request, verdict, None);
+        let audit_note = (verdict == Verdict::Unavailable).then_some("surface_grace_elapsed");
+        self.audit_decision(&request, verdict, audit_note);
         verdict
     }
 
@@ -1050,7 +1091,7 @@ mod tests {
     use super::*;
     use crate::request_history::RequestStatus;
     use crate::types::ConnectionConfig;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// A shell that answers every prompt the moment it is raised, the way a
     /// user with a very fast finger would.
@@ -1082,6 +1123,26 @@ mod tests {
     /// A shell with no way to ask (the trait default).
     struct NoSurface;
     impl BrokerEvents for NoSurface {}
+
+    struct ReconnectingSurface {
+        available: AtomicBool,
+        offered: AtomicUsize,
+    }
+
+    impl BrokerEvents for ReconnectingSurface {
+        fn has_approval_surface(&self) -> bool {
+            self.available.load(Ordering::SeqCst)
+        }
+
+        fn approval_requested(&self, _pending: &PendingApproval) -> ApprovalHandling {
+            self.offered.fetch_add(1, Ordering::SeqCst);
+            if self.available.load(Ordering::SeqCst) {
+                ApprovalHandling::Taken
+            } else {
+                ApprovalHandling::Unavailable
+            }
+        }
+    }
 
     fn connection() -> Connection {
         Connection {
@@ -1126,6 +1187,7 @@ mod tests {
     fn config() -> ApprovalConfig {
         ApprovalConfig {
             timeout: Duration::from_millis(200),
+            surface_grace: Duration::from_millis(50),
             window: Duration::from_secs(900),
             deny_cooldown: Duration::from_secs(60),
             max_pending: 32,
@@ -1406,6 +1468,70 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].status, RequestStatus::Unavailable);
         assert_eq!(history[0].resolution, Some(RequestResolution::NoSurface));
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_surface_can_reconnect_during_its_bounded_grace() {
+        let events = Arc::new(ReconnectingSurface {
+            available: AtomicBool::new(false),
+            offered: AtomicUsize::new(0),
+        });
+        let (approvals, _dir) = registry(events.clone());
+        let conn = connection();
+        let call = {
+            let approvals = approvals.clone();
+            let conn = conn.clone();
+            tokio::spawn(async move { approvals.gate(request(&conn)).await })
+        };
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while events.offered.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the initial unavailable handoff should occur");
+        assert!(
+            !call.is_finished(),
+            "the reconnect grace must park the call"
+        );
+        events.available.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while events.offered.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the returning surface should receive the queued prompt");
+
+        let prompt = approvals.pending().pop().expect("prompt remains pending");
+        assert!(approvals.respond(&prompt.id, ApprovalDecision::ApproveWindow));
+        assert_eq!(call.await.unwrap(), Verdict::Allowed);
+    }
+
+    #[tokio::test]
+    async fn reconnect_grace_never_extends_the_original_prompt_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = Arc::new(AuditLog::open(dir.path().join("audit.jsonl")).unwrap());
+        let approvals = Approvals::new(
+            ApprovalConfig {
+                timeout: Duration::from_millis(30),
+                surface_grace: Duration::from_secs(1),
+                ..config()
+            },
+            audit,
+            Arc::new(NoSurface),
+        );
+        let conn = connection();
+        let verdict =
+            tokio::time::timeout(Duration::from_millis(150), approvals.gate(request(&conn)))
+                .await
+                .expect("the original deadline must win over the reconnect grace");
+        assert_eq!(verdict, Verdict::TimedOut);
+        assert_eq!(
+            approvals.requests()[0].resolution,
+            Some(RequestResolution::TimedOut)
+        );
     }
 
     #[tokio::test]

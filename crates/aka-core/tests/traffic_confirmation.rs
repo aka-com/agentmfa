@@ -100,6 +100,7 @@ async fn harness(user: Arc<ScriptedUser>) -> Harness {
             // Short enough that the timeout test does not idle for a minute
             // and a half, long enough that a scripted answer always wins.
             approval_timeout: Duration::from_millis(300),
+            approval_surface_grace: Duration::from_millis(50),
             ..BrokerConfig::default()
         },
         user,
@@ -458,7 +459,10 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
     let broker = Broker::new(
         Paths::under(dir.path()),
         Arc::new(MemoryVault::new()),
-        BrokerConfig::default(),
+        BrokerConfig {
+            approval_surface_grace: Duration::from_millis(250),
+            ..BrokerConfig::default()
+        },
         Arc::new(NoSurface),
     )
     .await
@@ -512,13 +516,11 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
         "the user asked to be asked; with no way to ask, the call does not go"
     );
 
-    // A hosted broker has no local shell, but an authenticated management
-    // stream can explicitly lease the remote app's request surface. It must
-    // keep the call parked rather than replaying `Unavailable`.
+    // A hosted broker has no local shell. Start the next call while only a
+    // passive observer is attached, then let its request-inbox lease return
+    // during the grace: the same queued prompt must be offered and answered.
     drop(events);
     let mut events = broker.manage_bus().subscribe();
-    let surface = broker.manage_bus().lease_approval_surface();
-    assert!(broker.manage_bus().renew_approval_surface(&surface.id()));
     let socket = handle.socket_path.clone();
     let token = token.clone();
     let call = tokio::spawn(async move {
@@ -540,7 +542,24 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
         }
     })
     .await
-    .expect("a remote surface should receive the new prompt event");
+    .expect("the queued prompt should reach the passive event feed");
+    assert!(
+        !call.is_finished(),
+        "an unavailable surface gets a bounded reconnect grace"
+    );
+
+    let surface = broker.manage_bus().lease_approval_surface();
+    assert!(broker.manage_bus().renew_approval_surface(&surface.id()));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let item = events.recv().await.unwrap();
+            if matches!(item.event, aka_api::ManageEvent::ApprovalsChanged) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the returning request surface should be offered the queued prompt");
     let pending = broker.pending_approvals();
     assert_eq!(pending.len(), 1);
     assert!(broker

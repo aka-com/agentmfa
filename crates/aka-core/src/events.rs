@@ -14,7 +14,8 @@ pub enum ApprovalHandling {
     /// A surface is showing it and will answer through
     /// [`Approvals::respond`](crate::approvals::Approvals::respond).
     Taken,
-    /// Nothing here can ask the user. The call is refused.
+    /// Nothing here can ask the user. The approval registry may hold the call
+    /// for its bounded reconnect grace, then refuses it.
     Unavailable,
     /// The observer stands in for the user and waives the prompt (tests and
     /// dev harnesses only — never a product shell).

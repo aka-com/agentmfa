@@ -112,6 +112,9 @@ pub struct BrokerConfig {
     /// `recommended_client_timeout`, so an unanswered prompt surfaces as a
     /// broker refusal the agent can read rather than as its own timeout.
     pub approval_timeout: Duration,
+    /// How long a newly unavailable confirmation waits for a request surface
+    /// to reconnect. This is always capped by `approval_timeout`.
+    pub approval_surface_grace: Duration,
     /// How long one approval covers a connection's traffic ("Approve 15m").
     pub approval_window: Duration,
     /// How long a refusal keeps refusing without asking again, so a
@@ -194,6 +197,7 @@ impl BrokerConfig {
     pub fn approvals(&self) -> crate::approvals::ApprovalConfig {
         crate::approvals::ApprovalConfig {
             timeout: self.approval_timeout,
+            surface_grace: self.approval_surface_grace,
             window: self.approval_window,
             deny_cooldown: self.approval_deny_cooldown,
             max_pending: self.max_pending_approvals,
@@ -279,6 +283,7 @@ impl Default for BrokerConfig {
             global_sessions: 300,
             max_endpoints: 64,
             approval_timeout: Duration::from_secs(90),
+            approval_surface_grace: Duration::from_secs(2),
             approval_window: Duration::from_secs(15 * 60),
             approval_deny_cooldown: Duration::from_secs(60),
             max_pending_approvals: 32,
