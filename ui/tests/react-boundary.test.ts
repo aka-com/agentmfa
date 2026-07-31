@@ -339,16 +339,21 @@ test('selected master rows have no left accent border', async () => {
   assert.doesNotMatch(selected, /border-left|inset\s+\d+px\s+0/);
 });
 
-test('the narrow connection menu stays inside the detail slide-over', async () => {
+test('the connection menu escapes the clipping detail pane through a portal', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
-  const narrow = styles.match(
-    /@media \(max-width: 720px\) \{([\s\S]*?)\n\}\n@keyframes cd-slide/,
-  )?.[1];
 
-  assert.ok(narrow, 'narrow detail-panel styles are present');
+  assert.match(app, /function ConnectionActionMenu\(\): ReactNode \{[\s\S]*?createPortal\(/);
+  assert.match(app, /<ConnectionActionMenu \/>/);
+  const detail = app.match(
+    /function ConnectionDetail[\s\S]*?function FlatConnectionRow/,
+  )?.[0];
+  assert.ok(detail, 'connection detail is present');
+  assert.doesNotMatch(detail, /<div className="tile-menu"/);
+  assert.match(styles, /\.conn-action-menu-wrap \{[\s\S]*?position: fixed;/);
   assert.match(
-    narrow,
-    /\.cd-actions \.tile-menu \{\s*width: min\(250px, calc\(92vw - 37px\)\); min-width: 0;/,
+    styles,
+    /\.conn-action-menu-wrap \.tile-menu \{[\s\S]*?max-height: calc\(100vh - 16px\)/,
   );
 });
 

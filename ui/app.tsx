@@ -70,6 +70,7 @@ import { activeRequestCount, activeRequests, anchorExpiry, recentRequests } from
 import { anchorEndpointExpiries } from '/src/endpoint-expiry';
 import { APP_VERSION } from '/src/version';
 import { virtualListWindow } from '/src/virtual-list';
+import { anchoredMenuPosition } from '/src/menu-position';
 import type {
   ActivityEntry,
   ActivityPage,
@@ -288,9 +289,8 @@ const root = (): HTMLElement => {
   if (!element) throw new Error('Missing #root element');
   return element;
 };
-/** Portal target for fixed-position overlays (the credential listbox).
- * A sibling of #root, so React-managed children and manually positioned
- * DOM never share a container. */
+/** Portal target for fixed-position overlays that must escape scrolling or
+ * clipping application surfaces. */
 const overlays = (): HTMLElement => {
   const element = document.getElementById('overlays');
   if (!element) throw new Error('Missing #overlays element');
@@ -589,6 +589,7 @@ function finishRender(
 
   if (state.formMenuOpen) positionFormMenu();
   if (state.connMenuPoint) positionConnContextMenu();
+  else if (state.connMenuOpen) positionConnActionMenu();
 
   // First render of a connection sheet: snapshot the draft so cancelling
   // can detect real edits.
@@ -1828,20 +1829,16 @@ function ConnectionDetail({ connection: c }: {
         {entry ? <Icon markup={ICONS[entry.icon] || ''} /> : null}
       </span>
       <div className="cd-title"><b title={c.name}>{connectionRowName(c)}</b>
-        <span>{kindLabel(c)} · {enabled ? 'Enabled' : 'Off'}</span>
+        <span>{kindLabel(c)}</span>
       </div>
       <div className="cd-actions">
         <div className="tile-menu-wrap">
           <button className={`icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}`}
             title="Tool options" aria-label={`Options for ${c.name}`}
-            aria-expanded={menuOpen} data-act="toggle-conn-menu" data-id={c.id}>
+            aria-expanded={menuOpen} data-act="toggle-conn-menu" data-id={c.id}
+            data-conn-menu-trigger={c.id}>
             <Icon markup={ICONS.ellipsis} />
           </button>
-          {menuOpen
-            ? <div className="tile-menu" aria-label={`Options for ${c.name}`}>
-                <ConnectionMenuItems connection={c} />
-              </div>
-            : null}
         </div>
         <ConnectionToggle connection={c} />
       </div>
@@ -3048,6 +3045,24 @@ function ConnectionContextMenu(): ReactNode {
   );
 }
 
+/** The detail-pane action menu is portaled out of its scrolling card so the
+ * card cannot clip it. positionConnActionMenu keeps it attached to the ⋯
+ * trigger and flips it above when there is not enough viewport below. */
+function ConnectionActionMenu(): ReactNode {
+  const connection = !state.connMenuPoint && state.connMenuOpen
+    ? state.connections.find((candidate) => candidate.id === state.connMenuOpen)
+    : null;
+  if (!connection) return null;
+  return createPortal(
+    <div className="tile-menu-wrap conn-action-menu-wrap" data-conn={connection.id}>
+      <div className="tile-menu" aria-label={`Options for ${connection.name}`}>
+        <ConnectionMenuItems connection={connection} />
+      </div>
+    </div>,
+    overlays(),
+  );
+}
+
 function AppRoot(): ReactNode {
   // Subscribes this root to store publications; the revision itself is not
   // used as a key — the windows reconcile in place rather than remounting.
@@ -3079,6 +3094,7 @@ function AppRoot(): ReactNode {
       onDragEnd={handleConnectionDragEnd}>
       <RequestLiveRegion />
       {mode === 'dropdown' ? <DropdownWindow /> : <MainWindow />}
+      <ConnectionActionMenu />
       <ConnectionContextMenu />
     </div>
   );
@@ -5972,6 +5988,28 @@ function positionConnContextMenu(): void {
   wrap.style.visibility = 'visible';
 }
 
+/** Anchor the detail pane's portaled action menu without letting any edge
+ * leave the viewport. The menu itself has a viewport-bounded max-height, so
+ * its final measured box can always be placed inside these insets. */
+function positionConnActionMenu(): void {
+  const id = state.connMenuOpen;
+  if (!id || state.connMenuPoint) return;
+  const trigger = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-conn-menu-trigger]'),
+  ).find((candidate) => candidate.dataset.connMenuTrigger === id);
+  const wrap = document.querySelector<HTMLElement>('.conn-action-menu-wrap');
+  if (!trigger || !wrap) return;
+  const anchor = trigger.getBoundingClientRect();
+  const box = wrap.getBoundingClientRect();
+  const position = anchoredMenuPosition(anchor, box, {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
+  wrap.style.left = `${position.left}px`;
+  wrap.style.top = `${position.top}px`;
+  wrap.style.visibility = 'visible';
+}
+
 // Opportunistic re-check: coming back to the app re-tests anything the
 // broker last saw unhealthy, so a fixed credential clears its badge
 // without a manual test. Throttled so window-switching stays free.
@@ -7629,11 +7667,13 @@ const ERR_KEY_BY_INPUT = {
 
 function handleDocumentScroll(): void {
   if (state.formMenuOpen) positionFormMenu();
+  if (state.connMenuOpen && !state.connMenuPoint) positionConnActionMenu();
 }
 
 function handleWindowResize(): void {
   if (state.formMenuOpen) positionFormMenu();
   if (state.connMenuPoint) positionConnContextMenu();
+  else if (state.connMenuOpen) positionConnActionMenu();
 }
 
 // Browser-level events that are genuinely global stay native, but their

@@ -21,8 +21,8 @@
       <span class="app-loading-spinner"></span>
     </div>
   </div>
-  <!-- Portal target for fixed-position overlays (the credential listbox),
-       kept outside #root so React's tree and positioned DOM never mix. -->
+  <!-- Portal target for fixed-position overlays that must escape the
+       scrolling and clipping surfaces inside #root. -->
   <div id="overlays"></div>
   <div id="toasts" class="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
   <!-- Tooltip library (Tippy.js on Popper, self-hosted for the 'self'-only
