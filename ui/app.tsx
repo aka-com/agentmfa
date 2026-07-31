@@ -2805,6 +2805,8 @@ function MainWindow(): ReactNode {
     : state.tab === 'activity' ? 'Activity log'
     : tabLabel(state.tab);
 
+  const recheckRunning = state.connections.some((c) =>
+    c.mcp_path ? Boolean(state.mcpStatus[c.id]?.running) : Boolean(state.connTests[c.id]?.running));
   const pageAction = state.tab === 'connections'
     ? <div className="dw-head-actions">
         <input id="tool-search" className="cat-search" type="search" placeholder="Search tools…"
@@ -2813,6 +2815,12 @@ function MainWindow(): ReactNode {
         <button className="btn primary add-tool-btn" data-act="open-add-palette"
           aria-haspopup="dialog">
           <Icon markup={ICONS.plus} /> Add a tool
+        </button>
+        <button className={`btn recheck-tools-btn ${recheckRunning ? 'running' : ''}`}
+          data-act="recheck-tools" disabled={recheckRunning}
+          title="Recheck all tools and connections"
+          aria-label="Recheck all tools and connections">
+          <Icon markup={ICONS.refresh} />
         </button>
       </div>
     : state.tab === 'secrets'
@@ -5078,6 +5086,32 @@ async function runConnectionTest(id: string): Promise<void> {
   render();
 }
 
+async function runMcpStatusCheck(id: string): Promise<void> {
+  if (state.mcpStatus[id]?.running) return;
+  const connection = state.connections.find((x) => x.id === id);
+  if (!connection) return;
+  const epoch = brokerEpoch;
+  state.mcpStatus[id] = { running: true };
+  render();
+  const template = mcpTemplateForConnection(connection);
+  try {
+    const report = await invoke('mcp_status', {
+      id,
+      options: {
+        whoami_tool: template?.whoamiTool ?? null,
+      },
+    });
+    if (!brokerEpochIsCurrent(epoch)) return;
+    state.mcpStatus[id] = { running: false, report };
+  } catch (error) {
+    if (!brokerEpochIsCurrent(epoch)) return;
+    state.mcpStatus[id] = { running: false, error: errorMessage(error) };
+  }
+  // The check can update the stored account acknowledgment.
+  await load('connections', 'list_connections');
+  render();
+}
+
 async function loadWiringTools(connectionId: string): Promise<void> {
   const broker = state.broker;
   const epoch = brokerEpoch;
@@ -6398,34 +6432,20 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.connMenuPoint = null;
       void runConnectionTest(id);
       break;
-    case 'mcp-status': {
-      if (state.mcpStatus[id] && state.mcpStatus[id].running) break;
-      const epoch = brokerEpoch;
+    case 'mcp-status':
       state.connMenuOpen = null;
       state.connMenuPoint = null;
-      const connection = state.connections.find((x) => x.id === id);
-      if (!connection) break;
-      state.mcpStatus[id] = { running: true };
-      render();
-      const template = mcpTemplateForConnection(connection);
-      try {
-        const report = await invoke('mcp_status', {
-          id,
-          options: {
-            whoami_tool: template?.whoamiTool ?? null,
-          },
-        });
-        if (!brokerEpochIsCurrent(epoch)) break;
-        state.mcpStatus[id] = { running: false, report };
-      } catch (error) {
-        if (!brokerEpochIsCurrent(epoch)) break;
-        state.mcpStatus[id] = { running: false, error: errorMessage(error) };
-      }
-      // The check can update the stored account acknowledgment.
-      await load('connections', 'list_connections');
-      render();
+      await runMcpStatusCheck(id);
       break;
-    }
+    case 'recheck-tools':
+      // Re-pull the list first so the sweep tests what the broker actually
+      // holds, then fan the per-tool checks out concurrently.
+      await refresh('connections');
+      for (const connection of state.connections) {
+        if (connection.mcp_path) void runMcpStatusCheck(connection.id);
+        else void runConnectionTest(connection.id);
+      }
+      break;
     case 'reconnect-mcp': {
       const connection = state.connections.find((x) => x.id === id);
       if (!connection || !connection.mcp_path) break;

@@ -1972,3 +1972,17 @@
   padding: 1px 5px; margin-right: 3px; font-size: 0.625rem; }
 .add-tool-btn{ display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .add-tool-btn svg{ width: 14px; height: 14px; }
+/* The icon-only sweep beside "Add a tool": rechecks every tool and
+   connection. Sits tight against the add button and spins while any
+   tool's check is still running. */
+.recheck-tools-btn{
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 29px; height: 29px; padding: 0; margin-left: -8px;
+  color: var(--ink-3);
+}
+.recheck-tools-btn svg{ width: 14px; height: 14px; }
+.recheck-tools-btn.running svg{ animation: recheck-spin .8s linear infinite; }
+@keyframes recheck-spin{ to{ transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce){
+  .recheck-tools-btn.running svg{ animation: none; }
+}
