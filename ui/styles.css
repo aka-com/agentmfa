@@ -12,6 +12,7 @@
   /* layout */
   --content-max: 47.5rem;  /* main-window column cap (head + listing share it) */
   --traffic-lights: 54px;  /* width of the macOS traffic-light cluster */
+  --titlebar-h: 38px;      /* main-window custom title bar height */
 
   /* text */
   --ink: #1d1d1f;          /* primary text */
@@ -259,7 +260,7 @@
 .dw-titlebar{
   flex: 0 0 auto; position: relative;
   display: flex; align-items: center; justify-content: center;
-  height: 38px; padding: 0 12px;
+  height: var(--titlebar-h); padding: 0 12px;
   border-bottom: 1px solid var(--line);
   background: var(--wash);
   user-select: none;
@@ -1567,6 +1568,12 @@
     display: block; position: fixed; inset: 0; z-index: 6;
     border: 0; padding: 0; background: rgba(15,17,30,.38); cursor: default;
   }
+  /* In the main window the slide-over and its scrim stop at the title bar:
+     the app chrome stays visible above the overlay, which covers only the
+     content below it. (The tray dropdown has no title bar — there the pair
+     keeps covering the whole surface.) */
+  .dw-titlebar + .dw-body .conn-detail-pane { top: var(--titlebar-h); }
+  .dw-titlebar + .dw-body .catalog.detail-open .conn-detail-backdrop { top: var(--titlebar-h); }
 }
 @keyframes cd-slide { from { transform: translateX(36px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
