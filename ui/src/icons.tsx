@@ -1,6 +1,5 @@
 import {
   Bell,
-  Blocks,
   BookOpen,
   Bot,
   BotMessageSquare,
@@ -63,7 +62,7 @@ import {
 import type { IconDefinition } from './icon';
 
 export const LUCIDE_ICONS: Record<string, IconDefinition> = {
-  blocks: { kind: 'lucide', node: Blocks, size: 15 },
+  appIcon: { kind: 'lucide', node: KeyRound, size: 15 },
   bookOpen: { kind: 'lucide', node: BookOpen, size: 15 },
   bot: { kind: 'lucide', node: Bot, size: 15 },
   botMessageSquare: { kind: 'lucide', node: BotMessageSquare, size: 15 },

@@ -2678,7 +2678,7 @@ function BrokerPane({ kind }: { kind: 'setup' | 'connecting' | 'error' }): React
     const insecureRemote = insecureNonLoopbackHttp(setup.url);
     return (
       <div className="broker-pane" role="form" aria-label="Connect to hosted AgentMFA">
-        <div className="bp-icon"><Icon markup={ICONS.blocks} /></div>
+        <div className="bp-icon"><Icon markup={ICONS.appIcon} /></div>
         <h2>Connect to hosted AgentMFA</h2>
         <p className="bp-lead">Connect to a remote AgentMFA server with a management token.</p>
         <div className="adv-collapse">
@@ -2836,7 +2836,7 @@ function MainWindow(): ReactNode {
         <div className="dw-body">
           <div className={`dw-side ${takeover ? 'disabled' : ''}`}>
             <div className="dw-brand">
-              <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
+              <div className="dd-appicon"><Icon markup={ICONS.appIcon} /></div>
               <div><div className="dd-title">AgentMFA</div><BrokerReady /></div>
             </div>
             <div className="dw-nav">
@@ -2911,7 +2911,7 @@ function DropdownWindow(): ReactNode {
     return (
       <div className="surface dropdown-surface">
         <div className="dd-head">
-          <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
+          <div className="dd-appicon"><Icon markup={ICONS.appIcon} /></div>
           <div className="dd-identity"><div className="dd-title">AgentMFA</div></div>
           <button className="icon-btn" title="Open as a window" aria-label="Open as a window"
             data-act="mode-window"><Icon markup={ICONS.expand} /></button>
@@ -2924,7 +2924,7 @@ function DropdownWindow(): ReactNode {
     <>
       <div className="surface dropdown-surface">
         <div className="dd-head">
-          <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
+          <div className="dd-appicon"><Icon markup={ICONS.appIcon} /></div>
           <div className="dd-identity">
             <div className="dd-title">AgentMFA</div><BrokerReady />
           </div>
