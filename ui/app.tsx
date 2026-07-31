@@ -2098,7 +2098,7 @@ function SamplesCard(): ReactNode {
           <span className="samples-spark" aria-hidden="true"><Icon markup={ICONS.sparkles} /></span>
           <div className="samples-title">
             <b>Try a sample tool</b>
-            <span>Live public APIs you can test against. One click, zero setup.</span>
+            <span>Live public APIs you can test against, with zero setup.</span>
           </div>
           <button className="icon-btn samples-dismiss" data-act="dismiss-samples"
             title="Hide sample tools" aria-label="Hide sample tools">

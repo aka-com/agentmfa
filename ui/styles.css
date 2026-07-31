@@ -1711,6 +1711,12 @@
 }
 /* Label the value itself, not the eye/action controls at the right edge. */
 .cat-conns .sec-table th:nth-child(3) { text-align: left; }
+/* The tray dropdown has no 64px text spine to align with — its rows start
+   at the card padding, and with no eye/action controls after the value the
+   label right-aligns over the values it names. */
+.dropdown-surface .cat-conns .sec-table th:first-child,
+.dropdown-surface .cat-conns .sec-table td:first-child { padding-left: 14px; }
+.dropdown-surface .cat-conns .sec-table th:nth-child(3) { text-align: right; }
 .cat-conns > .muted-note { padding: 10px 14px; }
 /* "Add credential" is a full-bleed activatable row like "More tools"; the
    table's last-row hairline is the divider above it, so the row itself draws
