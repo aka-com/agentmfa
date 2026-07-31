@@ -27,6 +27,7 @@
   --accent-ink: #0a63d0;                /* accent text on tinted bg */
   --accent-wash: rgba(10, 124, 255, .08);
   --accent-wash-2: rgba(10, 124, 255, .12);
+  --accent-border: rgba(10, 124, 255, .32);
   --danger: #ff3b30;                    /* solid fills / error borders */
   --danger-ink: #d70015;
   --danger-text: #7a1208;               /* body text inside danger callout */
@@ -1173,6 +1174,7 @@
     --accent-ink: #7db8ff;
     --accent-wash: rgba(88,166,255,.12);
     --accent-wash-2: rgba(88,166,255,.18);
+    --accent-border: rgba(88,166,255,.32);
     --danger-ink: #ff6b61;
     --danger-text: #ffb3ab;
     --danger-wash: rgba(255,90,80,.14);
@@ -1791,7 +1793,22 @@
 }
 .activity-live-sessions { margin: 0 0 14px; }
 .act-search { flex: 1 1 20ch; min-width: min(18ch, 100%); }
-.act-filter { flex: 0 0 auto; padding: 3px 10px; font-size: 0.75rem; }
+/* Filter toggles are outlined pills so they read as controls rather than
+   stray text; the pressed chip flips to an accent tint instead of the seg
+   control's white-on-track look, which is invisible on the main surface. */
+.act-filter {
+  flex: 0 0 auto; gap: 4px; padding: 3px 10px; font-size: 0.75rem;
+  background: var(--btn-bg); border: 1px solid var(--line-mid); border-radius: 999px;
+}
+.act-filter:hover { background: var(--btn-hover); }
+.act-filter.on {
+  background: var(--accent-wash-2); border-color: var(--accent-border);
+  color: var(--accent-ink); box-shadow: none;
+}
+/* The qualifier prefix ("agent:") stays muted so the untrusted name reads
+   as the value of a filter, not as part of the app's own copy. */
+.act-filter-key { color: var(--muted); font-weight: 400; }
+.act-filter.on .act-filter-key { color: inherit; opacity: .8; }
 .activity-page-footer {
   display: flex; align-items: center; justify-content: center; gap: 9px; flex-wrap: wrap;
   padding: 14px 8px 4px; color: var(--muted); font-size: 0.75rem; text-align: center;

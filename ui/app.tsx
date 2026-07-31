@@ -929,12 +929,17 @@ function RequestInbox(): ReactNode {
                       value={state.requestQuery}
                       onChange={(e) => { state.requestQuery = e.currentTarget.value; render(); }} />
                     <button className={`seg-btn act-filter ${state.requestIssuesOnly ? 'on' : ''}`}
-                      data-act="request-filter-issues">Issues</button>
+                      data-act="request-filter-issues" aria-pressed={state.requestIssuesOnly}
+                      title="Only show requests that were denied, failed, or expired">Issues</button>
                     {requestAgents.map((agent) => (
-                      <button key={agent} dir="auto"
-                        className={`seg-btn act-filter untrusted-identity ${
-                          state.requestAgent === agent ? 'on' : ''}`}
-                        data-act="request-filter-agent" data-value={agent}>{agent}</button>
+                      <button key={agent}
+                        className={`seg-btn act-filter ${state.requestAgent === agent ? 'on' : ''}`}
+                        data-act="request-filter-agent" data-value={agent}
+                        aria-pressed={state.requestAgent === agent}
+                        title={`Only show requests from agent “${agent}” (self-reported label)`}>
+                        <span className="act-filter-key">agent:</span>
+                        <span className="untrusted-identity" dir="auto">{agent}</span>
+                      </button>
                     ))}
                   </div>
                 : null}
@@ -2491,10 +2496,16 @@ function ActivityView(): ReactNode {
           value={state.activityQuery}
           onChange={(e) => { state.activityQuery = e.currentTarget.value; render(); }} />
         <button className={`seg-btn act-filter ${state.activityIssuesOnly ? 'on' : ''}`}
-          data-act="act-filter-issues">Issues</button>
+          data-act="act-filter-issues" aria-pressed={state.activityIssuesOnly}
+          title="Only show warnings and errors">Issues</button>
         {agents.map((agent) => (
           <button key={agent} className={`seg-btn act-filter ${state.activityAgent === agent ? 'on' : ''}`}
-            data-act="act-filter-agent" data-value={agent}>{agent}</button>
+            data-act="act-filter-agent" data-value={agent}
+            aria-pressed={state.activityAgent === agent}
+            title={`Only show activity from agent “${agent}” (self-reported label)`}>
+            <span className="act-filter-key">agent:</span>
+            <span className="untrusted-identity" dir="auto">{agent}</span>
+          </button>
         ))}
       </div>
       {entries.length
