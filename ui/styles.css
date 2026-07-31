@@ -1688,18 +1688,21 @@
 .cc-issues + .cd-sec::before { display: none; }
 .cat-conns .sec-table { margin: 0; }
 /* Credential rows share the darker card surface of their "Saved
-   credentials" parent row. */
-.credentials-expansion { background: transparent; }
+   credentials" parent row. Every hairline the expansion draws — under the
+   parent row, between credential rows, under the column labels, above Add
+   credential — is this one softened rule, so no edge reads stronger than
+   its neighbors. */
+.credentials-expansion {
+  --cred-line: color-mix(in srgb, var(--line-soft) 65%, transparent);
+  background: transparent;
+  border-top-color: var(--cred-line);
+}
 /* Credential-to-credential rules should recede like the surrounding card
    separators instead of looking like nested section boundaries. */
-.credentials-expansion .sec-table td {
-  border-bottom-color: color-mix(in srgb, var(--line-soft) 65%, transparent);
-}
+.credentials-expansion .sec-table td { border-bottom-color: var(--cred-line); }
 /* The column-label rule is the same hairline as the credential-to-credential
    rules; the header should organize the table without becoming a section. */
-.credentials-expansion .sec-table th {
-  border-bottom-color: color-mix(in srgb, var(--line-soft) 65%, transparent);
-}
+.credentials-expansion .sec-table th { border-bottom-color: var(--cred-line); }
 /* Align the credential table with the connection rows' text spine — the
    column headers included, so "Credential" sits directly under the row title
    it belongs to and directly over the names it labels. */
@@ -1729,7 +1732,7 @@
 /* With no rows, the empty note cannot provide the divider the last table row
    normally supplies above the add action. */
 .credentials-expansion > .muted-note + .cat-add-secret {
-  border-top: 1px solid color-mix(in srgb, var(--line-soft) 65%, transparent);
+  border-top: 1px solid var(--cred-line);
 }
 .credentials-expansion .cat-add-secret:hover { background: var(--hover); }
 .dropdown-surface .catalog { gap: 12px; }
