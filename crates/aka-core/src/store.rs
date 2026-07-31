@@ -1403,7 +1403,18 @@ fn inherit_oauth_spec(existing: &ConnectionConfig, incoming: &mut ConnectionConf
 /// incoming `None` on a connection that has them means "unspecified", not
 /// "remove". Removal happens through the manage plane's patch path, which
 /// carries the current values explicitly.
+///
+/// Inheritance stops at the pinned destination, however. A surface that never
+/// displays the signer cannot be trusted to carry it across a *repointing*
+/// edit: silently re-attaching an AWS identity to a host the operator just
+/// changed would sign for — and disclose the access key ID, session token, and
+/// a live signature to — an upstream nobody chose it for. When the target
+/// moves, the caller must state the signer explicitly, and the store's own
+/// validation then refuses a connection whose signer references have gone.
 fn inherit_signer_and_mtls(existing: &ConnectionConfig, incoming: &mut ConnectionConfig) {
+    if existing.target() != incoming.target() {
+        return;
+    }
     let (
         ConnectionConfig::Api {
             signer: existing_signer,
@@ -1641,6 +1652,35 @@ mod tests {
             }
         ));
         assert_eq!(updated.secrets.len(), 2, "signer refs stay bound");
+    }
+
+    /// Inheritance is for edits that leave the destination alone. Repointing a
+    /// signer connection through a surface that never showed the signer must
+    /// not silently sign for — and disclose the identity to — the new host.
+    #[tokio::test]
+    async fn repointing_a_connection_does_not_inherit_the_signer() {
+        let (store, _vault, _dir) = store().await;
+        store.add_secret("AWS_ACCESS_KEY_ID", val("AKID")).unwrap();
+        store
+            .add_secret("AWS_SECRET_ACCESS_KEY", val("shhh"))
+            .unwrap();
+        let conn = store.add_connection(sigv4_spec("aws")).unwrap();
+        // A full-replace edit that moves the host and omits the signer drops
+        // it rather than re-attaching it to the new destination. The result is
+        // a credential-less connection whose calls go unsigned and are
+        // refused upstream — visible and harmless, where inheriting would
+        // have disclosed the identity to a host nobody chose it for.
+        let repointed = api_spec("aws", "internal-proxy.example.com", "");
+        let (updated, target_changed) = store.update_connection(&conn.id, repointed).unwrap();
+        assert!(target_changed, "the pinned target moved");
+        assert!(
+            matches!(updated.config, ConnectionConfig::Api { signer: None, .. }),
+            "the signer must not follow the connection to a new host"
+        );
+        assert!(
+            updated.secrets.is_empty(),
+            "no credential stays bound to the repointed connection"
+        );
     }
 
     #[tokio::test]

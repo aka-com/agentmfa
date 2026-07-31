@@ -129,10 +129,27 @@ impl Harness {
 
 /* ------------------------------ fake upstream ----------------------------- */
 
+type SeenHeaders = Arc<std::sync::Mutex<Vec<HashMap<String, String>>>>;
+
 struct Upstream {
     port: u16,
     /// Every `Authorization` header the upstream was presented, in order.
     seen_auth: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Every request's full header set, as the upstream saw it. Credentials
+    /// must be asserted from here rather than from the relayed response: the
+    /// relay scrubs them, which is the behaviour under test elsewhere.
+    seen_headers: SeenHeaders,
+}
+
+impl Upstream {
+    fn last_headers(&self) -> HashMap<String, String> {
+        self.seen_headers
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("the upstream received a request")
+    }
 }
 
 /// An upstream that echoes, mentions bearer auth without ever containing the
@@ -140,6 +157,8 @@ struct Upstream {
 async fn upstream() -> Upstream {
     let seen_auth: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let record = seen_auth.clone();
+    let seen_headers: SeenHeaders = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record_headers = seen_headers.clone();
     let app = Router::new()
         .route(
             "/docs",
@@ -229,6 +248,7 @@ async fn upstream() -> Upstream {
             "/echo",
             any(move |req: axum::extract::Request| {
                 let record = record.clone();
+                let record_headers = record_headers.clone();
                 async move {
                     let (parts, body) = req.into_parts();
                     if let Some(value) = parts.headers.get(axum::http::header::AUTHORIZATION) {
@@ -248,6 +268,7 @@ async fn upstream() -> Upstream {
                             )
                         })
                         .collect();
+                    record_headers.lock().unwrap().push(headers.clone());
                     axum::Json(json!({
                         "method": parts.method.as_str(),
                         "uri": parts.uri.to_string(),
@@ -260,7 +281,11 @@ async fn upstream() -> Upstream {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Upstream { port, seen_auth }
+    Upstream {
+        port,
+        seen_auth,
+        seen_headers,
+    }
 }
 
 async fn https_upstream() -> (tempfile::TempDir, u16, String) {
@@ -449,13 +474,27 @@ fn expected_sigv4(
     pairs.sort();
     let amz_date = received["x-amz-date"].clone();
     let date = &amz_date[..8];
+    // Every `x-amz-*` header the upstream saw is signed, plus host. Sorted by
+    // name, which for these fixtures is plain lexicographic order.
+    let mut signed: Vec<(String, String)> = received
+        .iter()
+        .filter(|(name, _)| name.starts_with("x-amz-"))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    signed.push(("host".to_string(), received["host"].clone()));
+    signed.sort();
+    let signed_names = signed
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
+    let canonical_headers: String = signed
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}\n"))
+        .collect();
     let canonical = format!(
-        "{method}\n{path}\n{}\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n\n\
-         host;x-amz-content-sha256;x-amz-date\n{payload_sha256}",
+        "{method}\n{path}\n{}\n{canonical_headers}\n{signed_names}\n{payload_sha256}",
         pairs.join("&"),
-        received["host"],
-        received["x-amz-content-sha256"],
-        amz_date,
     );
     let scope = format!("{date}/{SIGV4_REGION}/{SIGV4_SERVICE}/aws4_request");
     let string_to_sign = format!(
@@ -470,7 +509,7 @@ fn expected_sigv4(
     let key = mac(&key, "aws4_request");
     format!(
         "AWS4-HMAC-SHA256 Credential={AWS_ACCESS_KEY}/{scope}, \
-         SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={}",
+         SignedHeaders={signed_names}, Signature={}",
         hex(&mac(&key, &string_to_sign)),
     )
 }
@@ -483,10 +522,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// HTTP-C3: a SigV4 connection signs the request at dispatch time, the
-/// signature verifies against an independent recomputation from what the
+/// signature verifies against an independent recomputation of what the
 /// upstream received, and the payload hash covers the actual body. The
 /// stored secret key carries a trailing newline, which must not reach the
 /// signing key.
+///
+/// Everything is asserted from the upstream's own record rather than the
+/// relayed response, because the relay deliberately scrubs the signature
+/// (see `a_reflected_sigv4_signature_is_scrubbed`).
 #[tokio::test]
 async fn sigv4_signature_verifies_and_covers_the_payload() {
     let up = upstream().await;
@@ -500,9 +543,7 @@ async fn sigv4_signature_verifies_and_covers_the_payload() {
         )
         .await;
     assert_eq!(status, 200, "{body}");
-    let echoed: Value = serde_json::from_str(body["body"].as_str().unwrap()).unwrap();
-    let received: HashMap<String, String> =
-        serde_json::from_value(echoed["headers"].clone()).unwrap();
+    let received = up.last_headers();
 
     assert_eq!(
         received["x-amz-content-sha256"],
@@ -532,10 +573,7 @@ async fn sigv4_resigns_each_redirect_hop() {
         )
         .await;
     assert_eq!(status, 200, "{body}");
-    let echoed: Value = serde_json::from_str(body["body"].as_str().unwrap()).unwrap();
-    assert_eq!(echoed["method"], "POST");
-    let received: HashMap<String, String> =
-        serde_json::from_value(echoed["headers"].clone()).unwrap();
+    let received = up.last_headers();
     assert_eq!(
         received["authorization"],
         expected_sigv4("POST", "/echo", &received, &sha256_hex(b"payload")),
@@ -543,10 +581,10 @@ async fn sigv4_resigns_each_redirect_hop() {
     );
 }
 
-/// HTTP-C3: the broker owns the SigV4 material. An agent-supplied
-/// `x-amz-date` is dropped, not signed — otherwise the agent could skew the
-/// signing clock — and `authorization` is refused outright by the reserved
-/// header rule.
+/// HTTP-C3: the broker owns the fields that carry the authentication. An
+/// agent-supplied `x-amz-date` is replaced, not signed — otherwise the agent
+/// could skew the signing clock — and `authorization` is refused outright by
+/// the reserved-header rule.
 #[tokio::test]
 async fn sigv4_headers_are_broker_owned() {
     let up = upstream().await;
@@ -564,9 +602,7 @@ async fn sigv4_headers_are_broker_owned() {
         )
         .await;
     assert_eq!(status, 200, "{body}");
-    let echoed: Value = serde_json::from_str(body["body"].as_str().unwrap()).unwrap();
-    let received: HashMap<String, String> =
-        serde_json::from_value(echoed["headers"].clone()).unwrap();
+    let received = up.last_headers();
     assert_ne!(
         received["x-amz-date"], "19700101T000000Z",
         "the agent-supplied signing date must be replaced by the broker's"
@@ -588,6 +624,78 @@ async fn sigv4_headers_are_broker_owned() {
         .await;
     assert_ne!(status, 200, "agent-supplied authorization must be refused");
     let _ = body;
+}
+
+/// HTTP-C3: an agent-supplied `x-amz-*` header that is *not* one of the
+/// broker's own is forwarded and included in `SignedHeaders`. S3 rejects a
+/// request whose `x-amz-*` fields are not covered by the signature, so
+/// forwarding one unsigned would break the call rather than merely leave it
+/// unauthenticated.
+#[tokio::test]
+async fn sigv4_signs_forwarded_amz_headers() {
+    let up = upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    sigv4_connection(&h, "aws", up.port);
+
+    let (status, body) = h
+        .call(
+            "aws",
+            json!({
+                "method": "PUT",
+                "path": "/echo",
+                "headers": { "x-amz-acl": "private" },
+                "body": "object",
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let received = up.last_headers();
+    assert_eq!(received["x-amz-acl"], "private", "the header is forwarded");
+    assert!(
+        received["authorization"].contains("SignedHeaders=host;x-amz-acl;"),
+        "a forwarded x-amz header must be signed: {}",
+        received["authorization"]
+    );
+    assert_eq!(
+        received["authorization"],
+        expected_sigv4("PUT", "/echo", &received, &sha256_hex(b"object")),
+    );
+}
+
+/// HTTP-C3: a SigV4 signature is itself a replayable credential for the
+/// request it covers, so an upstream that reflects request headers must not
+/// hand it back to the agent. Without scrubbing, the agent could replay the
+/// signed request directly against AWS inside the clock-skew window, escaping
+/// the audit, rate limit, and confirmation the broker exists to impose.
+#[tokio::test]
+async fn a_reflected_sigv4_signature_is_scrubbed() {
+    let up = upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    sigv4_connection(&h, "aws", up.port);
+
+    // `/echo` reflects every request header into its response body.
+    let (status, body) = h
+        .call("aws", json!({ "method": "GET", "path": "/echo" }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let signature = up.last_headers()["authorization"].clone();
+    let signature_hex = signature.rsplit_once("Signature=").unwrap().1.to_string();
+    let relayed = body.to_string();
+
+    assert!(
+        !relayed.contains(&signature),
+        "the signature was reflected back to the agent: {relayed}"
+    );
+    assert!(
+        !relayed.contains(&signature_hex),
+        "the bare signature hex was reflected back to the agent: {relayed}"
+    );
+    // The access key ID is an identifier, not a credential: it stays legible
+    // so IAM responses that legitimately mention key IDs are not corrupted.
+    assert!(
+        relayed.contains(AWS_ACCESS_KEY) || relayed.contains("[REDACTED]"),
+        "the reflection was relayed in some form: {relayed}"
+    );
 }
 
 /* ---------------------------- API-1: redaction ---------------------------- */

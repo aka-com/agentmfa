@@ -334,12 +334,19 @@ pub(crate) struct Sigv4Credentials {
 /// `x-amz-date`, `x-amz-content-sha256`, and the session token when the
 /// credentials are temporary. Values derived from credential material are
 /// marked sensitive.
+///
+/// `forwarded` is the agent-supplied header set that will ride this hop, with
+/// the broker-owned fields already removed. Any `x-amz-*` field in it is
+/// signed too: S3 rejects a request whose `x-amz-*` headers are not covered
+/// by `SignedHeaders`, so forwarding one unsigned would make the call fail
+/// rather than merely go unauthenticated.
 fn sigv4_hop_headers(
     credentials: &Sigv4Credentials,
     method: &Method,
     url: &Url,
     payload_hash: &str,
-) -> Result<Vec<(HeaderName, HeaderValue)>, String> {
+    forwarded: &HeaderMap,
+) -> Result<SignedHop, String> {
     // Sign the Host value reqwest will send: `url` never carries a
     // scheme-default port (the url crate normalizes those away), so an
     // explicit port here is a non-default one that rides the header too.
@@ -354,6 +361,16 @@ fn sigv4_hop_headers(
         ("x-amz-content-sha256".to_string(), payload_hash.to_string()),
         ("x-amz-date".to_string(), amz_date.clone()),
     ];
+    for (name, value) in forwarded {
+        let name = name.as_str();
+        if !name.starts_with("x-amz-") {
+            continue;
+        }
+        let value = value
+            .to_str()
+            .map_err(|_| format!("forwarded header {name:?} is not signable text"))?;
+        signed.push((name.to_string(), value.to_string()));
+    }
     if let Some(token) = &credentials.session_token {
         signed.push(("x-amz-security-token".to_string(), token.to_string()));
     }
@@ -395,7 +412,17 @@ fn sigv4_hop_headers(
             sensitive(token)?,
         ));
     }
-    Ok(headers)
+    Ok(SignedHop {
+        headers,
+        authorization: Zeroizing::new(signature.authorization),
+    })
+}
+
+/// One hop's signed headers, plus the `Authorization` value so the caller can
+/// register it for response redaction.
+struct SignedHop {
+    headers: Vec<(HeaderName, HeaderValue)>,
+    authorization: Zeroizing<String>,
 }
 
 /// Best-effort response scrubber for reflected credentials. This deliberately
@@ -497,14 +524,17 @@ impl Redactions {
                 }
             }
             RenderedInjection::Sigv4(credentials) => {
-                // The signature itself changes per hop and never appears in
-                // responses; the durable secrets are the secret key and the
-                // session token. The access key ID is deliberately not a
+                // The session token is a bearer credential and must never be
+                // reflected back. The access key ID is deliberately *not* a
                 // needle: it is an identifier, not a credential, and IAM
                 // responses legitimately contain access key IDs — scrubbing
-                // them would corrupt those bodies the same way the Bearer
-                // scheme word once did.
-                redactions.add_component(&*credentials.secret_key);
+                // them would corrupt those bodies the same way treating the
+                // `Bearer` scheme word as a secret once did.
+                //
+                // The secret key is never transmitted, so it cannot be
+                // reflected; the reflectable artifact is the per-hop
+                // signature, which `add_signature` registers as each hop is
+                // signed.
                 if let Some(token) = &credentials.session_token {
                     redactions.add_component(&**token);
                 }
@@ -519,6 +549,23 @@ impl Redactions {
             return;
         }
         self.needles.push(Zeroizing::new(value.to_string()));
+    }
+
+    /// Register a hop's `Authorization` value so a reflecting upstream cannot
+    /// hand the agent a live signature.
+    ///
+    /// A SigV4 signature is replayable on its own: an upstream that echoes
+    /// request headers (a debug route, an error page quoting the header) would
+    /// otherwise give the agent a credential it could replay directly against
+    /// AWS inside the clock-skew window, bypassing the audit, rate limit, and
+    /// confirmation this broker exists to impose. Both the whole header value
+    /// and the bare signature hex are needles, since a reflection may quote
+    /// either. Called per hop, because each hop signs afresh.
+    fn add_signature(&mut self, authorization: &str) {
+        self.add(authorization);
+        if let Some((_, signature)) = authorization.rsplit_once("Signature=") {
+            self.add_component(signature);
+        }
     }
 
     fn add_component(&mut self, value: impl AsRef<str>) {
@@ -1536,12 +1583,12 @@ impl HttpExecution {
                 RenderedInjection::Sigv4(credentials) => {
                     // Signed fresh on every hop: a redirect changes the URI
                     // (and possibly the method), which invalidates the
-                    // previous hop's signature. The broker owns the
-                    // authentication material on a signer connection, so
-                    // agent-supplied copies of the signed headers are
-                    // dropped rather than left to corrupt the canonical
-                    // form (`authorization` is already reserved upstream
-                    // of here).
+                    // previous hop's signature. The broker owns the fields
+                    // that carry the authentication itself, so agent-supplied
+                    // copies of those are dropped rather than left to corrupt
+                    // the canonical form (`authorization` is already reserved
+                    // upstream of here). Other `x-amz-*` fields are the
+                    // agent's to set and are signed as they stand.
                     let mut headers = self.headers.clone();
                     for name in ["x-amz-date", "x-amz-content-sha256", "x-amz-security-token"] {
                         headers.remove(name);
@@ -1553,15 +1600,17 @@ impl HttpExecution {
                     } else {
                         crate::sigv4::UNSIGNED_PAYLOAD.to_string()
                     };
-                    let hop_headers =
-                        sigv4_hop_headers(credentials, &method, &current, &payload_hash).map_err(
-                            |error| broker_error(500, ErrorReason::CredentialRenderFailed, error),
-                        )?;
+                    let hop =
+                        sigv4_hop_headers(credentials, &method, &current, &payload_hash, &headers)
+                            .map_err(|error| {
+                                broker_error(500, ErrorReason::CredentialRenderFailed, error)
+                            })?;
+                    redactions.add_signature(&hop.authorization);
                     let mut hop_request = upstream_client
                         .request(method.clone(), current.clone())
                         .timeout(per_request_timeout)
                         .headers(headers);
-                    for (name, value) in hop_headers {
+                    for (name, value) in hop.headers {
                         hop_request = hop_request.header(name, value);
                     }
                     request = hop_request;
@@ -1791,15 +1840,16 @@ pub async fn test_upstream(
             upstream_client.request(Method::GET, url.clone())
         }
         RenderedInjection::Sigv4(credentials) => {
-            let headers = sigv4_hop_headers(
+            let hop = sigv4_hop_headers(
                 credentials,
                 &Method::GET,
                 &url,
                 crate::sigv4::EMPTY_PAYLOAD_SHA256,
+                &HeaderMap::new(),
             )
             .map_err(TestError::from)?;
             let mut request = upstream_client.request(Method::GET, url.clone());
-            for (name, value) in headers {
+            for (name, value) in hop.headers {
                 request = request.header(name, value);
             }
             request

@@ -1876,13 +1876,16 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 }
                 None => None,
             };
+            // Host before template, so a bare `--kind api` still names
+            // `--host` as the first thing missing.
+            let host = require("host", &args.host)?;
             let template = if signer.is_some() {
                 String::new()
             } else {
                 require("template", &args.template)?
             };
             Ok(ConnectionConfig::Api {
-                host: require("host", &args.host)?,
+                host,
                 scheme: args.scheme.clone().unwrap_or_else(|| "https".into()),
                 port: args.port,
                 trusted_ca_bundle_path: args.ca_bundle.clone(),
@@ -4947,6 +4950,55 @@ mod tests {
         // misunderstanding worth naming, not ignoring.
         a.secret = Some("KEY".into());
         assert!(conn_config(&a).unwrap_err().contains("--secret"));
+    }
+
+    #[test]
+    fn api_builds_a_sigv4_signer_instead_of_a_template() {
+        let mut a = args(ConnKind::Api);
+        a.host = Some("s3.amazonaws.com".into());
+        a.sigv4_region = Some("us-east-1".into());
+        // The region alone is not enough: each companion flag is named.
+        assert!(conn_config(&a).unwrap_err().contains("--sigv4-service"));
+        a.sigv4_service = Some("s3".into());
+        assert!(conn_config(&a)
+            .unwrap_err()
+            .contains("--sigv4-access-key-ref"));
+        a.sigv4_access_key_ref = Some("AWS_ACCESS_KEY_ID".into());
+        assert!(conn_config(&a)
+            .unwrap_err()
+            .contains("--sigv4-secret-key-ref"));
+        a.sigv4_secret_key_ref = Some("AWS_SECRET_ACCESS_KEY".into());
+        // A signer connection needs no --template and renders an empty one.
+        let config = conn_config(&a).unwrap();
+        assert!(matches!(
+            &config,
+            ConnectionConfig::Api {
+                template,
+                signer: Some(SignerSpec::AwsSigv4 { region, service, .. }),
+                ..
+            } if template.is_empty() && region == "us-east-1" && service == "s3"
+        ));
+        // The two injection mechanisms are mutually exclusive at the flag
+        // level too, rather than being caught only by the store.
+        a.template = Some("Authorization: Bearer {{KEY}}".into());
+        assert!(conn_config(&a).unwrap_err().contains("--template"));
+    }
+
+    #[test]
+    fn api_carries_optional_client_certificate_paths() {
+        let mut a = args(ConnKind::Api);
+        a.host = Some("api.internal".into());
+        a.template = Some("Authorization: Bearer {{KEY}}".into());
+        a.client_cert = Some("/etc/client.pem".into());
+        a.client_key = Some("/etc/client.key".into());
+        assert!(matches!(
+            conn_config(&a).unwrap(),
+            ConnectionConfig::Api {
+                client_cert_path: Some(ref cert),
+                client_key_path: Some(ref key),
+                ..
+            } if cert == "/etc/client.pem" && key == "/etc/client.key"
+        ));
     }
 
     #[test]
