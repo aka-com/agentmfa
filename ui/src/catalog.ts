@@ -450,7 +450,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'credentials',
     name: 'Saved credentials',
-    icon: 'keyRound',
+    icon: 'key',
     description: 'API keys, passwords, and private keys in your Keychain',
     section: 'Secrets',
     via: 'builtin',

@@ -26,7 +26,7 @@ import {
   Info,
   RadioTower,
   Terminal,
-  KeyRound,
+  Key,
   Library,
   List,
   Lock,
@@ -62,7 +62,7 @@ import {
 import type { IconDefinition } from './icon';
 
 export const LUCIDE_ICONS: Record<string, IconDefinition> = {
-  appIcon: { kind: 'lucide', node: KeyRound, size: 15 },
+  appIcon: { kind: 'lucide', node: Key, size: 15 },
   bookOpen: { kind: 'lucide', node: BookOpen, size: 15 },
   bot: { kind: 'lucide', node: Bot, size: 15 },
   botMessageSquare: { kind: 'lucide', node: BotMessageSquare, size: 15 },
@@ -95,7 +95,7 @@ export const LUCIDE_ICONS: Record<string, IconDefinition> = {
   info: { kind: 'lucide', node: Info, size: 12 },
   terminal: { kind: 'lucide', node: Terminal, size: 15 },
   radioTower: { kind: 'lucide', node: RadioTower, size: 15 },
-  keyRound: { kind: 'lucide', node: KeyRound, size: 12 },
+  key: { kind: 'lucide', node: Key, size: 12 },
   library: { kind: 'lucide', node: Library, size: 15 },
   list: { kind: 'lucide', node: List, size: 15 },
   lock: { kind: 'lucide', node: Lock, size: 15 },
