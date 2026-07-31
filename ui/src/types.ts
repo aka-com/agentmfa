@@ -90,6 +90,16 @@ export interface IssuedEndpoint {
   expires_in_secs?: number | null;
 }
 
+/** A dispatch-time request signer, mirrored from `SignerDto`. */
+export interface SignerInfo {
+  algorithm: string;
+  region: string;
+  service: string;
+  access_key_ref: string;
+  secret_key_ref: string;
+  session_token_ref?: string | null;
+}
+
 export interface ConnectionSummary {
   id: string;
   name: string;
@@ -123,6 +133,16 @@ export interface ConnectionSummary {
   trusted_ca_bundle_path: string | null;
   /** Set when the credential is a BYO-app OAuth token set (never tokens). */
   oauth_spec?: { auth_url: string; token_url: string; client_id: string; scopes: string[] } | null;
+  /**
+   * Set when the connection signs each request at dispatch time (AWS SigV4)
+   * instead of injecting a template. Credential references only — the key
+   * material never reaches the webview.
+   */
+  signer?: SignerInfo | null;
+  /** PEM client-certificate chain presented on the upstream TLS leg. */
+  client_cert_path?: string | null;
+  /** PEM private key for client_cert_path. */
+  client_key_path?: string | null;
   /**
    * Last-known health, learned passively (brokered calls) and from tests
    * and status checks: 'ok' | 'warning' | 'failed' |
@@ -411,6 +431,16 @@ export interface ConnectionInput {
   host_key_fingerprint?: string | null;
   sslmode?: string | null;
   trusted_ca_bundle_path?: string | null;
+  // API dispatch-time signer: non-secret coordinates plus vault credential
+  // *references* — the four required parts are all-or-nothing.
+  signer_region?: string | null;
+  signer_service?: string | null;
+  signer_access_key_ref?: string | null;
+  signer_secret_key_ref?: string | null;
+  signer_session_token_ref?: string | null;
+  // Upstream mTLS paths, both-or-neither (store-enforced).
+  client_cert_path?: string | null;
+  client_key_path?: string | null;
   url?: string | null;
 }
 

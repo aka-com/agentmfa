@@ -95,6 +95,16 @@ export interface ConnectionDraft {
   sshImportId?: string;
   destination?: string | null;
   authMode?: string;
+  // AWS SigV4 signer fields (authMode 'sigv4'): coordinates plus vault
+  // credential references picked from the saved-secrets list.
+  signerRegion?: string;
+  signerService?: string;
+  signerAccessKeyRef?: string | null;
+  signerSecretKeyRef?: string | null;
+  signerSessionTokenRef?: string | null;
+  // Upstream mTLS paths (Advanced section), both-or-neither.
+  clientCertPath?: string | null;
+  clientKeyPath?: string | null;
   oauthClientId?: string;
   oauthClientSecret?: string;
   oauthAuthUrl?: string;

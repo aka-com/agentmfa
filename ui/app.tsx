@@ -1725,8 +1725,13 @@ function connectionFactRows(c: ConnectionSummary): Array<[string, string]> {
   } else if (c.host) {
     rows.push(['Server', `${c.scheme ? `${c.scheme}://` : ''}${c.host}`]);
   }
-  if (c.secret_names.length) rows.push(['Credential', c.secret_names.join(', ')]);
+  if (c.signer) {
+    rows.push(['Credential',
+      `AWS SigV4 (${c.signer.region} · ${c.signer.service}), signs with ${
+        c.secret_names.length ? c.secret_names.join(', ') : 'vault credentials'}`]);
+  } else if (c.secret_names.length) rows.push(['Credential', c.secret_names.join(', ')]);
   else if (c.oauth) rows.push(['Credential', 'OAuth, renewed by AgentMFA']);
+  if (c.client_cert_path) rows.push(['Client certificate', c.client_cert_path]);
   return rows;
 }
 
@@ -3966,6 +3971,9 @@ async function connectionDraftFromImport(
 // behind the "Advanced" disclosure, so opening the sheet shows what is set.
 function draftUsesAdvancedFields(d: ConnectionDraft, t: ConnectionType): boolean {
   if (t === 'ssh') return Boolean((d.hostKeyFingerprint || '').trim());
+  if (t === 'api' && ((d.clientCertPath || '').trim() || (d.clientKeyPath || '').trim())) {
+    return true;
+  }
   if (t === 'pg' || t === 'api') return Boolean((d.pgCaBundlePath || '').trim());
   return false;
 }
@@ -4299,6 +4307,24 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
             most APIs answer without ever checking the credential.
           </div>
         </div>
+        <div className="f-row" key="api-client-cert">
+          <label htmlFor="f-api-client-cert">Client certificate <span className="label-detail">(optional)</span></label>
+          <input id="f-api-client-cert" className={fieldCls('clientCertPath')} placeholder="/path/to/client.pem"
+            value={d.clientCertPath ?? ''}
+            onChange={(e) => setDraftField('clientCertPath', 'clientCertPath', e.currentTarget.value)} />
+          <FieldError k="clientCertPath" />
+        </div>
+        <div className="f-row" key="api-client-key">
+          <label htmlFor="f-api-client-key">Client certificate key</label>
+          <input id="f-api-client-key" className={fieldCls('clientKeyPath')} placeholder="/path/to/client-key.pem"
+            value={d.clientKeyPath ?? ''}
+            onChange={(e) => setDraftField('clientKeyPath', 'clientKeyPath', e.currentTarget.value)} />
+          <FieldError k="clientKeyPath" />
+          <div className="rule-note">
+            Presented to the upstream on the TLS handshake (mTLS). Configure
+            the certificate and its key together.
+          </div>
+        </div>
       </>
     );
   }
@@ -4334,6 +4360,24 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
   // A single saved reference maps cleanly to the ordinary chooser. Composed
   // templates remain custom authentication because one picker cannot express
   // several independently bound credentials.
+  } else if (editing && t === 'api' && conn?.signer) {
+    // A signed connection has no injected credential to choose or template
+    // to edit. Show the signer; an edit that keeps the pinned target keeps
+    // it (the backend re-attaches an omitted signer), while retargeting
+    // drops it and the connection must be re-created.
+    const signer = conn.signer;
+    fields.push(
+      <div className="f-row" key="auth">
+        <label>Authentication</label>
+        <input value={`AWS SigV4 (${signer.region} · ${signer.service})`}
+          readOnly aria-readonly="true" />
+        <div className="rule-note">
+          Signs each request with {signer.access_key_ref} / {signer.secret_key_ref}
+          {signer.session_token_ref ? ` and session token ${signer.session_token_ref}` : ''}.
+          Changing the pinned host drops the signer.
+        </div>
+      </div>,
+    );
   } else if (editing && t === 'api') {
     const credentialNames = conn?.secret_names ?? [];
     if (credentialNames.length <= 1) {
@@ -4376,6 +4420,9 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       ...(mcpAdd ? [['oauth', 'Sign in with your account (OAuth)'] as [string, string]] : []),
       ['bearer', 'Bearer token'], ['header', 'Custom header'],
       ...(t === 'api' ? [['query', 'Query parameter'] as [string, string]] : []),
+      // Dispatch-time request signing: no injected credential at all — the
+      // broker signs each request with vault-referenced keys (AWS APIs).
+      ...(!mcpAdd ? [['sigv4', 'AWS SigV4 request signing'] as [string, string]] : []),
       // Plain REST rows with documented OAuth endpoints offer a browser
       // sign-in against the user's own OAuth app (BYO-app, loopback PKCE).
       ...(oauthPreset ? [['oauth', 'Sign in with your browser (your OAuth app)'] as [string, string]] : []),
@@ -4482,7 +4529,54 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
         </div>,
       );
     }
-    if (modeValue === 'advanced') {
+    if (modeValue === 'sigv4') {
+      const refSelect = (
+        id: string,
+        label: ReactNode,
+        errKey: string,
+        value: string | null | undefined,
+        optional: boolean,
+      ): ReactNode => (
+        <div className="f-row" key={id}>
+          <label htmlFor={id}>{label}</label>
+          <CustomSelect id={id} errCls={fieldCls(errKey)}
+            options={[
+              ['', optional ? 'None' : 'Select a credential…'],
+              ...state.secrets.map((secret) => [secret.name, secret.name] as [string, string]),
+            ]}
+            selectedValue={value ?? ''} />
+          <FieldError k={errKey} />
+        </div>
+      );
+      fields.push(
+        <div className="rule-note" key="sigv4-note">
+          The broker signs each request with these keys at dispatch time; no
+          credential is ever injected into the request itself. Save the access
+          key ID and secret access key under Secrets first.
+        </div>,
+        <div className="f-row" key="sigv4-region">
+          <label htmlFor="c-signer-region">Region</label>
+          <input id="c-signer-region" className={fieldCls('signerRegion')} placeholder="us-east-1"
+            value={d.signerRegion ?? ''}
+            onChange={(e) => setDraftField('signerRegion', 'signerRegion', e.currentTarget.value)} />
+          <FieldError k="signerRegion" />
+        </div>,
+        <div className="f-row" key="sigv4-service">
+          <label htmlFor="c-signer-service">Service</label>
+          <input id="c-signer-service" className={fieldCls('signerService')} placeholder="s3"
+            value={d.signerService ?? ''}
+            onChange={(e) => setDraftField('signerService', 'signerService', e.currentTarget.value)} />
+          <FieldError k="signerService" />
+        </div>,
+        refSelect('c-signer-access', 'Access key ID credential', 'signerAccessKeyRef',
+          d.signerAccessKeyRef, false),
+        refSelect('c-signer-secret', 'Secret access key credential', 'signerSecretKeyRef',
+          d.signerSecretKeyRef, false),
+        refSelect('c-signer-token',
+          <>Session token credential <span className="label-detail">(optional)</span></>,
+          'signerSessionTokenRef', d.signerSessionTokenRef, true),
+      );
+    } else if (modeValue === 'advanced') {
       fields.push(
         <div key="auth-template">{templateField('Authorization: Bearer {{TOKEN_NAME}}',
           <div className="rule-note">References credentials by name using <code>{'{{ … }}'}</code>. Use this for Basic auth or composed credentials.</div>)}</div>,
@@ -4509,8 +4603,10 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
   if (apiTlsFields || pgTlsFields || sshHostKeyField) {
     // Force the section open when one of its fields has a validation error,
     // so the inline message (and the focused input) is visible.
-    const advancedError = ['hostKeyFingerprint', 'pgCaBundlePath', 'testPath']
-      .some((key) => state.sheetErrors[key]);
+    const advancedError = [
+      'hostKeyFingerprint', 'pgCaBundlePath', 'testPath',
+      'clientCertPath', 'clientKeyPath',
+    ].some((key) => state.sheetErrors[key]);
     const advOpen = state.connAdvancedOpen || advancedError;
     fields.push(
       <div className="adv-collapse" key="advanced">
@@ -5418,13 +5514,14 @@ async function saveConn(): Promise<void> {
   }
   const mcpOauthApp = usesOauth && d.entryId
     ? catalogEntryById(d.entryId)?.mcpTemplate?.oauthApp : undefined;
+  const sigv4 = adding && t === 'api' && !mcpAdd && authMode === 'sigv4';
   const usesRecipe = adding && t === 'api'
-    && authMode !== 'advanced' && !usesOauth && !byoOauth;
+    && authMode !== 'advanced' && authMode !== 'sigv4' && !usesOauth && !byoOauth;
   const editingApiCredential = !adding && t === 'api'
     && !existingConnection?.oauth
     && !existingConnection?.oauth_spec
     && (existingConnection?.secret_names.length ?? 0) <= 1;
-  const needsCredentialChoice = !usesOauth && !byoOauth && (
+  const needsCredentialChoice = !usesOauth && !byoOauth && !sigv4 && (
     (adding && !(t === 'api' && authMode === 'advanced')) ||
     (!adding && t !== 'api') ||
     editingApiCredential);
@@ -5471,12 +5568,29 @@ async function saveConn(): Promise<void> {
     advancedTemplateRequired: t === 'api' && authMode === 'advanced',
     injectionTemplate,
     editingTemplateRequired: !adding && t === 'api'
+      // A signed connection has no injection template; the backend
+      // re-attaches the omitted signer on a non-retargeting edit.
+      && !existingConnection?.signer
       && (editingApiCredential
         ? secretSource !== 'none'
         : Boolean(existingConnection?.secret_names.length)
           || d.template !== existingConnection?.template),
   });
   Object.assign(errs, validation.errors);
+  if (sigv4) {
+    if (!(d.signerRegion || '').trim()) errs.signerRegion = 'Enter the signing region.';
+    if (!(d.signerService || '').trim()) errs.signerService = 'Enter the signing service.';
+    if (!d.signerAccessKeyRef) errs.signerAccessKeyRef = 'Pick the access key ID credential.';
+    if (!d.signerSecretKeyRef) errs.signerSecretKeyRef = 'Pick the secret access key credential.';
+  }
+  if (t === 'api') {
+    const certPath = (d.clientCertPath || '').trim();
+    const keyPath = (d.clientKeyPath || '').trim();
+    if (Boolean(certPath) !== Boolean(keyPath)) {
+      errs[certPath ? 'clientKeyPath' : 'clientCertPath'] =
+        'Configure the client certificate and its key together.';
+    }
+  }
   const port = validation.port;
   if (Object.keys(errs).length || toolNameTaken || newSecretNameTaken) {
     state.sheetErrors = errs;
@@ -5552,10 +5666,19 @@ async function saveConn(): Promise<void> {
     input.host = apiOrigin!.host;
     input.scheme = apiOrigin!.scheme;
     input.port = apiOrigin!.port;
-    input.template = injectionTemplate;
+    input.template = sigv4 ? '' : injectionTemplate;
     input.mcp_path = mcpPath;
     input.trusted_ca_bundle_path = (d.pgCaBundlePath || '').trim() || null;
     input.test_path = (d.testPath || '').trim() || null;
+    input.client_cert_path = (d.clientCertPath || '').trim() || null;
+    input.client_key_path = (d.clientKeyPath || '').trim() || null;
+    if (sigv4) {
+      input.signer_region = (d.signerRegion || '').trim();
+      input.signer_service = (d.signerService || '').trim();
+      input.signer_access_key_ref = d.signerAccessKeyRef;
+      input.signer_secret_key_ref = d.signerSecretKeyRef;
+      input.signer_session_token_ref = d.signerSessionTokenRef || null;
+    }
   } else if (t === 'pg') {
     input.host = (d.host || '').trim();
     input.port = port;
@@ -6322,6 +6445,9 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         hostKeyFingerprint: c.host_key_fingerprint,
         sslmode: c.sslmode || 'verify-full', pgCaBundlePath: c.trusted_ca_bundle_path,
         testPath: c.test_path ?? null,
+        // Restated on save so a non-retargeting edit keeps the mTLS pair.
+        clientCertPath: c.client_cert_path ?? null,
+        clientKeyPath: c.client_key_path ?? null,
         secretId: null,
         secretSource: c.secret_names.length ? 'existing' : 'none' };
       // best-effort: prefill single-secret binding by name→id
@@ -6421,6 +6547,9 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       const errKey = ERR_KEY_BY_INPUT[menuId as keyof typeof ERR_KEY_BY_INPUT];
       if (errKey) delete state.sheetErrors[errKey];
       if (menuId === 'c-auth-mode') state.draft.authMode = id;
+      else if (menuId === 'c-signer-access') state.draft.signerAccessKeyRef = id || null;
+      else if (menuId === 'c-signer-secret') state.draft.signerSecretKeyRef = id || null;
+      else if (menuId === 'c-signer-token') state.draft.signerSessionTokenRef = id || null;
       else if (menuId === 'f-sslmode') {
         state.draft.sslmode = id;
         state.draft.sslmodeIsAutomatic = false;
@@ -7370,6 +7499,8 @@ function handleAppKeyDown(e: KeyboardEvent): void {
 const ERR_KEY_BY_INPUT = {
   'f-sslmode': 'sslmode', 'c-secret': 'secret', 'c-auth-mode': 'authMode',
   'c-identity-file': 'newSecretValue',
+  'c-signer-access': 'signerAccessKeyRef', 'c-signer-secret': 'signerSecretKeyRef',
+  'c-signer-token': 'signerSessionTokenRef',
 };
 
 // Form fields are controlled React inputs; their onChange handlers own

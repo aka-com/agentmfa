@@ -586,6 +586,18 @@ pub struct ConnectionInput {
     pub destination: Option<String>,
     pub sslmode: Option<String>,
     pub trusted_ca_bundle_path: Option<String>,
+    // API dispatch-time signer (UI-30): non-secret SigV4 coordinates plus
+    // vault credential *references*. The four required parts are
+    // all-or-nothing; blanks read as absent and the store validates the rest
+    // (region/service present, refs resolvable, no template/OAuth/MCP mix).
+    pub signer_region: Option<String>,
+    pub signer_service: Option<String>,
+    pub signer_access_key_ref: Option<String>,
+    pub signer_secret_key_ref: Option<String>,
+    pub signer_session_token_ref: Option<String>,
+    // Upstream mTLS: PEM chain and key paths, both-or-neither (store-enforced).
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
     // WS
     // pg/ssh single-secret binding (by id)
     pub secret_id: Option<String>,
@@ -641,8 +653,35 @@ fn parse_pg_sslmode(value: Option<&str>) -> CmdResult<PgSslMode> {
     }
 }
 
+/// Trimmed, with blank treated as absent — form fields arrive as empty
+/// strings when untouched.
+fn present(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 impl ConnectionInput {
-    fn into_spec(self) -> FormResult<ConnectionSpec> {
+    fn into_spec(mut self) -> FormResult<ConnectionSpec> {
+        let signer = match (
+            present(self.signer_region.take()),
+            present(self.signer_service.take()),
+            present(self.signer_access_key_ref.take()),
+            present(self.signer_secret_key_ref.take()),
+        ) {
+            (Some(region), Some(service), Some(access_key_ref), Some(secret_key_ref)) => {
+                Some(aka_core::types::SignerSpec::AwsSigv4 {
+                    region,
+                    service,
+                    access_key_ref,
+                    secret_key_ref,
+                    session_token_ref: present(self.signer_session_token_ref.take()),
+                })
+            }
+            _ => None,
+        };
+        let client_cert_path = present(self.client_cert_path.take());
+        let client_key_path = present(self.client_key_path.take());
         let config = match self.kind.as_str() {
             "api" => ConnectionConfig::Api {
                 host: self.host.unwrap_or_default(),
@@ -682,15 +721,12 @@ impl ConnectionInput {
                     }
                     _ => None,
                 },
-                // Dispatch-time signing and upstream mTLS are configured via
-                // the CLI/manage plane; the desktop form does not offer them
-                // yet (BACKLOG UI-30). A connection created here cannot carry
-                // either, and an edit made here would drop them, which is why
-                // `inherit_signer_and_mtls` re-attaches them for an edit that
-                // leaves the pinned target alone.
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+                // An edit that omits these keeps the existing values via
+                // `inherit_signer_and_mtls`, as long as the pinned target is
+                // unchanged; a retargeting edit must restate them.
+                signer,
+                client_cert_path,
+                client_key_path,
             },
             "pg" => ConnectionConfig::Pg {
                 host: self.host.unwrap_or_default(),
@@ -2010,6 +2046,13 @@ mod tests {
             destination: None,
             sslmode: None,
             trusted_ca_bundle_path: None,
+            signer_region: None,
+            signer_service: None,
+            signer_access_key_ref: None,
+            signer_secret_key_ref: None,
+            signer_session_token_ref: None,
+            client_cert_path: None,
+            client_key_path: None,
             secret_id: None,
             new_secret_name: None,
             new_secret_value: None,
@@ -2066,6 +2109,13 @@ mod tests {
             destination: None,
             sslmode: None,
             trusted_ca_bundle_path: None,
+            signer_region: None,
+            signer_service: None,
+            signer_access_key_ref: None,
+            signer_secret_key_ref: None,
+            signer_session_token_ref: None,
+            client_cert_path: None,
+            client_key_path: None,
             secret_id: None,
             new_secret_name: None,
             new_secret_value: None,
@@ -2190,6 +2240,66 @@ mod tests {
             shell_quoted("/tmp/a \"quoted\" $socket"),
             "\"/tmp/a \\\"quoted\\\" \\$socket\""
         );
+    }
+
+    #[test]
+    fn api_input_builds_a_signer_only_from_a_complete_quartet() {
+        let input = |region: &str, token: &str| -> ConnectionInput {
+            serde_json::from_value(serde_json::json!({
+                "name": "aws",
+                "type": "api",
+                "host": "s3.amazonaws.com",
+                "signer_region": region,
+                "signer_service": "s3",
+                "signer_access_key_ref": "AWS_ACCESS_KEY_ID",
+                "signer_secret_key_ref": "AWS_SECRET_ACCESS_KEY",
+                "signer_session_token_ref": token,
+                "client_cert_path": "  ",
+                "client_key_path": "",
+            }))
+            .unwrap()
+        };
+        let spec = input("eu-west-1", "").into_spec().unwrap();
+        let aka_core::types::ConnectionConfig::Api {
+            signer,
+            client_cert_path,
+            client_key_path,
+            ..
+        } = spec.config
+        else {
+            panic!("expected an API config");
+        };
+        assert_eq!(
+            signer,
+            Some(aka_core::types::SignerSpec::AwsSigv4 {
+                region: "eu-west-1".into(),
+                service: "s3".into(),
+                access_key_ref: "AWS_ACCESS_KEY_ID".into(),
+                secret_key_ref: "AWS_SECRET_ACCESS_KEY".into(),
+                session_token_ref: None,
+            })
+        );
+        // Blank paths read as absent rather than as empty-string paths.
+        assert_eq!(client_cert_path, None);
+        assert_eq!(client_key_path, None);
+
+        let with_token = input("eu-west-1", "AWS_SESSION_TOKEN").into_spec().unwrap();
+        let aka_core::types::ConnectionConfig::Api { signer, .. } = with_token.config else {
+            panic!("expected an API config");
+        };
+        assert!(matches!(
+            signer,
+            Some(aka_core::types::SignerSpec::AwsSigv4 {
+                session_token_ref: Some(token), ..
+            }) if token == "AWS_SESSION_TOKEN"
+        ));
+
+        // A blank required part means no signer at all — never a partial one.
+        let partial = input("  ", "").into_spec().unwrap();
+        let aka_core::types::ConnectionConfig::Api { signer, .. } = partial.config else {
+            panic!("expected an API config");
+        };
+        assert_eq!(signer, None);
     }
 
     #[test]

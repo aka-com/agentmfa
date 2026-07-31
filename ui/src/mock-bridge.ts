@@ -143,6 +143,12 @@ interface MockConnection {
   trusted_ca_bundle_path?: string | null;
   url?: string | null;
   oauth_spec?: { auth_url: string; token_url: string; client_id: string; scopes: string[] } | null;
+  signer?: {
+    algorithm: string; region: string; service: string;
+    access_key_ref: string; secret_key_ref: string; session_token_ref?: string | null;
+  } | null;
+  client_cert_path?: string | null;
+  client_key_path?: string | null;
 }
 
 /** Per-connection agent access; a missing record means the default
@@ -594,6 +600,9 @@ function connDto(c: MockConnection): ConnectionSummary {
     destination: c.destination || null,
     sslmode: c.sslmode || null,
     trusted_ca_bundle_path: c.trusted_ca_bundle_path || null,
+    signer: c.signer || null,
+    client_cert_path: c.client_cert_path || null,
+    client_key_path: c.client_key_path || null,
   };
 }
 function connTarget(c: MockConnection): string {
@@ -975,7 +984,21 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         db.secrets.push(secret);
         i.secret_id = secret.id;
       }
-      const secret_names = i.type === 'api'
+      // Mirrors the core: the four required signer parts are all-or-nothing,
+      // and the signer's credential references count as the bound secrets.
+      const signer = i.type === 'api'
+        && i.signer_region && i.signer_service
+        && i.signer_access_key_ref && i.signer_secret_key_ref
+        ? {
+            algorithm: 'aws_sigv4', region: i.signer_region, service: i.signer_service,
+            access_key_ref: i.signer_access_key_ref, secret_key_ref: i.signer_secret_key_ref,
+            session_token_ref: i.signer_session_token_ref ?? null,
+          }
+        : null;
+      const secret_names = signer
+        ? [signer.access_key_ref, signer.secret_key_ref,
+           ...(signer.session_token_ref ? [signer.session_token_ref] : [])]
+        : i.type === 'api'
         ? ((i.template ?? '').match(/[A-Z_][A-Z0-9_]*/g) || [])
             .filter((n) => db.secrets.some((s) => s.name === n))
         : [db.secrets.find((s) => s.id === i.secret_id)?.name]
@@ -985,7 +1008,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         destination: i.destination, host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
         host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode,
         trusted_ca_bundle_path: i.trusted_ca_bundle_path, url: i.url,
-        mcp_path: i.mcp_path, test_path: i.test_path });
+        mcp_path: i.mcp_path, test_path: i.test_path,
+        signer, client_cert_path: i.client_cert_path ?? null,
+        client_key_path: i.client_key_path ?? null });
       audit('connectionAdded', `Tool added: ${i.name}`); return;
     }
     case 'edit_connection': {
@@ -1005,11 +1030,18 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (db.connections.some((other) => other.id !== c.id && other.name === i.name)) {
         throw formError('conflict', 'connection_name_taken', 'name', 'That tool name is already in use');
       }
+      const retargeted = i.type === 'api' && (c.host !== i.host || c.scheme !== i.scheme
+        || (c.port ?? null) !== (i.port ?? null));
       Object.assign(c, { name: i.name, host: i.host, scheme: i.scheme, port: i.port,
         destination: i.destination,
         dbname: i.dbname, user: i.user, sslmode: i.sslmode, trusted_ca_bundle_path: i.trusted_ca_bundle_path,
         host_key_fingerprint: i.host_key_fingerprint, url: i.url,
-        template: i.template, mcp_path: i.mcp_path, test_path: i.test_path });
+        template: i.template, mcp_path: i.mcp_path, test_path: i.test_path,
+        client_cert_path: i.client_cert_path ?? (retargeted ? null : c.client_cert_path),
+        client_key_path: i.client_key_path ?? (retargeted ? null : c.client_key_path) });
+      // Mirrors inherit_signer_and_mtls: an omitted signer survives a
+      // non-retargeting edit and is dropped by a retargeting one.
+      if (i.type === 'api' && retargeted) c.signer = null;
       if (i.type !== 'api') {
         c.secret_names = i.secret_id
           ? [db.secrets.find((s) => s.id === i.secret_id)?.name]
