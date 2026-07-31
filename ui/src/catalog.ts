@@ -556,17 +556,23 @@ export function entryForConnection(connection: ConnectionSummary): CatalogEntry 
  *
  * OAuth-managed remote MCP servers are API connections internally, but the
  * edit sheet should keep their catalog identity and hide the mutable
- * credential-template implementation detail.
+ * credential-template implementation detail. BYO-app OAuth has the same core
+ * rename-only rule even though it is not an MCP connection.
  */
 export function connectionEditPresentation(connection: ConnectionSummary): {
   label: string;
   managedMcpOAuth: boolean;
+  renameOnlyOAuth: boolean;
 } {
+  const managedMcpOAuth = connection.type === 'api'
+    && Boolean(connection.mcp_path)
+    && connection.oauth;
   return {
     label: entryForConnection(connection)?.name ?? catalogNameForType(connection.type),
-    managedMcpOAuth: connection.type === 'api'
-      && Boolean(connection.mcp_path)
-      && connection.oauth,
+    managedMcpOAuth,
+    renameOnlyOAuth: managedMcpOAuth || (
+      connection.type === 'api' && Boolean(connection.oauth_spec)
+    ),
   };
 }
 

@@ -76,6 +76,14 @@ export interface ConnectionDraft {
   testPath?: string | null;
   url?: string | null;
   template?: string | null;
+  /**
+   * Last non-empty API template managed by the credential chooser. Kept while
+   * "None" is selected so choosing another credential can restore the
+   * original header/query shape instead of assuming Bearer authentication.
+   */
+  apiCredentialTemplate?: string | null;
+  /** Credential reference currently named by apiCredentialTemplate. */
+  apiCredentialName?: string | null;
   secretId?: string | null;
   secretSource?: 'existing' | 'new' | 'none';
   newSecretName?: string;

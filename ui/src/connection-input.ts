@@ -428,3 +428,77 @@ export function authTemplate(
   }
   throw new Error('Unsupported authentication recipe');
 }
+
+/**
+ * Point an existing one-credential API template at another saved credential.
+ *
+ * Stored templates are already parse-validated by the broker. Rewriting only
+ * reference tokens inside placeholders preserves the chosen header/query
+ * shape and deliberately leaves literal text (including quoted transform
+ * arguments) untouched. A credential-less template has no shape to preserve,
+ * so it adopts the ordinary Bearer form.
+ */
+export function rebindApiCredentialTemplate(
+  template: string,
+  oldName: string | null | undefined,
+  newName: string,
+): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(newName)) {
+    throw new Error('Credential name must be a valid template reference');
+  }
+  if (!template.trim() || !oldName) return authTemplate('api', 'bearer', newName);
+
+  let rewritten = false;
+  const next = template.replace(/\{\{([\s\S]*?)\}\}/g, (placeholder, expression: string) => {
+    const open = expression.indexOf('(');
+    if (open < 0) {
+      if (expression.trim() !== oldName) return placeholder;
+      rewritten = true;
+      return `{{${expression.replace(oldName, newName)}}}`;
+    }
+
+    // Function names are not credential references. Only scan the argument
+    // list, and skip double-quoted literals such as base64(USER ":" PASS).
+    const close = expression.lastIndexOf(')');
+    if (close < open) return placeholder;
+    const args = expression.slice(open + 1, close);
+    let out = '';
+    let index = 0;
+    let quoted = false;
+    while (index < args.length) {
+      const char = args[index];
+      if (quoted && char === '\\' && index + 1 < args.length) {
+        out += char + args[index + 1];
+        index += 2;
+        continue;
+      }
+      if (char === '"') {
+        quoted = !quoted;
+        out += char;
+        index += 1;
+        continue;
+      }
+      if (!quoted && /[A-Za-z_]/.test(char)) {
+        let end = index + 1;
+        while (end < args.length && /[A-Za-z0-9_]/.test(args[end])) end += 1;
+        const token = args.slice(index, end);
+        if (token === oldName) {
+          out += newName;
+          rewritten = true;
+        } else {
+          out += token;
+        }
+        index = end;
+        continue;
+      }
+      out += char;
+      index += 1;
+    }
+    return `{{${expression.slice(0, open + 1)}${out}${expression.slice(close)}}}`;
+  });
+
+  // This can only happen after the user manually changed the advanced
+  // template after opening the sheet. Avoid presenting a chooser selection
+  // that does not match the saved template.
+  return rewritten ? next : authTemplate('api', 'bearer', newName);
+}

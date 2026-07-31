@@ -43,6 +43,7 @@ import {
 } from '/src/util';
 import {
   apiOriginFromParts, authTemplate, defaultConnectionName, parseApiOrigin, parseConnectionImport,
+  rebindApiCredentialTemplate,
   insecureNonLoopbackHttp, initialSecretSource, isLoopbackHost, parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
@@ -3993,6 +3994,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
   const conn = editing ? state.connections.find((c) => c.id === sheetId) : null;
   const editPresentation = conn ? connectionEditPresentation(conn) : null;
   const managedMcpOAuth = Boolean(editPresentation?.managedMcpOAuth);
+  const renameOnlyOAuth = Boolean(editPresentation?.renameOnlyOAuth);
   let draftTarget = null;
   if (editing && conn) {
     if (t === 'pg' || t === 'ssh') {
@@ -4132,11 +4134,11 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       <div className="f-row" key="origin">
         <label htmlFor="f-origin">MCP server URL</label>
         <input id="f-origin" className={fieldCls('origin')} placeholder="https://mcp.example.com/mcp"
-          value={url} readOnly={managedMcpOAuth}
-          aria-readonly={managedMcpOAuth ? 'true' : undefined}
+          value={url} readOnly={renameOnlyOAuth}
+          aria-readonly={renameOnlyOAuth ? 'true' : undefined}
           onChange={(e) => setDraftField('origin', 'origin', e.currentTarget.value)} />
         <FieldError k="origin" />
-        {managedMcpOAuth
+        {renameOnlyOAuth
           ? <div className="rule-note">This OAuth connection is pinned to its MCP server. Add another MCP server to use a different URL.</div>
           : hint ? <div className="rule-note">{hint}</div> : null}
       </div>,
@@ -4147,9 +4149,13 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       <div className="f-row" key="origin">
         <label htmlFor="f-origin">API root</label>
         <input id="f-origin" className={fieldCls('origin')} placeholder="https://api.github.com"
-          value={origin}
+          value={origin} readOnly={renameOnlyOAuth}
+          aria-readonly={renameOnlyOAuth ? 'true' : undefined}
           onChange={(e) => setDraftField('origin', 'origin', e.currentTarget.value)} />
         <FieldError k="origin" />
+        {renameOnlyOAuth
+          ? <div className="rule-note">This OAuth connection can only be renamed. Reconnect it to change its API root or authentication.</div>
+          : null}
       </div>,
     );
   } else if (t === 'ssh') {
@@ -4264,7 +4270,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       </div>
     );
   }
-  if (t === 'api') {
+  if (t === 'api' && !renameOnlyOAuth) {
     apiTlsFields = (
       <>
         <div className="f-row" key="api-ca-bundle">
@@ -4293,40 +4299,59 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       <label htmlFor="c-template">Credential template</label>
       <input id="c-template" className={fieldCls('template')} placeholder={placeholder}
         value={d.template ?? ''}
-        onChange={(e) => setDraftField('template', 'template', e.currentTarget.value)} />
+        onChange={(e) => {
+          if (editing && t === 'api') d.apiCredentialTemplate = e.currentTarget.value;
+          setDraftField('template', 'template', e.currentTarget.value);
+        }} />
       <FieldError k="template" />
       {note}
     </div>
   );
-  // OAuth-managed MCP authentication belongs to the sign-in flow. Keep its
-  // generated secret name and injection template out of the ordinary editor:
-  // reconnect is the only supported way to replace that grant.
-  if (managedMcpOAuth) {
+  // OAuth authentication belongs to the sign-in flow. Keep its generated
+  // secret name and injection template out of the ordinary editor: reconnect
+  // is the only supported way to replace that grant.
+  if (renameOnlyOAuth) {
     fields.push(
       <div className="f-row" key="auth">
         <label>Authentication</label>
-        <input value="OAuth (managed by AgentMFA)" readOnly aria-readonly="true" />
-        <div className="rule-note">{conn?.account ? `Connected account: ${conn.account}. ` : ''}Tokens are stored securely, refreshed automatically, and sent only to this MCP server.</div>
+        <input value={managedMcpOAuth ? 'OAuth (managed by AgentMFA)' : 'OAuth (your app)'}
+          readOnly aria-readonly="true" />
+        <div className="rule-note">
+          {conn?.account ? `Connected account: ${conn.account}. ` : ''}
+          Tokens are stored securely and refreshed automatically. Reconnect to
+          replace this grant; OAuth tools can otherwise only be renamed.
+        </div>
       </div>,
     );
-  // Existing manual API authentication still round-trips every config, but
-  // the implementation template belongs behind an explicit advanced
-  // disclosure rather than defining the connection's product identity.
+  // A single saved reference maps cleanly to the ordinary chooser. Composed
+  // templates remain custom authentication because one picker cannot express
+  // several independently bound credentials.
   } else if (editing && t === 'api') {
-    const credentialNames = conn?.secret_names.join(', ') || '';
+    const credentialNames = conn?.secret_names ?? [];
+    if (credentialNames.length <= 1) {
+      fields.push(
+        <CredentialChooser type={t} allowNew={false} key="chooser" />,
+      );
+    } else {
+      fields.push(
+        <div className="f-row" key="auth">
+          <label>Authentication</label>
+          <input value="Custom authentication" readOnly aria-readonly="true" />
+          <div className="rule-note">
+            Uses {credentialNames.join(', ')}. Edit the composed references below.
+          </div>
+        </div>,
+      );
+    }
     fields.push(
-      <div className="f-row" key="auth">
-        <label>Authentication</label>
-        <input value={credentialNames ? 'Saved credential' : 'No credential'} readOnly aria-readonly="true" />
-        {credentialNames
-          ? <div className="rule-note">Uses {credentialNames}. Advanced authentication can change the saved credential reference.</div>
-          : null}
-      </div>,
       <details className="set-collapse" open={Boolean(state.sheetErrors.template)} key="auth-template">
         <summary>Custom authentication</summary>
         <div className="set-panel">
           {templateField(undefined,
-            <div className="rule-note">References saved credentials by name using <code>{'{{ … }}'}</code>.</div>)}
+            <div className="rule-note">
+              References saved credentials by name using <code>{'{{ … }}'}</code>.
+              Choosing another credential above preserves this header or query shape.
+            </div>)}
         </div>
       </details>,
     );
@@ -5387,9 +5412,14 @@ async function saveConn(): Promise<void> {
     ? catalogEntryById(d.entryId)?.mcpTemplate?.oauthApp : undefined;
   const usesRecipe = adding && t === 'api'
     && authMode !== 'advanced' && !usesOauth && !byoOauth;
+  const editingApiCredential = !adding && t === 'api'
+    && !existingConnection?.oauth
+    && !existingConnection?.oauth_spec
+    && (existingConnection?.secret_names.length ?? 0) <= 1;
   const needsCredentialChoice = !usesOauth && !byoOauth && (
     (adding && !(t === 'api' && authMode === 'advanced')) ||
-    (!adding && t !== 'api'));
+    (!adding && t !== 'api') ||
+    editingApiCredential);
   const secretSource = adding
     ? defaultSecretSource(t, d)
     : (d.secretSource || 'existing');
@@ -5433,8 +5463,10 @@ async function saveConn(): Promise<void> {
     advancedTemplateRequired: t === 'api' && authMode === 'advanced',
     injectionTemplate,
     editingTemplateRequired: !adding && t === 'api'
-      && (Boolean(existingConnection?.secret_names.length)
-        || d.template !== existingConnection?.template),
+      && (editingApiCredential
+        ? secretSource !== 'none'
+        : Boolean(existingConnection?.secret_names.length)
+          || d.template !== existingConnection?.template),
   });
   Object.assign(errs, validation.errors);
   const port = validation.port;
@@ -6274,14 +6306,18 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         mcpPath: c.mcp_path ?? null,
         port: c.port ? String(c.port) : (c.type === 'ssh' ? '22' : '5432'),
         dbname: c.dbname, user: c.user, template: c.template,
+        apiCredentialTemplate: c.type === 'api' ? c.template : null,
+        apiCredentialName: c.type === 'api' && c.secret_names.length === 1
+          ? c.secret_names[0]
+          : null,
         destination: c.destination,
         hostKeyFingerprint: c.host_key_fingerprint,
         sslmode: c.sslmode || 'verify-full', pgCaBundlePath: c.trusted_ca_bundle_path,
         testPath: c.test_path ?? null,
         secretId: null,
-        secretSource: c.type !== 'api' && !c.secret_names.length ? 'none' : 'existing' };
+        secretSource: c.secret_names.length ? 'existing' : 'none' };
       // best-effort: prefill single-secret binding by name→id
-      if (c.type !== 'api' && c.secret_names.length) {
+      if (c.secret_names.length === 1) {
         const s = state.secrets.find((s) => s.name === c.secret_names[0]);
         if (s) state.draft.secretId = s.id;
       }
@@ -6393,6 +6429,32 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'credential-pick':
       state.formMenuOpen = null;
       delete state.sheetErrors.secret;
+      if (state.sheet?.kind === 'edit-conn' && state.connType === 'api') {
+        const connection = state.connections.find((item) => item.id === state.sheet?.id);
+        const editable = connection
+          && !connection.oauth
+          && !connection.oauth_spec
+          && connection.secret_names.length <= 1;
+        if (editable && id === NO_CREDENTIAL_OPTION) {
+          // Retain apiCredentialTemplate separately: switching back from
+          // "None" can restore the existing header/query form.
+          state.draft.template = '';
+          delete state.sheetErrors.template;
+        } else if (editable && id !== NEW_CREDENTIAL_OPTION) {
+          const secret = state.secrets.find((item) => item.id === id);
+          if (secret) {
+            const rebound = rebindApiCredentialTemplate(
+              state.draft.apiCredentialTemplate ?? state.draft.template ?? '',
+              state.draft.apiCredentialName,
+              secret.name,
+            );
+            state.draft.template = rebound;
+            state.draft.apiCredentialTemplate = rebound;
+            state.draft.apiCredentialName = secret.name;
+            delete state.sheetErrors.template;
+          }
+        }
+      }
       if (id === NEW_CREDENTIAL_OPTION) {
         state.draft.secretSource = 'new';
       } else if (id === NO_CREDENTIAL_OPTION) {

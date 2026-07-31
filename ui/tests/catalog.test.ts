@@ -212,6 +212,7 @@ test('connection edits preserve MCP branding and identify managed OAuth authenti
   assert.deepEqual(connectionEditPresentation(notion), {
     label: 'Notion',
     managedMcpOAuth: true,
+    renameOnlyOAuth: true,
   });
 
   const custom = {
@@ -221,6 +222,21 @@ test('connection edits preserve MCP branding and identify managed OAuth authenti
   assert.deepEqual(connectionEditPresentation(custom), {
     label: 'MCP server',
     managedMcpOAuth: false,
+    renameOnlyOAuth: false,
+  });
+
+  assert.deepEqual(connectionEditPresentation({
+    ...conn('api', 'api.example.com', 'BYO OAuth'),
+    oauth_spec: {
+      auth_url: 'https://example.com/authorize',
+      token_url: 'https://example.com/token',
+      client_id: 'client',
+      scopes: [],
+    },
+  }), {
+    label: 'Custom API',
+    managedMcpOAuth: false,
+    renameOnlyOAuth: true,
   });
 });
 

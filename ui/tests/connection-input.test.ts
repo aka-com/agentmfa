@@ -11,6 +11,7 @@ import {
   parseConnectionImport,
   parseApiOrigin,
   quickSetupPlaceholder,
+  rebindApiCredentialTemplate,
   shouldResolveSshImport,
   sshImportFromPreview,
   suggestedSecretName,
@@ -229,4 +230,33 @@ test('builds transparent templates for common authentication recipes', () => {
   assert.equal(suggestedSecretName('prod-db', 'pg'), 'POSTGRES_PASSWORD');
   assert.equal(suggestedSecretName('SSH (localhost)', 'ssh'), 'SSH_KEY');
   assert.equal(suggestedSecretName('github', 'api'), 'GITHUB_TOKEN');
+});
+
+test('rebinds a saved API credential without changing its injection shape', () => {
+  assert.equal(
+    rebindApiCredentialTemplate('X-API-Key: {{ OLD_KEY }}', 'OLD_KEY', 'NEW_KEY'),
+    'X-API-Key: {{ NEW_KEY }}',
+  );
+  assert.equal(
+    rebindApiCredentialTemplate('?token={{url(OLD_KEY)}}', 'OLD_KEY', 'NEW_KEY'),
+    '?token={{url(NEW_KEY)}}',
+  );
+  assert.equal(
+    rebindApiCredentialTemplate(
+      'Authorization: Basic {{base64(OLD_KEY "OLD_KEY" SECOND)}}',
+      'OLD_KEY',
+      'NEW_KEY',
+    ),
+    'Authorization: Basic {{base64(NEW_KEY "OLD_KEY" SECOND)}}',
+    'quoted transform arguments are literals, not credential references',
+  );
+  assert.equal(
+    rebindApiCredentialTemplate('', null, 'NEW_KEY'),
+    'Authorization: Bearer {{NEW_KEY}}',
+  );
+  assert.equal(
+    rebindApiCredentialTemplate('X-Literal: OLD_KEY', 'OLD_KEY', 'NEW_KEY'),
+    'Authorization: Bearer {{NEW_KEY}}',
+    'literal text must not be rewritten or left inconsistent with the chooser',
+  );
 });

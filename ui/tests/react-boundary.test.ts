@@ -219,6 +219,22 @@ test('credential listbox edits invalidate a failed draft-test override', async (
   assert.match(credentialPick, /disarmDraftTestOverride\(\)/);
 });
 
+test('manual API edits use the saved-credential chooser without weakening OAuth edits', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const apiEditFields = app.match(
+    /else if \(editing && t === 'api'\) \{([\s\S]*?)\} else if \(editing\)/,
+  )?.[1];
+  const credentialPick = app.match(/case 'credential-pick':([\s\S]*?)case 'save-conn'/)?.[1];
+
+  assert.ok(apiEditFields, 'manual API edit fields are present');
+  assert.match(apiEditFields, /<CredentialChooser type=\{t\} allowNew=\{false\}/);
+  assert.match(apiEditFields, /credentialNames\.length <= 1/);
+  assert.match(credentialPick || '', /rebindApiCredentialTemplate\(/);
+  assert.match(app, /const renameOnlyOAuth = Boolean\(editPresentation\?\.renameOnlyOAuth\)/);
+  assert.match(app, /readOnly=\{renameOnlyOAuth\}/);
+  assert.match(app, /if \(renameOnlyOAuth\) \{/);
+});
+
 test('creating a credential does not auto-trigger the endpoint confirmation gate', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const postSave = app.match(
