@@ -1359,7 +1359,8 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
       <div className="cat-row-wrap is-soon">
         <div className="cat-row">
           <span className="cat-ico" aria-hidden="true"><Icon markup={ICONS[entry.icon] || ''} /></span>
-          <div className="cat-tx"><b>{entry.name}</b></div>
+          <div className="cat-tx"><b>{entry.name}</b>
+            <span>{entry.description}</span></div>
           <span className="cat-soon" title="Not available yet">Coming soon</span>
         </div>
       </div>
@@ -1407,7 +1408,8 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
     <div className={`cat-row-wrap ${builtin ? 'open' : ''} ${actionMenuOpen ? 'menu-open' : ''}`}>
       <div className="cat-row">
         <span className="cat-ico" aria-hidden="true"><Icon markup={ICONS[entry.icon] || ''} /></span>
-        <div className="cat-tx"><b>{entry.name}</b></div>
+        <div className="cat-tx"><b>{entry.name}</b>
+          <span>{entry.description}</span></div>
         {entry.limitedSupport
           ? <span className="cat-limited" tabIndex={0}
               data-tippy-content={`${entry.name} only accepts OAuth sign-ins from pre-approved clients. Use the API connector, or contact your representative at the company for support.`}>
