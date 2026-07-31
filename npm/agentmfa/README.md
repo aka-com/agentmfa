@@ -97,9 +97,11 @@ Teach the agents in a repository about the broker:
 ```sh
 mfa skill --write          # writes .claude/skills/mfa/SKILL.md
 mfa skill --write --user   # or ~/.claude/skills/mfa/SKILL.md for all repos
+mfa skill --write --broker https://broker.example.dev  # hosted setup
 ```
 
-Agents discover the live contract from the broker itself:
+Local agents discover the live contract from the broker itself; hosted skill
+generation fetches the selected broker's authoritative setup text:
 
 ```sh
 curl --unix-socket ~/.aka/broker.sock http://localhost/instructions

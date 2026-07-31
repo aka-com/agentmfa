@@ -129,8 +129,9 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // one short-lived instance per invocation
 enum Command {
-    /// Emit the /instructions content as a skill file. Prints to stdout by
-    /// default; `--write` writes .claude/skills/mfa/SKILL.md.
+    /// Emit broker instructions as a skill file. With --broker, fetches that
+    /// broker's authoritative setup. Prints to stdout by default; `--write`
+    /// writes .claude/skills/mfa/SKILL.md.
     Skill {
         /// Write the file to `path` (default .claude/skills/mfa/SKILL.md)
         /// instead of printing to stdout.
@@ -153,6 +154,10 @@ enum Command {
         /// names the socket it actually serves.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Fetch setup from this hosted broker instead of rendering local
+        /// defaults. Requires its current management token.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Print a shell completion script to stdout.
     ///
@@ -163,11 +168,16 @@ enum Command {
         /// The shell to generate for.
         shell: clap_complete::Shell,
     },
-    /// Print the raw /instructions markdown to stdout.
+    /// Print local /instructions markdown, or a hosted broker's authoritative
+    /// agent setup with --broker.
     Instructions {
         /// Render for a broker rooted here instead of the production layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Fetch this hosted broker's authoritative agent setup instead of
+        /// rendering local defaults. Requires its management token.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Run the broker headless (no desktop UI). Every local agent shares
     /// one key (~/.aka/token under the root); tools are enabled for agents
@@ -1011,19 +1021,15 @@ fn run_cli() {
             user,
             force,
             root,
-        } => cmd_skill(write, path, user, force, root),
+            broker,
+        } => cmd_skill(write, path, user, force, root, broker),
         Command::Completions { shell } => {
             use clap::CommandFactory as _;
             let mut command = Cli::command();
             let name = command.get_name().to_string();
             clap_complete::generate(shell, &mut command, name, &mut std::io::stdout());
         }
-        Command::Instructions { root } => {
-            print!(
-                "{}",
-                wellknown::instructions(&BrokerConfig::default(), &doc_paths(root))
-            );
-        }
+        Command::Instructions { root, broker } => cmd_instructions(root, broker),
         Command::Serve {
             root,
             listen,
@@ -2895,8 +2901,36 @@ fn generated_skill_file(content: &str) -> bool {
     content.contains(GENERATED_SKILL_MARKER)
 }
 
-fn cmd_skill(write: bool, path: Option<PathBuf>, user: bool, force: bool, root: Option<PathBuf>) {
-    let content = wellknown::skill_file(&BrokerConfig::default(), &doc_paths(root));
+fn authoritative_agent_setup(root: Option<PathBuf>, broker: String) -> String {
+    let managed = management_backend(root, Some(broker));
+    managed.run(managed.backend.agent_setup())
+}
+
+fn cmd_instructions(root: Option<PathBuf>, broker: Option<String>) {
+    match effective_broker_url(broker) {
+        Some(broker) => println!("{}", authoritative_agent_setup(root, broker).trim()),
+        None => print!(
+            "{}",
+            wellknown::instructions(&BrokerConfig::default(), &doc_paths(root))
+        ),
+    }
+}
+
+fn cmd_skill(
+    write: bool,
+    path: Option<PathBuf>,
+    user: bool,
+    force: bool,
+    root: Option<PathBuf>,
+    broker: Option<String>,
+) {
+    let content = match effective_broker_url(broker) {
+        Some(broker) => {
+            let setup = authoritative_agent_setup(root, broker);
+            wellknown::skill_file_for_broker(&setup)
+        }
+        None => wellknown::skill_file(&BrokerConfig::default(), &doc_paths(root)),
+    };
     if !write {
         print!("{content}");
         return;
@@ -5183,6 +5217,17 @@ mod tests {
         assert!(Cli::try_parse_from(["mfa", "skill", "--path", "SKILL.md"]).is_err());
         assert!(Cli::try_parse_from(["mfa", "skill", "--user"]).is_err());
         assert!(Cli::try_parse_from(["mfa", "skill", "--write", "--path", "SKILL.md"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["mfa", "skill", "--broker", "https://broker.example.test"])
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from([
+            "mfa",
+            "instructions",
+            "--broker",
+            "https://broker.example.test"
+        ])
+        .is_ok());
         assert!(generated_skill_file(&format!(
             "---\nname: mfa\n---\n{GENERATED_SKILL_MARKER} generated -->"
         )));

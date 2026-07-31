@@ -269,6 +269,40 @@ fn broker_url_environment_variable_matches_the_broker_flag() {
 }
 
 #[test]
+fn hosted_instructions_and_skills_fetch_authoritative_agent_setup() {
+    let root = tempfile::tempdir().unwrap();
+    let setup = "Connect to the selected broker.\n\ncurl https://broker.example.test/instructions";
+    let replies = || {
+        vec![
+            whoami(),
+            Reply {
+                method: "GET",
+                path: "/v1/manage/agent-setup",
+                body: json!({ "instructions": setup }),
+            },
+        ]
+    };
+
+    let (url, instruction_requests, instruction_handle) = stub(replies());
+    let output = run(&["instructions"], root.path(), Some(&url), None);
+    assert_success(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), setup);
+    instruction_handle.join().unwrap();
+    assert_eq!(instruction_requests.lock().unwrap().len(), 2);
+
+    let (url, skill_requests, skill_handle) = stub(replies());
+    let output = run(&["skill"], root.path(), Some(&url), None);
+    assert_success(&output);
+    let skill = String::from_utf8_lossy(&output.stdout);
+    assert!(skill.starts_with("---\nname: mfa"), "{skill}");
+    assert!(skill.contains(setup), "{skill}");
+    assert!(skill.contains("selected AgentMFA broker"), "{skill}");
+    assert!(!skill.contains("--unix-socket"), "{skill}");
+    skill_handle.join().unwrap();
+    assert_eq!(skill_requests.lock().unwrap().len(), 2);
+}
+
+#[test]
 fn broker_url_environment_rotates_the_current_management_token_online() {
     let root = tempfile::tempdir().unwrap();
     let (url, requests, handle) = stub(vec![Reply {
