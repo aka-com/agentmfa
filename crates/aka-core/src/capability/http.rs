@@ -429,6 +429,11 @@ struct SignedHop {
 /// treats redaction material as sensitive and only exposes replacement text.
 pub(crate) struct Redactions {
     needles: Vec<Zeroizing<String>>,
+    /// Set the first time any needle matches relayed material (or a binary
+    /// response is refused for containing one). Shared behind an `Arc` so the
+    /// audit trail can still read it after the redactions move into a
+    /// streaming relay.
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -480,6 +485,7 @@ impl Redactions {
     fn from_injection(injection: &RenderedInjection) -> Self {
         let mut redactions = Self {
             needles: Vec::new(),
+            fired: Default::default(),
         };
         match injection {
             RenderedInjection::None => {}
@@ -575,10 +581,24 @@ impl Redactions {
         }
     }
 
+    fn mark_fired(&self) {
+        self.fired.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether any needle has matched relayed material so far. Readable after
+    /// the redactions themselves moved into a stream.
+    fn fired_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.fired.clone()
+    }
+
     fn apply_to_string(&self, value: &str) -> String {
-        self.needles.iter().fold(value.to_string(), |acc, needle| {
+        let out = self.needles.iter().fold(value.to_string(), |acc, needle| {
             acc.replace(needle.as_str(), "[REDACTED]")
-        })
+        });
+        if out != value {
+            self.mark_fired();
+        }
+        out
     }
 
     fn apply_to_bytes(&self, value: &[u8]) -> Vec<u8> {
@@ -597,6 +617,7 @@ impl Redactions {
                 if out[i..].starts_with(needle) {
                     redacted.extend_from_slice(b"[REDACTED]");
                     i += needle.len();
+                    self.mark_fired();
                 } else {
                     redacted.push(out[i]);
                     i += 1;
@@ -625,6 +646,7 @@ impl Redactions {
         match mode {
             ResponseBodyMode::Text => Ok(self.apply_to_bytes(value)),
             ResponseBodyMode::Binary if self.contains_in_bytes(value) => {
+                self.mark_fired();
                 Err(BINARY_CREDENTIAL_REFUSAL)
             }
             ResponseBodyMode::Binary => Ok(value.to_vec()),
@@ -665,6 +687,7 @@ impl Redactions {
             {
                 out.extend_from_slice(b"[REDACTED]");
                 i += needle.len();
+                self.mark_fired();
                 continue;
             }
             if i >= undecided_from {
@@ -681,6 +704,7 @@ impl Redactions {
     /// refuses the response, and the boundary tail waits for the next chunk.
     fn split_verified_binary(&self, buf: &[u8]) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
         if self.contains_in_bytes(buf) {
+            self.mark_fired();
             return Err(BINARY_CREDENTIAL_REFUSAL);
         }
         let hold = self.max_needle_len().saturating_sub(1);
@@ -1132,28 +1156,44 @@ fn record_upstream_failure_health(
     health.record_if_changed(id, crate::types::HealthStatus::Failed, detail.into());
 }
 
+/// What one buffered call actually cost on the wire, for the audit row:
+/// filled in as the dial and relay progress, read once at audit time.
+#[derive(Default)]
+struct HttpCallStats {
+    /// Redirect hops followed; `None` when no dial reached the upstream.
+    redirects: Option<u64>,
+    /// Response body bytes as received, before redaction; `None` when no
+    /// body was relayed.
+    response_bytes: Option<u64>,
+    /// Whether any credential needle matched relayed material.
+    redaction_fired: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
 impl HttpExecution {
     /// Perform the approved request: render the credential, drive the
     /// redirect loop, relay `{status, headers, body}`. Runs exactly once
     /// per approval.
     pub async fn run(self) -> ExecOutcome {
         let started = Instant::now();
+        let mut stats = HttpCallStats::default();
         // `RequestBuilder::timeout` below applies to one redirect hop. Keep
         // a second, outer deadline around the whole upstream operation so a
         // redirect chain, OAuth refresh, or slow response body cannot
         // multiply the advertised timeout. The operation budget exceeds the
         // per-hop budget, so one slow leg cannot starve the rest.
-        let outcome =
-            match tokio::time::timeout(self.config.upstream_operation_timeout, self.run_inner())
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(_) => broker_error(
-                    504,
-                    ErrorReason::UpstreamTimeout,
-                    "the complete upstream operation exceeded its timeout",
-                ),
-            };
+        let outcome = match tokio::time::timeout(
+            self.config.upstream_operation_timeout,
+            self.run_inner(&mut stats),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => broker_error(
+                504,
+                ErrorReason::UpstreamTimeout,
+                "the complete upstream operation exceeded its timeout",
+            ),
+        };
         let upstream_status = outcome
             .body
             .get("status")
@@ -1171,6 +1211,19 @@ impl HttpExecution {
         .duration_ms(started.elapsed().as_millis() as u64)
         .field("method", self.method.to_string())
         .field("path", self.path.clone());
+        // Byte, redirect, and redaction accounting: request size is always
+        // knowable; the rest only once a dial reached the upstream.
+        audit = audit.bytes(self.body.len(), stats.response_bytes.unwrap_or(0));
+        if let Some(redirects) = stats.redirects {
+            audit = audit.field("redirects", redirects);
+            audit = audit.field(
+                "redaction_fired",
+                stats
+                    .redaction_fired
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)),
+            );
+        }
         if let ConnectionConfig::Api {
             mcp_path: Some(mcp_path),
             ..
@@ -1244,11 +1297,13 @@ impl HttpExecution {
         }
     }
 
-    async fn run_inner(&self) -> ExecOutcome {
+    async fn run_inner(&self, stats: &mut HttpCallStats) -> ExecOutcome {
         let dialed = match self.dial(self.config.upstream_timeout).await {
             Ok(dialed) => dialed,
             Err(outcome) => return outcome,
         };
+        stats.redirects = Some(dialed.redirects as u64);
+        stats.redaction_fired = Some(dialed.redactions.fired_flag());
         if let Some(health) = &self.health {
             record_relayed_health(
                 health,
@@ -1267,6 +1322,7 @@ impl HttpExecution {
             self.access.expose_response_credentials(&self.connection.id),
             dialed.mcp_response_id.as_ref(),
             dialed.mcp_tool_call_id.as_ref(),
+            &mut stats.response_bytes,
         )
         .await
     }
@@ -1284,14 +1340,16 @@ impl HttpExecution {
     /// a large artifact is a transfer here rather than a 502.
     pub(crate) async fn run_streamed(self, sink: StreamSink) -> ExecOutcome {
         let started = Instant::now();
-        let (response, redactions) = match self.dial_for_streaming().await {
+        let dialed = match self.dial_for_streaming().await {
             Ok(dialed) => dialed,
             Err(outcome) => {
                 self.record_broker_failure_health(&outcome);
-                self.audit_streamed(started, &outcome_status_label(&outcome), None);
+                self.audit_streamed(started, &outcome_status_label(&outcome), None, None);
                 return outcome;
             }
         };
+        let redirects = Some(dialed.redirects as u64);
+        let (response, redactions) = (dialed.response, dialed.redactions);
         let status = response.status().as_u16();
         let body_mode = response_body_mode(response.headers());
         let auth_challenge = response
@@ -1375,11 +1433,11 @@ impl HttpExecution {
                         record_upstream_failure_health(health, &self.connection.id, detail.clone());
                     }
                 }
-                self.audit_streamed(started, "stream_interrupted", Some(bytes));
+                self.audit_streamed(started, "stream_interrupted", Some(bytes), redirects);
                 broker_error(502, ErrorReason::UpstreamError, detail)
             }
             None => {
-                self.audit_streamed(started, &status.to_string(), Some(bytes));
+                self.audit_streamed(started, &status.to_string(), Some(bytes), redirects);
                 let mut record = json!({
                     "status": status,
                     "streamed": true,
@@ -1400,7 +1458,13 @@ impl HttpExecution {
     /// The activity entry for a streamed call. Written when the body is done,
     /// so `response_bytes` is what actually crossed rather than what was
     /// promised.
-    fn audit_streamed(&self, started: Instant, outcome: &str, bytes: Option<u64>) {
+    fn audit_streamed(
+        &self,
+        started: Instant,
+        outcome: &str,
+        bytes: Option<u64>,
+        redirects: Option<u64>,
+    ) {
         let mut entry = AuditEntry::new(
             AuditKind::HttpExecuted,
             format!("{} {} via {}", self.method, self.path, self.connection.name),
@@ -1411,9 +1475,13 @@ impl HttpExecution {
         .duration_ms(started.elapsed().as_millis() as u64)
         .field("method", self.method.as_str())
         .field("path", self.path.clone())
-        .field("relay", "streamed");
+        .field("relay", "streamed")
+        .bytes(self.body.len(), bytes.unwrap_or(0));
         if let Some(bytes) = bytes {
             entry = entry.field("response_bytes", bytes);
+        }
+        if let Some(redirects) = redirects {
+            entry = entry.field("redirects", redirects);
         }
         self.audit.append(entry);
     }
@@ -1427,11 +1495,8 @@ impl HttpExecution {
     /// deadline would make the streaming path useless for the case it exists
     /// for. Everything else — pinning, redirect rules, re-injection — is the
     /// same code the buffered path runs.
-    pub(crate) async fn dial_for_streaming(
-        &self,
-    ) -> Result<(reqwest::Response, Redactions), ExecOutcome> {
-        let dialed = self.dial(self.config.upstream_operation_timeout).await?;
-        Ok((dialed.response, dialed.redactions))
+    pub(crate) async fn dial_for_streaming(&self) -> Result<Dialed, ExecOutcome> {
+        self.dial(self.config.upstream_operation_timeout).await
     }
 
     /// Everything up to the final upstream response: token refresh, credential
@@ -1752,6 +1817,7 @@ impl HttpExecution {
                     redactions,
                     mcp_response_id,
                     mcp_tool_call_id,
+                    redirects: hops,
                 });
             }
 
@@ -1760,6 +1826,7 @@ impl HttpExecution {
                 redactions,
                 mcp_response_id,
                 mcp_tool_call_id,
+                redirects: hops,
             });
         }
     }
@@ -1768,11 +1835,13 @@ impl HttpExecution {
 /// The upstream response a dial arrived at, plus what the relay needs to
 /// present it: the credential needles to scrub, and the MCP request ids that
 /// tell a buffered SSE relay which frame ends the exchange.
-struct Dialed {
+pub(crate) struct Dialed {
     response: reqwest::Response,
     redactions: Redactions,
     mcp_response_id: Option<Value>,
     mcp_tool_call_id: Option<Value>,
+    /// Redirect hops followed before this response (0 = answered directly).
+    redirects: usize,
 }
 
 /// The path the Test button probes: the connection's configured `test_path`,
@@ -2041,6 +2110,9 @@ async fn relay_response(
     expose_response_credentials: bool,
     mcp_response_id: Option<&Value>,
     mcp_tool_call_id: Option<&Value>,
+    // Body bytes as received, reported out for the audit row. Left `None`
+    // when the transfer failed or was refused before the body completed.
+    response_bytes: &mut Option<u64>,
 ) -> ExecOutcome {
     let status = response.status().as_u16();
     let body_mode = response_body_mode(response.headers());
@@ -2155,6 +2227,7 @@ async fn relay_response(
             }
         }
     }
+    *response_bytes = Some(body.len() as u64);
     let body = match redactions.apply_to_response_body(&body, body_mode) {
         Ok(body) => body,
         Err(detail) => return broker_error(502, ErrorReason::UpstreamError, detail),
@@ -3241,7 +3314,8 @@ async fn proxy_handler(
         started: Instant::now(),
     };
     match dialed {
-        Ok((response, redactions)) => {
+        Ok(dialed) => {
+            let (response, redactions) = (dialed.response, dialed.redactions);
             record_streamed_health(
                 broker,
                 &connection,

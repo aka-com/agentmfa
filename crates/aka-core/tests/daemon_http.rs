@@ -860,6 +860,17 @@ async fn http_get_executes_and_injects_credential() {
     // The raw secret never appears in the agent-visible envelope.
     assert!(envelope["headers"].get("authorization").is_none());
     assert!(!envelope.to_string().contains("ghp_test_secret_value"));
+    // A response that reflected the credential is flagged in the audit row,
+    // with the request and (pre-redaction) response bytes accounted.
+    let call = h
+        .broker
+        .audit
+        .recent(10)
+        .into_iter()
+        .find(|entry| matches!(entry.kind, aka_core::audit::AuditKind::HttpExecuted))
+        .expect("brokered call audited");
+    assert_eq!(call.fields["redaction_fired"], json!(true));
+    assert!(call.bytes_down.is_some_and(|bytes| bytes > 0));
 }
 
 #[tokio::test]
@@ -2228,6 +2239,14 @@ async fn brokered_calls_audit_attribution_duration_and_outcome() {
     assert!(call.duration_ms.is_some(), "duration is measured");
     assert_eq!(call.fields["method"], json!("GET"));
     assert_eq!(call.fields["path"], json!("/user/repos"));
+    // Byte, redirect, and redaction accounting (API-26/SEC-25): a bodiless
+    // GET that reached the upstream directly records zero request bytes, a
+    // non-empty response, no redirect hops, and that no credential needed
+    // scrubbing from the response.
+    assert_eq!(call.bytes_up, Some(0));
+    assert!(call.bytes_down.is_some_and(|bytes| bytes > 0));
+    assert_eq!(call.fields["redirects"], json!(0));
+    assert_eq!(call.fields["redaction_fired"], json!(false));
 }
 
 /* -------------------------- HTTP direct endpoint -------------------------- */
