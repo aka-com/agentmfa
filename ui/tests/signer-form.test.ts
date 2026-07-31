@@ -65,6 +65,25 @@ test('a signer connection round-trips through the mock bridge', async () => {
   assert.equal(retargeted.signer, null);
 });
 
+test('a GCP service-account signer round-trips through the mock bridge', async () => {
+  await invoke('add_connection', {
+    input: {
+      name: 'gcs',
+      type: 'api',
+      host: 'storage.googleapis.com',
+      scheme: 'https',
+      template: '',
+      signer_gcp_key_ref: 'GCP_SA_KEY',
+      signer_gcp_scope: 'https://www.googleapis.com/auth/devstorage.read_only',
+    },
+  });
+  const c = await connection('gcs');
+  assert.equal(c.signer?.algorithm, 'gcp_service_account');
+  assert.equal(c.signer?.key_ref, 'GCP_SA_KEY');
+  assert.equal(c.signer?.scope, 'https://www.googleapis.com/auth/devstorage.read_only');
+  assert.deepEqual(c.secret_names, ['GCP_SA_KEY']);
+});
+
 test('a partial signer quartet builds no signer at all', async () => {
   await invoke('add_connection', {
     input: { ...signerInput, name: 'aws-partial', signer_secret_key_ref: undefined,

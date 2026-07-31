@@ -1725,7 +1725,11 @@ function connectionFactRows(c: ConnectionSummary): Array<[string, string]> {
   } else if (c.host) {
     rows.push(['Server', `${c.scheme ? `${c.scheme}://` : ''}${c.host}`]);
   }
-  if (c.signer) {
+  if (c.signer?.algorithm === 'gcp_service_account') {
+    rows.push(['Credential',
+      `GCP service account (${c.signer.scope ?? ''}), minted from ${
+        c.secret_names.length ? c.secret_names.join(', ') : 'the vaulted key'}`]);
+  } else if (c.signer) {
     rows.push(['Credential',
       `AWS SigV4 (${c.signer.region} · ${c.signer.service}), signs with ${
         c.secret_names.length ? c.secret_names.join(', ') : 'vault credentials'}`]);
@@ -4366,15 +4370,21 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
     // it (the backend re-attaches an omitted signer), while retargeting
     // drops it and the connection must be re-created.
     const signer = conn.signer;
+    const gcp = signer.algorithm === 'gcp_service_account';
     fields.push(
       <div className="f-row" key="auth">
         <label>Authentication</label>
-        <input value={`AWS SigV4 (${signer.region} · ${signer.service})`}
+        <input value={gcp
+          ? `GCP service account (${signer.scope ?? ''})`
+          : `AWS SigV4 (${signer.region} · ${signer.service})`}
           readOnly aria-readonly="true" />
         <div className="rule-note">
-          Signs each request with {signer.access_key_ref} / {signer.secret_key_ref}
-          {signer.session_token_ref ? ` and session token ${signer.session_token_ref}` : ''}.
-          Changing the pinned host drops the signer.
+          {gcp
+            ? `Mints short-lived tokens from ${signer.key_ref ?? 'the service-account key'}.`
+            : `Signs each request with ${signer.access_key_ref} / ${signer.secret_key_ref}`
+              + (signer.session_token_ref ? ` and session token ${signer.session_token_ref}` : '')
+              + '.'}
+          {' '}Changing the pinned host drops the signer.
         </div>
       </div>,
     );
@@ -4421,8 +4431,12 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       ['bearer', 'Bearer token'], ['header', 'Custom header'],
       ...(t === 'api' ? [['query', 'Query parameter'] as [string, string]] : []),
       // Dispatch-time request signing: no injected credential at all — the
-      // broker signs each request with vault-referenced keys (AWS APIs).
-      ...(!mcpAdd ? [['sigv4', 'AWS SigV4 request signing'] as [string, string]] : []),
+      // broker signs each request with vault-referenced keys (AWS APIs) or
+      // mints short-lived tokens from a service-account key (GCP APIs).
+      ...(!mcpAdd ? [
+        ['sigv4', 'AWS SigV4 request signing'] as [string, string],
+        ['gcp', 'GCP service account signing'] as [string, string],
+      ] : []),
       // Plain REST rows with documented OAuth endpoints offer a browser
       // sign-in against the user's own OAuth app (BYO-app, loopback PKCE).
       ...(oauthPreset ? [['oauth', 'Sign in with your browser (your OAuth app)'] as [string, string]] : []),
@@ -4575,6 +4589,36 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
         refSelect('c-signer-token',
           <>Session token credential <span className="label-detail">(optional)</span></>,
           'signerSessionTokenRef', d.signerSessionTokenRef, true),
+      );
+    } else if (modeValue === 'gcp') {
+      fields.push(
+        <div className="rule-note" key="gcp-note">
+          The broker mints short-lived access tokens from a service-account
+          key at request time; no long-lived credential is ever injected.
+          Save the service account&rsquo;s JSON key file under Secrets first.
+        </div>,
+        <div className="f-row" key="gcp-key">
+          <label htmlFor="c-signer-gcp-key">Service-account key credential</label>
+          <CustomSelect id="c-signer-gcp-key" errCls={fieldCls('signerGcpKeyRef')}
+            options={[
+              ['', 'Select a credential…'],
+              ...state.secrets.map((secret) => [secret.name, secret.name] as [string, string]),
+            ]}
+            selectedValue={d.signerGcpKeyRef ?? ''} />
+          <FieldError k="signerGcpKeyRef" />
+        </div>,
+        <div className="f-row" key="gcp-scope">
+          <label htmlFor="c-signer-gcp-scope">OAuth scope</label>
+          <input id="c-signer-gcp-scope" className={fieldCls('signerGcpScope')}
+            placeholder="https://www.googleapis.com/auth/devstorage.read_only"
+            value={d.signerGcpScope ?? ''}
+            onChange={(e) => setDraftField('signerGcpScope', 'signerGcpScope', e.currentTarget.value)} />
+          <FieldError k="signerGcpScope" />
+          <div className="rule-note">
+            Space-separated scopes. Prefer the narrowest scope the agent
+            needs — a read-only scope is a real guardrail.
+          </div>
+        </div>,
       );
     } else if (modeValue === 'advanced') {
       fields.push(
@@ -5515,13 +5559,15 @@ async function saveConn(): Promise<void> {
   const mcpOauthApp = usesOauth && d.entryId
     ? catalogEntryById(d.entryId)?.mcpTemplate?.oauthApp : undefined;
   const sigv4 = adding && t === 'api' && !mcpAdd && authMode === 'sigv4';
+  const gcpSigner = adding && t === 'api' && !mcpAdd && authMode === 'gcp';
+  const signed = sigv4 || gcpSigner;
   const usesRecipe = adding && t === 'api'
-    && authMode !== 'advanced' && authMode !== 'sigv4' && !usesOauth && !byoOauth;
+    && authMode !== 'advanced' && !signed && !usesOauth && !byoOauth;
   const editingApiCredential = !adding && t === 'api'
     && !existingConnection?.oauth
     && !existingConnection?.oauth_spec
     && (existingConnection?.secret_names.length ?? 0) <= 1;
-  const needsCredentialChoice = !usesOauth && !byoOauth && !sigv4 && (
+  const needsCredentialChoice = !usesOauth && !byoOauth && !signed && (
     (adding && !(t === 'api' && authMode === 'advanced')) ||
     (!adding && t !== 'api') ||
     editingApiCredential);
@@ -5582,6 +5628,12 @@ async function saveConn(): Promise<void> {
     if (!(d.signerService || '').trim()) errs.signerService = 'Enter the signing service.';
     if (!d.signerAccessKeyRef) errs.signerAccessKeyRef = 'Pick the access key ID credential.';
     if (!d.signerSecretKeyRef) errs.signerSecretKeyRef = 'Pick the secret access key credential.';
+  }
+  if (gcpSigner) {
+    if (!d.signerGcpKeyRef) {
+      errs.signerGcpKeyRef = 'Pick the service-account key credential.';
+    }
+    if (!(d.signerGcpScope || '').trim()) errs.signerGcpScope = 'Enter the OAuth scope.';
   }
   if (t === 'api') {
     const certPath = (d.clientCertPath || '').trim();
@@ -5666,7 +5718,7 @@ async function saveConn(): Promise<void> {
     input.host = apiOrigin!.host;
     input.scheme = apiOrigin!.scheme;
     input.port = apiOrigin!.port;
-    input.template = sigv4 ? '' : injectionTemplate;
+    input.template = signed ? '' : injectionTemplate;
     input.mcp_path = mcpPath;
     input.trusted_ca_bundle_path = (d.pgCaBundlePath || '').trim() || null;
     input.test_path = (d.testPath || '').trim() || null;
@@ -5678,6 +5730,9 @@ async function saveConn(): Promise<void> {
       input.signer_access_key_ref = d.signerAccessKeyRef;
       input.signer_secret_key_ref = d.signerSecretKeyRef;
       input.signer_session_token_ref = d.signerSessionTokenRef || null;
+    } else if (gcpSigner) {
+      input.signer_gcp_key_ref = d.signerGcpKeyRef;
+      input.signer_gcp_scope = (d.signerGcpScope || '').trim();
     }
   } else if (t === 'pg') {
     input.host = (d.host || '').trim();
@@ -6550,6 +6605,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       else if (menuId === 'c-signer-access') state.draft.signerAccessKeyRef = id || null;
       else if (menuId === 'c-signer-secret') state.draft.signerSecretKeyRef = id || null;
       else if (menuId === 'c-signer-token') state.draft.signerSessionTokenRef = id || null;
+      else if (menuId === 'c-signer-gcp-key') state.draft.signerGcpKeyRef = id || null;
       else if (menuId === 'f-sslmode') {
         state.draft.sslmode = id;
         state.draft.sslmodeIsAutomatic = false;
@@ -7500,7 +7556,7 @@ const ERR_KEY_BY_INPUT = {
   'f-sslmode': 'sslmode', 'c-secret': 'secret', 'c-auth-mode': 'authMode',
   'c-identity-file': 'newSecretValue',
   'c-signer-access': 'signerAccessKeyRef', 'c-signer-secret': 'signerSecretKeyRef',
-  'c-signer-token': 'signerSessionTokenRef',
+  'c-signer-token': 'signerSessionTokenRef', 'c-signer-gcp-key': 'signerGcpKeyRef',
 };
 
 // Form fields are controlled React inputs; their onChange handlers own

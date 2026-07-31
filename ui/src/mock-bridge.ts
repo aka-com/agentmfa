@@ -144,8 +144,9 @@ interface MockConnection {
   url?: string | null;
   oauth_spec?: { auth_url: string; token_url: string; client_id: string; scopes: string[] } | null;
   signer?: {
-    algorithm: string; region: string; service: string;
-    access_key_ref: string; secret_key_ref: string; session_token_ref?: string | null;
+    algorithm: string; region?: string; service?: string;
+    access_key_ref?: string; secret_key_ref?: string; session_token_ref?: string | null;
+    key_ref?: string | null; scope?: string | null;
   } | null;
   client_cert_path?: string | null;
   client_key_path?: string | null;
@@ -984,8 +985,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         db.secrets.push(secret);
         i.secret_id = secret.id;
       }
-      // Mirrors the core: the four required signer parts are all-or-nothing,
-      // and the signer's credential references count as the bound secrets.
+      // Mirrors the core: the required signer parts are all-or-nothing, and
+      // the signer's credential references count as the bound secrets.
       const signer = i.type === 'api'
         && i.signer_region && i.signer_service
         && i.signer_access_key_ref && i.signer_secret_key_ref
@@ -994,10 +995,17 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
             access_key_ref: i.signer_access_key_ref, secret_key_ref: i.signer_secret_key_ref,
             session_token_ref: i.signer_session_token_ref ?? null,
           }
+        : i.type === 'api' && i.signer_gcp_key_ref && i.signer_gcp_scope
+        ? {
+            algorithm: 'gcp_service_account',
+            key_ref: i.signer_gcp_key_ref, scope: i.signer_gcp_scope,
+          }
         : null;
       const secret_names = signer
-        ? [signer.access_key_ref, signer.secret_key_ref,
-           ...(signer.session_token_ref ? [signer.session_token_ref] : [])]
+        ? signer.algorithm === 'gcp_service_account'
+          ? [signer.key_ref as string]
+          : [signer.access_key_ref as string, signer.secret_key_ref as string,
+             ...(signer.session_token_ref ? [signer.session_token_ref] : [])]
         : i.type === 'api'
         ? ((i.template ?? '').match(/[A-Z_][A-Z0-9_]*/g) || [])
             .filter((n) => db.secrets.some((s) => s.name === n))

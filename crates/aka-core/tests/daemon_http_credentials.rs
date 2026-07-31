@@ -581,6 +581,108 @@ async fn sigv4_resigns_each_redirect_hop() {
     );
 }
 
+/// GCP-1: a service-account connection mints a bearer token through the
+/// key's own token endpoint, injects it on the upstream leg, serves the
+/// second call from cache, and scrubs the token from reflected responses.
+#[tokio::test]
+async fn gcp_service_account_tokens_are_minted_injected_and_scrubbed() {
+    // The token endpoint the SA key document points at, counting exchanges.
+    let exchanges = Arc::new(AtomicUsize::new(0));
+    let counted = exchanges.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_port = listener.local_addr().unwrap().port();
+    let token_endpoint = Router::new().route(
+        "/token",
+        post(move |body: String| {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                assert!(body.contains("grant-type%3Ajwt-bearer"), "{body}");
+                axum::Json(json!({
+                    "access_token": "ya29.e2e-minted-token",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                }))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, token_endpoint).await;
+    });
+
+    let up = upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    // A throwaway key generated for this test only (the OsRng-via-ssh-key
+    // pattern the SSH agent tests use).
+    let test_key_pem = {
+        use rsa::pkcs8::EncodePrivateKey as _;
+        let key = rsa::RsaPrivateKey::new(&mut ssh_key::rand_core::OsRng, 2048).unwrap();
+        use base64::Engine as _;
+        format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            base64::engine::general_purpose::STANDARD
+                .encode(key.to_pkcs8_der().unwrap().as_bytes())
+        )
+    };
+    let key_json = json!({
+        "type": "service_account",
+        "client_email": "agent@project.iam.gserviceaccount.com",
+        "private_key": test_key_pem,
+        "token_uri": format!("http://127.0.0.1:{token_port}/token"),
+    })
+    .to_string();
+    h.broker
+        .store
+        .add_secret("GCP_SA_KEY", Zeroizing::new(key_json))
+        .unwrap();
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "gcs".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(up.port),
+                trusted_ca_bundle_path: None,
+                template: String::new(),
+                mcp_path: None,
+                test_path: None,
+                oauth: None,
+                signer: Some(SignerSpec::GcpServiceAccount {
+                    key_ref: "GCP_SA_KEY".into(),
+                    scope: "https://www.googleapis.com/auth/devstorage.read_only".into(),
+                }),
+                client_cert_path: None,
+                client_key_path: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+
+    let (status, body) = h
+        .call("gcs", json!({ "method": "GET", "path": "/echo" }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    // The upstream saw the minted token…
+    let received = up.last_headers();
+    assert_eq!(received["authorization"], "Bearer ya29.e2e-minted-token");
+    // …while the reflected echo reaching the agent has it scrubbed.
+    let relayed = body.to_string();
+    assert!(!relayed.contains("ya29.e2e-minted-token"), "{relayed}");
+    assert!(relayed.contains("[REDACTED]"), "{relayed}");
+
+    // A second call rides the cached token: one exchange total.
+    let (status, _) = h
+        .call("gcs", json!({ "method": "GET", "path": "/echo" }))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        exchanges.load(Ordering::SeqCst),
+        1,
+        "token served from cache"
+    );
+}
+
 /// HTTP-C3: the broker owns the fields that carry the authentication. An
 /// agent-supplied `x-amz-date` is replaced, not signed — otherwise the agent
 /// could skew the signing clock — and `authorization` is refused outright by

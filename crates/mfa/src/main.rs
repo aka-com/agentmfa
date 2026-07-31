@@ -868,6 +868,15 @@ struct ConnAdd {
     /// credentials), signed and sent as x-amz-security-token.
     #[arg(long, requires = "sigv4_region")]
     sigv4_session_token_ref: Option<String>,
+    /// api: mint GCP access tokens from the service-account JSON key stored
+    /// under this vault secret name instead of injecting a template.
+    /// Requires --gcp-scope; replaces --template.
+    #[arg(long, conflicts_with = "sigv4_region")]
+    gcp_key_ref: Option<String>,
+    /// api: space-separated OAuth scopes for minted GCP tokens (e.g.
+    /// https://www.googleapis.com/auth/devstorage.read_only).
+    #[arg(long, requires = "gcp_key_ref")]
+    gcp_scope: Option<String>,
     /// api: PEM client-certificate chain presented on the upstream TLS leg
     /// (mTLS). Requires --client-key.
     #[arg(long, requires = "client_key")]
@@ -1863,30 +1872,26 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("sslmode", args.sslmode.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
-            let signer = match &args.sigv4_region {
-                Some(region) => {
-                    if args.template.is_some() {
-                        return Err(
-                            "--template does not apply to a SigV4 connection; the signer \
-                             computes the Authorization header"
-                                .into(),
-                        );
-                    }
-                    Some(SignerSpec::AwsSigv4 {
-                        region: region.clone(),
-                        service: require("sigv4-service", &args.sigv4_service)?,
-                        access_key_ref: require(
-                            "sigv4-access-key-ref",
-                            &args.sigv4_access_key_ref,
-                        )?,
-                        secret_key_ref: require(
-                            "sigv4-secret-key-ref",
-                            &args.sigv4_secret_key_ref,
-                        )?,
-                        session_token_ref: args.sigv4_session_token_ref.clone(),
-                    })
+            let signer = match (&args.sigv4_region, &args.gcp_key_ref) {
+                (Some(_), _) | (_, Some(_)) if args.template.is_some() => {
+                    return Err(
+                        "--template does not apply to a signed connection; the signer \
+                         computes the Authorization header"
+                            .into(),
+                    );
                 }
-                None => None,
+                (Some(region), _) => Some(SignerSpec::AwsSigv4 {
+                    region: region.clone(),
+                    service: require("sigv4-service", &args.sigv4_service)?,
+                    access_key_ref: require("sigv4-access-key-ref", &args.sigv4_access_key_ref)?,
+                    secret_key_ref: require("sigv4-secret-key-ref", &args.sigv4_secret_key_ref)?,
+                    session_token_ref: args.sigv4_session_token_ref.clone(),
+                }),
+                (_, Some(key_ref)) => Some(SignerSpec::GcpServiceAccount {
+                    key_ref: key_ref.clone(),
+                    scope: require("gcp-scope", &args.gcp_scope)?,
+                }),
+                (None, None) => None,
             };
             // Host before template, so a bare `--kind api` still names
             // `--host` as the first thing missing.
@@ -5255,6 +5260,8 @@ mod tests {
             sigv4_access_key_ref: None,
             sigv4_secret_key_ref: None,
             sigv4_session_token_ref: None,
+            gcp_key_ref: None,
+            gcp_scope: None,
             client_cert: None,
             client_key: None,
             root: None,
@@ -5314,6 +5321,28 @@ mod tests {
         ));
         // The two injection mechanisms are mutually exclusive at the flag
         // level too, rather than being caught only by the store.
+        a.template = Some("Authorization: Bearer {{KEY}}".into());
+        assert!(conn_config(&a).unwrap_err().contains("--template"));
+    }
+
+    #[test]
+    fn api_builds_a_gcp_signer_and_names_its_missing_scope() {
+        let mut a = args(ConnKind::Api);
+        a.host = Some("storage.googleapis.com".into());
+        a.gcp_key_ref = Some("GCP_SA_KEY".into());
+        assert!(conn_config(&a).unwrap_err().contains("--gcp-scope"));
+        a.gcp_scope = Some("https://www.googleapis.com/auth/devstorage.read_only".into());
+        let config = conn_config(&a).unwrap();
+        assert!(matches!(
+            &config,
+            ConnectionConfig::Api {
+                template,
+                signer: Some(SignerSpec::GcpServiceAccount { key_ref, scope }),
+                ..
+            } if template.is_empty()
+                && key_ref == "GCP_SA_KEY"
+                && scope == "https://www.googleapis.com/auth/devstorage.read_only"
+        ));
         a.template = Some("Authorization: Bearer {{KEY}}".into());
         assert!(conn_config(&a).unwrap_err().contains("--template"));
     }

@@ -595,6 +595,10 @@ pub struct ConnectionInput {
     pub signer_access_key_ref: Option<String>,
     pub signer_secret_key_ref: Option<String>,
     pub signer_session_token_ref: Option<String>,
+    // GCP service-account signer (mutually exclusive with the SigV4 fields
+    // in the form): the vaulted JSON-key reference plus the OAuth scope.
+    pub signer_gcp_key_ref: Option<String>,
+    pub signer_gcp_scope: Option<String>,
     // Upstream mTLS: PEM chain and key paths, both-or-neither (store-enforced).
     pub client_cert_path: Option<String>,
     pub client_key_path: Option<String>,
@@ -678,7 +682,15 @@ impl ConnectionInput {
                     session_token_ref: present(self.signer_session_token_ref.take()),
                 })
             }
-            _ => None,
+            _ => match (
+                present(self.signer_gcp_key_ref.take()),
+                present(self.signer_gcp_scope.take()),
+            ) {
+                (Some(key_ref), Some(scope)) => {
+                    Some(aka_core::types::SignerSpec::GcpServiceAccount { key_ref, scope })
+                }
+                _ => None,
+            },
         };
         let client_cert_path = present(self.client_cert_path.take());
         let client_key_path = present(self.client_key_path.take());
@@ -2051,6 +2063,8 @@ mod tests {
             signer_access_key_ref: None,
             signer_secret_key_ref: None,
             signer_session_token_ref: None,
+            signer_gcp_key_ref: None,
+            signer_gcp_scope: None,
             client_cert_path: None,
             client_key_path: None,
             secret_id: None,
@@ -2114,6 +2128,8 @@ mod tests {
             signer_access_key_ref: None,
             signer_secret_key_ref: None,
             signer_session_token_ref: None,
+            signer_gcp_key_ref: None,
+            signer_gcp_scope: None,
             client_cert_path: None,
             client_key_path: None,
             secret_id: None,
@@ -2296,6 +2312,39 @@ mod tests {
 
         // A blank required part means no signer at all — never a partial one.
         let partial = input("  ", "").into_spec().unwrap();
+        let aka_core::types::ConnectionConfig::Api { signer, .. } = partial.config else {
+            panic!("expected an API config");
+        };
+        assert_eq!(signer, None);
+    }
+
+    #[test]
+    fn api_input_builds_a_gcp_signer_from_key_ref_and_scope() {
+        let input = |scope: &str| -> ConnectionInput {
+            serde_json::from_value(serde_json::json!({
+                "name": "gcs",
+                "type": "api",
+                "host": "storage.googleapis.com",
+                "signer_gcp_key_ref": "GCP_SA_KEY",
+                "signer_gcp_scope": scope,
+            }))
+            .unwrap()
+        };
+        let spec = input("https://www.googleapis.com/auth/devstorage.read_only")
+            .into_spec()
+            .unwrap();
+        let aka_core::types::ConnectionConfig::Api { signer, .. } = spec.config else {
+            panic!("expected an API config");
+        };
+        assert_eq!(
+            signer,
+            Some(aka_core::types::SignerSpec::GcpServiceAccount {
+                key_ref: "GCP_SA_KEY".into(),
+                scope: "https://www.googleapis.com/auth/devstorage.read_only".into(),
+            })
+        );
+        // A blank scope builds no signer — never a partial one.
+        let partial = input("  ").into_spec().unwrap();
         let aka_core::types::ConnectionConfig::Api { signer, .. } = partial.config else {
             panic!("expected an API config");
         };

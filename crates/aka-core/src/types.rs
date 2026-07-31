@@ -88,6 +88,20 @@ pub enum SignerSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_token_ref: Option<String>,
     },
+    /// GCP service-account OAuth. GCP APIs take a bearer token that expires
+    /// hourly, so the broker mints it at dispatch time: an RS256 JWT signed
+    /// with the vaulted service-account key, exchanged at the key's token
+    /// endpoint for an access token, cached until near expiry. The private
+    /// key never leaves the vault-read path.
+    GcpServiceAccount {
+        /// Vault secret name holding the service-account JSON key file
+        /// (the `client_email` / `private_key` / `token_uri` document GCP
+        /// issues).
+        key_ref: String,
+        /// Space-separated OAuth scopes for minted tokens, e.g.
+        /// `https://www.googleapis.com/auth/devstorage.read_only`.
+        scope: String,
+    },
 }
 
 impl SignerSpec {
@@ -107,6 +121,7 @@ impl SignerSpec {
                 }
                 refs
             }
+            Self::GcpServiceAccount { key_ref, .. } => vec![key_ref.as_str()],
         }
     }
 
@@ -131,6 +146,14 @@ impl SignerSpec {
                     }
                 }
                 renamed
+            }
+            Self::GcpServiceAccount { key_ref, .. } => {
+                if key_ref == old {
+                    *key_ref = new.to_string();
+                    true
+                } else {
+                    false
+                }
             }
         }
     }

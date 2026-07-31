@@ -1229,14 +1229,25 @@ fn validate_config_and_bind_secrets(
                         message: "A request signer cannot be combined with an MCP path".into(),
                     });
                 }
-                let SignerSpec::AwsSigv4 {
-                    region, service, ..
-                } = signer;
-                if region.trim().is_empty() || service.trim().is_empty() {
-                    return Err(CoreError::InvalidConnectionField {
-                        field: ConnectionField::Template,
-                        message: "A SigV4 signer needs both a region and a service".into(),
-                    });
+                match signer {
+                    SignerSpec::AwsSigv4 {
+                        region, service, ..
+                    } => {
+                        if region.trim().is_empty() || service.trim().is_empty() {
+                            return Err(CoreError::InvalidConnectionField {
+                                field: ConnectionField::Template,
+                                message: "A SigV4 signer needs both a region and a service".into(),
+                            });
+                        }
+                    }
+                    SignerSpec::GcpServiceAccount { scope, .. } => {
+                        if scope.trim().is_empty() {
+                            return Err(CoreError::InvalidConnectionField {
+                                field: ConnectionField::Template,
+                                message: "A GCP service-account signer needs an OAuth scope".into(),
+                            });
+                        }
+                    }
                 }
                 return signer
                     .refs()

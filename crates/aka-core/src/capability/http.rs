@@ -2025,24 +2025,54 @@ pub(crate) async fn render_connection_injection(
         return Err("not an api connection".to_string().into());
     };
     if let Some(spec) = signer {
-        let crate::types::SignerSpec::AwsSigv4 {
-            region,
-            service,
-            access_key_ref,
-            secret_key_ref,
-            session_token_ref,
-        } = spec;
-        let session_token = match session_token_ref {
-            Some(name) => Some(signer_secret(store, name).await?),
-            None => None,
-        };
-        return Ok(RenderedInjection::Sigv4(Box::new(Sigv4Credentials {
-            access_key: signer_secret(store, access_key_ref).await?,
-            secret_key: signer_secret(store, secret_key_ref).await?,
-            session_token,
-            region: region.clone(),
-            service: service.clone(),
-        })));
+        match spec {
+            crate::types::SignerSpec::AwsSigv4 {
+                region,
+                service,
+                access_key_ref,
+                secret_key_ref,
+                session_token_ref,
+            } => {
+                let session_token = match session_token_ref {
+                    Some(name) => Some(signer_secret(store, name).await?),
+                    None => None,
+                };
+                return Ok(RenderedInjection::Sigv4(Box::new(Sigv4Credentials {
+                    access_key: signer_secret(store, access_key_ref).await?,
+                    secret_key: signer_secret(store, secret_key_ref).await?,
+                    session_token,
+                    region: region.clone(),
+                    service: service.clone(),
+                })));
+            }
+            crate::types::SignerSpec::GcpServiceAccount { key_ref, scope } => {
+                let key_json = signer_secret(store, key_ref).await?;
+                let cache_key = format!("{}\0{key_ref}\0{scope}", connection.id);
+                let token = crate::gcp_signer::fresh_bearer(client, &key_json, scope, &cache_key)
+                    .await
+                    .map_err(|error| match error {
+                        crate::gcp_signer::GcpTokenError::Config(message) => {
+                            CredentialFailure::from(message)
+                        }
+                        crate::gcp_signer::GcpTokenError::Exchange(message) => CredentialFailure {
+                            message,
+                            reason: ErrorReason::CredentialRefreshUnavailable,
+                        },
+                    })?;
+                // From here the minted token is an ordinary bearer header:
+                // injection, redirect re-application, and response redaction
+                // all follow the same path as a template credential.
+                let mut value =
+                    HeaderValue::from_str(&format!("Bearer {}", &*token)).map_err(|_| {
+                        "the minted access token is not a valid header value".to_string()
+                    })?;
+                value.set_sensitive(true);
+                return Ok(RenderedInjection::Header(
+                    HeaderName::from_static("authorization"),
+                    value,
+                ));
+            }
+        }
     }
     if oauth.is_some() {
         let token = crate::oauth::fresh_bearer(store, client, connection)

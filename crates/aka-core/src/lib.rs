@@ -21,6 +21,7 @@ pub mod endpoints;
 pub mod error;
 pub mod events;
 pub mod executions;
+pub(crate) mod gcp_signer;
 pub mod health;
 pub mod identity;
 pub mod integrity;

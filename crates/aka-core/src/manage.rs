@@ -210,21 +210,34 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                 scopes: o.scopes.clone(),
                 extra_auth_params: o.extra_auth_params.clone(),
             });
-            dto.signer = signer.as_ref().map(|spec| {
-                let crate::types::SignerSpec::AwsSigv4 {
+            dto.signer = signer.as_ref().map(|spec| match spec {
+                crate::types::SignerSpec::AwsSigv4 {
                     region,
                     service,
                     access_key_ref,
                     secret_key_ref,
                     session_token_ref,
-                } = spec;
-                aka_api::SignerDto {
+                } => aka_api::SignerDto {
                     algorithm: "aws_sigv4".to_string(),
                     region: region.clone(),
                     service: service.clone(),
                     access_key_ref: access_key_ref.clone(),
                     secret_key_ref: secret_key_ref.clone(),
                     session_token_ref: session_token_ref.clone(),
+                    key_ref: None,
+                    scope: None,
+                },
+                crate::types::SignerSpec::GcpServiceAccount { key_ref, scope } => {
+                    aka_api::SignerDto {
+                        algorithm: "gcp_service_account".to_string(),
+                        region: String::new(),
+                        service: String::new(),
+                        access_key_ref: String::new(),
+                        secret_key_ref: String::new(),
+                        session_token_ref: None,
+                        key_ref: Some(key_ref.clone()),
+                        scope: Some(scope.clone()),
+                    }
                 }
             });
             dto.client_cert_path = client_cert_path.clone();

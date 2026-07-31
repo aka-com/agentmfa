@@ -102,6 +102,9 @@ export interface ConnectionDraft {
   signerAccessKeyRef?: string | null;
   signerSecretKeyRef?: string | null;
   signerSessionTokenRef?: string | null;
+  // GCP service-account signer fields (authMode 'gcp').
+  signerGcpKeyRef?: string | null;
+  signerGcpScope?: string;
   // Upstream mTLS paths (Advanced section), both-or-neither.
   clientCertPath?: string | null;
   clientKeyPath?: string | null;

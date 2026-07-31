@@ -431,17 +431,29 @@ pub struct ConnectionDto {
 
 /// A dispatch-time request signer, mirrored from the connection config.
 /// Only credential *references* (vault secret names) appear here; the key
-/// material never rides the manage plane.
+/// material never rides the manage plane. The populated fields follow the
+/// algorithm: `aws_sigv4` carries region/service and the AWS credential
+/// refs; `gcp_service_account` carries the key ref and OAuth scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignerDto {
-    /// "aws_sigv4" for now.
+    /// "aws_sigv4" or "gcp_service_account".
     pub algorithm: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub region: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub service: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub access_key_ref: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub secret_key_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_token_ref: Option<String>,
+    /// Vault secret name holding the GCP service-account JSON key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_ref: Option<String>,
+    /// Space-separated OAuth scopes for minted GCP tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// The shared broker identity, for the Connect page's key card. Never the

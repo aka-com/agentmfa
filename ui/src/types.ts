@@ -90,14 +90,18 @@ export interface IssuedEndpoint {
   expires_in_secs?: number | null;
 }
 
-/** A dispatch-time request signer, mirrored from `SignerDto`. */
+/** A dispatch-time request signer, mirrored from `SignerDto`. The populated
+ * fields follow the algorithm: `aws_sigv4` carries region/service and the
+ * AWS refs; `gcp_service_account` carries `key_ref` and `scope`. */
 export interface SignerInfo {
   algorithm: string;
-  region: string;
-  service: string;
-  access_key_ref: string;
-  secret_key_ref: string;
+  region?: string;
+  service?: string;
+  access_key_ref?: string;
+  secret_key_ref?: string;
   session_token_ref?: string | null;
+  key_ref?: string | null;
+  scope?: string | null;
 }
 
 export interface ConnectionSummary {
@@ -438,6 +442,10 @@ export interface ConnectionInput {
   signer_access_key_ref?: string | null;
   signer_secret_key_ref?: string | null;
   signer_session_token_ref?: string | null;
+  // GCP service-account signer (mutually exclusive with the SigV4 fields):
+  // vaulted JSON-key reference plus the OAuth scope.
+  signer_gcp_key_ref?: string | null;
+  signer_gcp_scope?: string | null;
   // Upstream mTLS paths, both-or-neither (store-enforced).
   client_cert_path?: string | null;
   client_key_path?: string | null;
