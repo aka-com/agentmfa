@@ -79,11 +79,11 @@ function clientSeenAt(connectMode: ConnectModeId): string | null {
 
 function ToolMenu({ option }: { option: StartOption }): ReactNode {
   return (
-    <div className="start-menu" aria-label="What to connect">
+    <div className="start-menu" role="listbox" aria-label="What to connect">
       {START_OPTIONS.map((candidate) => {
         const entry = candidate.catalogId ? catalogEntryById(candidate.catalogId) : undefined;
         return (
-          <button key={candidate.id} aria-pressed={candidate.id === option.id}
+          <button key={candidate.id} role="option" aria-selected={candidate.id === option.id}
             className={`start-menu-item ${candidate.id === option.id ? 'on' : ''}`}
             data-act="start-option" data-id={candidate.id}>
             <span className="start-menu-ico" aria-hidden="true">
@@ -104,7 +104,8 @@ function ClientMenu({ option, connectMode }: {
   connectMode: ConnectModeId;
 }): ReactNode {
   return (
-    <div className="start-menu start-menu-clients" aria-label="How your agent connects">
+    <div className="start-menu start-menu-clients" role="listbox"
+      aria-label="How your agent connects">
       {connectModesFor(option).map((mode, index) => {
         const client = connectClientById(mode);
         const sub = mode === 'direct'
@@ -116,8 +117,10 @@ function ClientMenu({ option, connectMode }: {
         const startsGroup = (mode === 'claude-code' && index > 0) || mode === 'mcp';
         return (
           <Fragment key={mode}>
-            {startsGroup ? <div className="start-menu-rule" role="separator" /> : null}
-            <button aria-pressed={mode === connectMode}
+            {/* Decorative inside the listbox: the option labels carry the
+                grouping, and a listbox admits no separator child. */}
+            {startsGroup ? <div className="start-menu-rule" aria-hidden="true" /> : null}
+            <button role="option" aria-selected={mode === connectMode}
               className={`start-menu-item ${mode === connectMode ? 'on' : ''}`}
               data-act="start-mode" data-id={mode}>
               <span className="start-menu-tx">
@@ -132,6 +135,12 @@ function ClientMenu({ option, connectMode }: {
   );
 }
 
+/** The id of a blank's trigger button, so the keyboard handler in the shell
+ *  can hand focus back to it when its menu closes. */
+export function startBlankId(kind: 'tool' | 'client'): string {
+  return `start-blank-${kind}`;
+}
+
 function SentenceBlank({ kind, label, menu }: {
   kind: 'tool' | 'client';
   label: string;
@@ -140,8 +149,9 @@ function SentenceBlank({ kind, label, menu }: {
   const open = state.startMenuOpen === kind;
   return (
     <span className="start-blank-wrap">
-      <button className={`start-blank ${open ? 'on' : ''}`} data-act="start-menu" data-id={kind}
-        aria-expanded={open}>
+      <button id={startBlankId(kind)} className={`start-blank ${open ? 'on' : ''}`}
+        data-act="start-menu" data-id={kind}
+        aria-haspopup="listbox" aria-expanded={open}>
         {label}
         <span className="start-blank-chev" aria-hidden="true">
           <AppIcon icon={ICONS.chevronDown} />

@@ -103,7 +103,7 @@ import {
   EndpointAuthRow,
   EndpointStrip,
 } from '/src/features/endpoint-view';
-import { StartViewPage } from '/src/features/getting-started-view';
+import { StartViewPage, startBlankId } from '/src/features/getting-started-view';
 import { SharedKeyCard } from '/src/features/identity-card';
 import { Sheet } from '/src/sheet';
 
@@ -4835,10 +4835,42 @@ function positionFormMenu(): void {
 function focusMenuOption(): void {
   setTimeout(() => {
     const menu = document.querySelector<HTMLElement>('.cred-menu');
-    const option = menu?.querySelector<HTMLElement>('[aria-selected="true"]')
-      ?? menu?.querySelector<HTMLElement>('[role="option"]');
-    option?.focus();
+    focusMenuEdge(menu, 'selected');
   }, 0);
+}
+
+// Keys that walk an open listbox. Focus is the cursor, so moving it also
+// scrolls a menu taller than its max-height — focus() reveals its target.
+const MENU_MOVE_KEYS = new Set(['ArrowDown', 'ArrowUp', 'Home', 'End']);
+
+function menuOptions(menu: HTMLElement | null): HTMLElement[] {
+  return menu ? Array.from(menu.querySelectorAll<HTMLElement>('[role="option"]')) : [];
+}
+
+/** Focus the selected option (or an end of the list) as a menu opens. */
+function focusMenuEdge(menu: HTMLElement | null, at: 'selected' | 'last'): void {
+  const options = menuOptions(menu);
+  if (!options.length) return;
+  if (at === 'last') {
+    options[options.length - 1].focus();
+    return;
+  }
+  (options.find((option) => option.getAttribute('aria-selected') === 'true')
+    ?? options[0]).focus();
+}
+
+/** Move focus within an open listbox. Arrows step and clamp at the ends —
+ *  no wrap, matching a native select — while Home/End jump to an edge. */
+function moveMenuFocus(menu: HTMLElement | null, key: string): void {
+  const options = menuOptions(menu);
+  if (!options.length) return;
+  const from = options.indexOf(document.activeElement as HTMLElement);
+  const step = key === 'ArrowDown' ? 1 : -1;
+  const to = key === 'Home' ? 0
+    : key === 'End' ? options.length - 1
+    : from === -1 ? (step === 1 ? 0 : options.length - 1)
+    : Math.min(Math.max(from + step, 0), options.length - 1);
+  options[to].focus();
 }
 
 const SHEET_FOCUSABLE_SELECTOR =
@@ -6048,21 +6080,24 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'start-option':
       if (id && START_OPTIONS.some((option) => option.id === id)) {
         state.startOption = id;
-        state.startMenuOpen = null;
-        render();
+        // The picked option is about to unmount, so hand the keyboard back
+        // to the blank it belongs to (as the form listboxes do).
+        closeStartMenu('tool');
       }
       break;
     case 'start-mode':
       if (id) {
         state.connectMode = id;
-        state.startMenuOpen = null;
-        render();
+        closeStartMenu('client');
       }
       break;
     case 'start-menu':
-      state.startMenuOpen = state.startMenuOpen === id ? null
-        : id === 'tool' || id === 'client' ? id : null;
-      render();
+      if (state.startMenuOpen === id) {
+        closeStartMenu(state.startMenuOpen);
+      } else {
+        state.startMenuOpen = id === 'tool' || id === 'client' ? id : null;
+        render();
+      }
       break;
     case 'copy-text': {
       const text = btn.dataset.text ?? '';
@@ -7041,6 +7076,56 @@ function handleConnectionDragEnd(): void {
   commitConnDrag();
 }
 
+/** Close a hero blank's menu and put focus back on the blank itself, so the
+ *  sentence never loses the keyboard when a menu goes away. */
+function closeStartMenu(kind: 'tool' | 'client'): void {
+  state.startMenuOpen = null;
+  render();
+  focusField(startBlankId(kind));
+}
+
+// Focus an option once the hero blank's menu has mounted.
+function focusStartMenuOption(at: 'selected' | 'last'): void {
+  setTimeout(() => {
+    focusMenuEdge(document.querySelector<HTMLElement>('.start-menu'), at);
+  }, 0);
+}
+
+/** Keyboard driving for the Get started hero blanks, matching the form
+ *  listboxes: ArrowDown/ArrowUp on a closed blank opens its menu, arrows and
+ *  Home/End then walk the options — which scrolls a menu longer than its
+ *  max-height, since focus() reveals what it focuses — and Tab leaves by
+ *  closing the menu rather than stepping through the options one by one.
+ *  Enter and Space need no handling: the options are real buttons. Returns
+ *  whether the key was consumed. */
+function handleStartMenuKeyDown(e: KeyboardEvent): boolean {
+  if (e.altKey || e.ctrlKey || e.metaKey) return false;
+  const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const open = state.startMenuOpen;
+  if (!open) {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return false;
+    const kind = active?.closest<HTMLElement>('.start-blank')?.dataset.id;
+    if (kind !== 'tool' && kind !== 'client') return false;
+    e.preventDefault();
+    state.startMenuOpen = kind;
+    render();
+    focusStartMenuOption(e.key === 'ArrowUp' ? 'last' : 'selected');
+    return true;
+  }
+  const menu = document.querySelector<HTMLElement>('.start-menu');
+  if (MENU_MOVE_KEYS.has(e.key)) {
+    e.preventDefault();
+    moveMenuFocus(menu, e.key);
+    return true;
+  }
+  if (e.key === 'Tab' && active && menu?.contains(active)) {
+    e.preventDefault();
+    closeStartMenu(open);
+    return true;
+  }
+  return false;
+}
+
 function handleAppKeyDown(e: KeyboardEvent): void {
   // A focused row moves with Alt+Up/Down — the keyboard-accessible
   // equivalent of dragging it.
@@ -7077,11 +7162,12 @@ function handleAppKeyDown(e: KeyboardEvent): void {
     resetScroll();
     return;
   }
+  if (handleStartMenuKeyDown(e)) return;
   if (e.key === 'Escape') {
     if (state.addPalette) { state.addPalette = null; render(); return; }
     if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
     if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
-    if (state.startMenuOpen) { state.startMenuOpen = null; render(); return; }
+    if (state.startMenuOpen) { closeStartMenu(state.startMenuOpen); return; }
     if (state.connMenuOpen) {
       state.connMenuOpen = null;
       state.connMenuPoint = null;
@@ -7117,14 +7203,13 @@ function handleAppKeyDown(e: KeyboardEvent): void {
       focusMenuOption();
       return;
     }
-    const options = Array.from(
-      document.querySelectorAll<HTMLElement>('.cred-menu [role="option"]'));
-    if (!options.length) return;
-    const index = options.indexOf(document.activeElement as HTMLElement);
-    const next = index === -1
-      ? (e.key === 'ArrowDown' ? 0 : options.length - 1)
-      : Math.min(Math.max(index + (e.key === 'ArrowDown' ? 1 : -1), 0), options.length - 1);
-    options[next].focus();
+    moveMenuFocus(document.querySelector<HTMLElement>('.cred-menu'), e.key);
+  } else if ((e.key === 'Home' || e.key === 'End') && state.formMenuOpen
+      && e.target instanceof Element && e.target.closest('.cred-menu')) {
+    // Only once an option holds focus — Home/End inside a form field still
+    // belong to its caret.
+    e.preventDefault();
+    moveMenuFocus(document.querySelector<HTMLElement>('.cred-menu'), e.key);
   } else if (e.key === 'Tab' && state.formMenuOpen && e.target instanceof Element
       && e.target.closest('.cred-menu')) {
     // The listbox is portaled outside .sheet, so close it and move relative

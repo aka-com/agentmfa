@@ -733,6 +733,9 @@
   }
   .start-menu-item:hover{ background: var(--hover); }
   .start-menu-item.on{ background: var(--accent-wash); color: var(--accent-ink); }
+  /* A ring, not a wash: arrowing onto the chosen option must not erase the
+     tint that marks it chosen. */
+  .start-menu-item:focus-visible{ outline: 2px solid var(--accent); outline-offset: -2px; }
   .start-menu-ico{ display: inline-flex; line-height: 0; flex: 0 0 auto; }
   .start-menu-ico svg{ width: 15px; height: 15px; }
   .start-menu-name{ font-weight: 600; font-size: 0.8125rem; }

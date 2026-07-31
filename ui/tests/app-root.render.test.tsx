@@ -142,6 +142,88 @@ test('dismissed sample tools can be restored from settings', async () => {
   assert.ok(testingLibrary.getByRole(document.body, 'button', { name: 'Hide sample tools' }));
 });
 
+// Options are compared by their data-id, never by node identity: a failed
+// assert.equal on two jsdom elements spends minutes inspecting the DOM graph
+// to build its diff, which reads as a hung test rather than a failed one.
+const activeOptionId = (): string | null | undefined =>
+  document.activeElement?.getAttribute('data-id');
+
+test('the hero-sentence menus open and move under the arrow keys', async () => {
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="start"]')!,
+  );
+  const blank = await testingLibrary.waitFor(() => {
+    const trigger = document.querySelector<HTMLButtonElement>('#start-blank-client');
+    assert.ok(trigger, 'the client blank renders on the Get started tab');
+    return trigger;
+  });
+
+  // ArrowDown on a closed blank opens its listbox on the current choice.
+  blank.focus();
+  testingLibrary.fireEvent.keyDown(blank, { key: 'ArrowDown' });
+  const ids = await testingLibrary.waitFor(() => {
+    const options = [...document.querySelectorAll<HTMLElement>('.start-menu [role="option"]')];
+    assert.ok(options.length > 2, 'the client menu has options to walk');
+    assert.equal(document.activeElement?.getAttribute('aria-selected'), 'true');
+    return options.map((option) => option.dataset.id);
+  });
+  const last = ids[ids.length - 1];
+
+  // Arrows step, Home/End jump, and neither runs off an end of the list.
+  const press = (key: string): void => {
+    testingLibrary.fireEvent.keyDown(document.activeElement as HTMLElement, { key });
+  };
+  press('Home');
+  assert.equal(activeOptionId(), ids[0]);
+  press('ArrowUp');
+  assert.equal(activeOptionId(), ids[0]);
+  press('ArrowDown');
+  assert.equal(activeOptionId(), ids[1]);
+  press('ArrowUp');
+  assert.equal(activeOptionId(), ids[0]);
+  press('End');
+  assert.equal(activeOptionId(), last);
+  press('ArrowDown');
+  assert.equal(activeOptionId(), last);
+
+  // Tab leaves the menu and Escape closes it — both hand the keyboard back to
+  // the blank rather than dropping it on the document. ArrowUp reopens from
+  // the far end, the way a native select does.
+  press('Tab');
+  await testingLibrary.waitFor(() => {
+    assert.equal(document.querySelector('.start-menu'), null);
+    assert.equal(document.activeElement?.id, 'start-blank-client');
+  });
+  press('ArrowUp');
+  await testingLibrary.waitFor(() => {
+    assert.ok(document.querySelector('.start-menu'));
+    assert.equal(activeOptionId(), last);
+  });
+  press('Escape');
+  await testingLibrary.waitFor(() => {
+    assert.equal(document.querySelector('.start-menu'), null);
+    assert.equal(document.activeElement?.id, 'start-blank-client');
+  });
+
+  // Activating an option — the options are real buttons, so Enter clicks
+  // them — rewrites the sentence and leaves focus on the blank it changed.
+  const toolBlank = document.querySelector<HTMLButtonElement>('#start-blank-tool')!;
+  const before = toolBlank.textContent;
+  toolBlank.focus();
+  testingLibrary.fireEvent.keyDown(toolBlank, { key: 'ArrowDown' });
+  await testingLibrary.waitFor(() => {
+    assert.ok(document.querySelector('.start-menu'));
+    assert.equal(document.activeElement?.getAttribute('aria-selected'), 'true');
+  });
+  press('ArrowDown');
+  testingLibrary.fireEvent.click(document.activeElement as HTMLElement);
+  await testingLibrary.waitFor(() => {
+    assert.equal(document.querySelector('.start-menu'), null);
+    assert.equal(document.activeElement?.id, 'start-blank-tool');
+    assert.notEqual(document.querySelector('#start-blank-tool')?.textContent, before);
+  });
+});
+
 test('key rotation requires an ordinary destructive confirmation', async () => {
   testingLibrary.fireEvent.click(
     testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }),
