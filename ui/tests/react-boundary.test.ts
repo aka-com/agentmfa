@@ -289,6 +289,19 @@ test('selected master rows have no left accent border', async () => {
   assert.doesNotMatch(selected, /border-left|inset\s+\d+px\s+0/);
 });
 
+test('the narrow connection menu stays inside the detail slide-over', async () => {
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+  const narrow = styles.match(
+    /@media \(max-width: 720px\) \{([\s\S]*?)\n\}\n@keyframes cd-slide/,
+  )?.[1];
+
+  assert.ok(narrow, 'narrow detail-panel styles are present');
+  assert.match(
+    narrow,
+    /\.cd-actions \.tile-menu \{\s*width: min\(250px, calc\(92vw - 37px\)\); min-width: 0;/,
+  );
+});
+
 test('Inbox and Activity Log sit above the normal sidebar footer', async () => {
   const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
 

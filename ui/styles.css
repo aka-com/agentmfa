@@ -1578,6 +1578,12 @@
     box-shadow: -16px 0 40px rgba(10,15,40,.28);
     padding: 16px 18px 8px;
   }
+  /* The tray window is narrower than the menu's usual 250px minimum. Keep
+     the right-aligned menu inside the slide-over's padded content box so its
+     leading icons and labels are not clipped by the pane's scroll container. */
+  .cd-actions .tile-menu {
+    width: min(250px, calc(92vw - 37px)); min-width: 0;
+  }
   .catalog.detail-open .conn-detail-pane { display: block; animation: cd-slide .2s ease; }
   .catalog.detail-open .conn-detail-backdrop {
     display: block; position: fixed; inset: 0; z-index: 6;
