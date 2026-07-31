@@ -231,10 +231,10 @@ export interface AppState {
   wiringTools: WiringToolsState | null;
   activityQuery: string;
   activityAgent: string | null;
-  activityIssuesOnly: boolean;
+  activityAlertsOnly: boolean;
   requestQuery: string;
   requestAgent: string | null;
-  requestIssuesOnly: boolean;
+  requestAlertsOnly: boolean;
   expandedRequests: string[];
 }
 
@@ -338,10 +338,10 @@ function createInitialState(): AppState {
     wiringTools: null,
     activityQuery: '',
     activityAgent: null,
-    activityIssuesOnly: false,
+    activityAlertsOnly: false,
     requestQuery: '',
     requestAgent: null,
-    requestIssuesOnly: false,
+    requestAlertsOnly: false,
     expandedRequests: [],
   };
 }

@@ -186,10 +186,10 @@ function clearBrokerOwnedState(): void {
   // an agent filter from broker A would silently empty broker B's activity.
   state.activityQuery = '';
   state.activityAgent = null;
-  state.activityIssuesOnly = false;
+  state.activityAlertsOnly = false;
   state.requestQuery = '';
   state.requestAgent = null;
-  state.requestIssuesOnly = false;
+  state.requestAlertsOnly = false;
   state.expandedRequests = [];
   state.toolSearch = '';
   state.secretSearch = '';
@@ -802,11 +802,11 @@ function RequestInbox(): ReactNode {
   const active = activeRequests(state.approvals, state.elicitations);
   const activeIds = new Set(active.map((request) => request.id));
   const allRecent = recentRequests(state.requests, activeIds);
-  const requestAgents = [...new Set(allRecent.map((record) => record.agent).filter(Boolean))];
+  const requestAgentCounts = countAgents(allRecent.map((record) => record.agent));
   const needle = state.requestQuery.trim().toLowerCase();
   const recent = allRecent.filter((record) => {
     if (state.requestAgent && record.agent !== state.requestAgent) return false;
-    if (state.requestIssuesOnly && requestOutcome(record).tone === 'success') return false;
+    if (state.requestAlertsOnly && requestOutcome(record).tone === 'success') return false;
     if (!needle) return true;
     return record.summary.toLowerCase().includes(needle)
       || (record.detail || '').toLowerCase().includes(needle)
@@ -926,19 +926,12 @@ function RequestInbox(): ReactNode {
                       placeholder="Filter requests…" aria-label="Filter request history"
                       value={state.requestQuery}
                       onChange={(e) => { state.requestQuery = e.currentTarget.value; render(); }} />
-                    <button className={`seg-btn act-filter ${state.requestIssuesOnly ? 'on' : ''}`}
-                      data-act="request-filter-issues" aria-pressed={state.requestIssuesOnly}
-                      title="Only show requests that were denied, failed, or expired">Issues</button>
-                    {requestAgents.map((agent) => (
-                      <button key={agent}
-                        className={`seg-btn act-filter ${state.requestAgent === agent ? 'on' : ''}`}
-                        data-act="request-filter-agent" data-value={agent}
-                        aria-pressed={state.requestAgent === agent}
-                        title={`Only show requests from agent “${agent}” (self-reported label)`}>
-                        <span className="act-filter-key">agent:</span>
-                        <span className="untrusted-identity" dir="auto">{agent}</span>
-                      </button>
-                    ))}
+                    <button className={`seg-btn act-filter ${state.requestAlertsOnly ? 'on' : ''}`}
+                      data-act="request-filter-alerts" aria-pressed={state.requestAlertsOnly}
+                      title="Only show requests that were denied, failed, or expired">Alerts</button>
+                    <AgentFilterChips counts={requestAgentCounts} selected={state.requestAgent}
+                      act="request-filter-agent" noun="requests"
+                      onSelect={(agent) => { state.requestAgent = agent; render(); }} />
                   </div>
                 : null}
               {recent.length === 0
@@ -2410,11 +2403,69 @@ function ActivityList({ entries }: { entries: ActivityEntry[] }): ReactNode {
   );
 }
 
+/* Agent filter chips overflow into a select past this many agents. */
+const AGENT_CHIP_LIMIT = 5;
+
+/** How often each agent appears in the loaded window; drives which chips
+ * stay visible when the row overflows. */
+function countAgents(agents: Array<string | null | undefined>): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const agent of agents) {
+    if (agent) counts.set(agent, (counts.get(agent) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** One filter chip per agent, most active first. Chips beat a dropdown at
+ * small scale, but the row must not grow unbounded: past AGENT_CHIP_LIMIT
+ * the tail collapses into a native "+N more" select, and an agent chosen
+ * there is promoted to a visible pressed chip on the next render. */
+function AgentFilterChips({ counts, selected, act, noun, onSelect }: {
+  counts: Map<string, number>;
+  selected: string | null;
+  act: string;
+  noun: 'activity' | 'requests';
+  onSelect: (agent: string) => void;
+}): ReactNode {
+  const agents = [...counts.keys()].sort((a, b) =>
+    ((counts.get(b) ?? 0) - (counts.get(a) ?? 0)) || a.localeCompare(b));
+  let visible = agents;
+  let overflow: string[] = [];
+  if (agents.length > AGENT_CHIP_LIMIT) {
+    visible = agents.slice(0, AGENT_CHIP_LIMIT);
+    if (selected && !visible.includes(selected)) visible = [...visible, selected];
+    overflow = agents.filter((agent) => !visible.includes(agent));
+  }
+  return (
+    <>
+      {visible.map((agent) => (
+        <button key={agent} className={`seg-btn act-filter ${selected === agent ? 'on' : ''}`}
+          data-act={act} data-value={agent}
+          aria-pressed={selected === agent}
+          title={`Only show ${noun} from agent “${agent}” (self-reported label)`}>
+          <span className="act-filter-key">agent:</span>
+          <span className="untrusted-identity" dir="auto">{agent}</span>
+        </button>
+      ))}
+      {overflow.length > 0
+        ? <select className="act-filter-more" value=""
+            aria-label={`Filter ${noun} by another agent`}
+            onChange={(e) => { if (e.currentTarget.value) onSelect(e.currentTarget.value); }}>
+            <option value="" disabled>+{overflow.length} more…</option>
+            {overflow.map((agent) => (
+              <option key={agent} value={agent} dir="auto">{agent}</option>
+            ))}
+          </select>
+        : null}
+    </>
+  );
+}
+
 /** The activity entries the current filters keep. */
 function filteredActivity(): ActivityEntry[] {
   const needle = state.activityQuery.trim().toLowerCase();
   return state.activity.filter((entry) => {
-    if (state.activityIssuesOnly && entry.tone !== 'danger' && entry.tone !== 'warning') {
+    if (state.activityAlertsOnly && entry.tone !== 'danger' && entry.tone !== 'warning') {
       return false;
     }
     if (state.activityAgent && entry.agent !== state.activityAgent) return false;
@@ -2473,8 +2524,7 @@ function ActivityView(): ReactNode {
       </>
     );
   }
-  // Agents seen in the loaded window; chips beat a dropdown at this scale.
-  const agents = [...new Set(state.activity.map((entry) => entry.agent).filter(Boolean))] as string[];
+  const agentCounts = countAgents(state.activity.map((entry) => entry.agent));
   const entries = filteredActivity();
   const hasOlder = state.activityNextBefore !== null;
   return (
@@ -2485,18 +2535,12 @@ function ActivityView(): ReactNode {
           placeholder="Filter activity…" aria-label="Filter activity"
           value={state.activityQuery}
           onChange={(e) => { state.activityQuery = e.currentTarget.value; render(); }} />
-        <button className={`seg-btn act-filter ${state.activityIssuesOnly ? 'on' : ''}`}
-          data-act="act-filter-issues" aria-pressed={state.activityIssuesOnly}
-          title="Only show warnings and errors">Issues</button>
-        {agents.map((agent) => (
-          <button key={agent} className={`seg-btn act-filter ${state.activityAgent === agent ? 'on' : ''}`}
-            data-act="act-filter-agent" data-value={agent}
-            aria-pressed={state.activityAgent === agent}
-            title={`Only show activity from agent “${agent}” (self-reported label)`}>
-            <span className="act-filter-key">agent:</span>
-            <span className="untrusted-identity" dir="auto">{agent}</span>
-          </button>
-        ))}
+        <button className={`seg-btn act-filter ${state.activityAlertsOnly ? 'on' : ''}`}
+          data-act="act-filter-alerts" aria-pressed={state.activityAlertsOnly}
+          title="Only show warnings and errors">Alerts</button>
+        <AgentFilterChips counts={agentCounts} selected={state.activityAgent}
+          act="act-filter-agent" noun="activity"
+          onSelect={(agent) => { state.activityAgent = agent; render(); }} />
       </div>
       {entries.length
         ? <ActivityList entries={entries} />
@@ -2535,7 +2579,7 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
 
   if (state.tab !== 'activity' || state.sheet || state.menuOpen) return;
   // With filters active the cheap prepend would bypass them; re-render.
-  if (state.activityQuery || state.activityAgent || state.activityIssuesOnly) {
+  if (state.activityQuery || state.activityAgent || state.activityAlertsOnly) {
     render();
     return;
   }
@@ -6408,8 +6452,8 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       });
       break;
     }
-    case 'act-filter-issues':
-      state.activityIssuesOnly = !state.activityIssuesOnly;
+    case 'act-filter-alerts':
+      state.activityAlertsOnly = !state.activityAlertsOnly;
       render();
       break;
     case 'act-filter-agent': {
@@ -6421,8 +6465,8 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'activity-load-older':
       await loadOlderActivity();
       break;
-    case 'request-filter-issues':
-      state.requestIssuesOnly = !state.requestIssuesOnly;
+    case 'request-filter-alerts':
+      state.requestAlertsOnly = !state.requestAlertsOnly;
       render();
       break;
     case 'request-filter-agent': {

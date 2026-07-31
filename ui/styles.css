@@ -1792,6 +1792,16 @@
    as the value of a filter, not as part of the app's own copy. */
 .act-filter-key { color: var(--muted); font-weight: 400; }
 .act-filter.on .act-filter-key { color: inherit; opacity: .8; }
+/* Overflow select for agents past the chip limit, dressed as a sibling
+   chip; it always shows its "+N more…" placeholder because picking an
+   agent promotes that agent to a pressed chip instead. */
+.act-filter-more {
+  flex: 0 0 auto; appearance: none; -webkit-appearance: none;
+  font: inherit; font-size: 0.75rem; color: var(--muted);
+  background: var(--btn-bg); border: 1px solid var(--line-mid); border-radius: 999px;
+  padding: 3px 10px; cursor: pointer;
+}
+.act-filter-more:hover { background: var(--btn-hover); }
 .activity-page-footer {
   display: flex; align-items: center; justify-content: center; gap: 9px; flex-wrap: wrap;
   padding: 14px 8px 4px; color: var(--muted); font-size: 0.75rem; text-align: center;
