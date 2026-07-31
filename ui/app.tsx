@@ -1331,7 +1331,7 @@ function CredentialsExpansion(): ReactNode {
 
 /** The primary action label a catalog entry carries wherever it can be added. */
 function catalogAddLabel(entry: CatalogEntry): string {
-  return entry.requiresSetup || ['mcp', 'http'].includes(entry.id) || entry.preset
+  return entry.requiresSetup || ['mcp', 'http', 'postgres', 'ssh'].includes(entry.id) || entry.preset
     ? 'Configure'
     : entry.mcp && !entry.mcpTemplate?.serverUrl
     ? 'Add custom app'

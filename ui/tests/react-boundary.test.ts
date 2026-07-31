@@ -441,10 +441,10 @@ test('the first-use task does not restate automatic agent access', async () => {
   assert.doesNotMatch(app, /Tools are enabled for all agents when you add them\./);
 });
 
-test('generic custom rows use the Configure catalog action', async () => {
+test('setup-oriented rows use the Configure catalog action', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
 
-  assert.match(app, /\['mcp', 'http'\]\.includes\(entry\.id\)/);
+  assert.match(app, /\['mcp', 'http', 'postgres', 'ssh'\]\.includes\(entry\.id\)/);
 });
 
 test('the settings menu shows the build version above its first item', async () => {

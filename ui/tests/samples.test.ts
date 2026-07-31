@@ -50,6 +50,17 @@ test('sampleToolById resolves samples and nothing else', () => {
   assert.equal(sampleToolById('github'), undefined);
 });
 
+test('samples use concise descriptions on the Tools page', () => {
+  assert.equal(
+    sampleToolById('sample-hackernews')?.description,
+    'Front-page stories, comments & search.',
+  );
+  assert.equal(
+    sampleToolById('sample-stackoverflow')?.description,
+    'Search questions & answers across Stack Exchange.',
+  );
+});
+
 test('a sample is recognized by its pinned host, not its name', () => {
   const [hn] = SAMPLE_TOOLS;
   assert.equal(sampleConnection(hn, []), null);
