@@ -46,7 +46,7 @@ test('button order and labels match the agreed set per kind', () => {
   );
   assert.deepEqual(
     ENDPOINT_FORMATS.api.map((f) => f.label),
-    ['curl', '.env snippet'],
+    ['curl', '.env snippet', 'Python httpx', 'Node fetch', 'OpenAI env'],
   );
 });
 
@@ -190,6 +190,37 @@ test('api formats embed the fetched secret, or a placeholder without one', () =>
     endpointFormatByKey('api', 'env')?.build(c, base, 'end_secret'),
     `API_BASE_URL=${base}\nAPI_TOKEN=end_secret`,
   );
+});
+
+test('api SDK formats render runnable snippets with the same bearer header', () => {
+  const c = conn('api', 'Internal API');
+  const base = 'http://127.0.0.1:52000';
+  assert.equal(
+    endpointFormatByKey('api', 'httpx')?.build(c, base, 'end_secret'),
+    [
+      'import httpx',
+      '',
+      'client = httpx.Client(',
+      `    base_url="${base}",`,
+      '    headers={"Authorization": "Bearer end_secret"},',
+      ')',
+    ].join('\n'),
+  );
+  assert.equal(
+    endpointFormatByKey('api', 'fetch')?.build(c, base, null),
+    [
+      `const response = await fetch("${base}/", {`,
+      '  headers: { Authorization: "Bearer <endpoint-secret>" },',
+      '});',
+    ].join('\n'),
+  );
+  assert.equal(
+    endpointFormatByKey('api', 'openai-env')?.build(c, base, 'end_secret'),
+    `OPENAI_BASE_URL=${base}\nOPENAI_API_KEY=end_secret`,
+  );
+  for (const key of ['httpx', 'fetch', 'openai-env']) {
+    assert.equal(endpointFormatByKey('api', key)?.needsSecret, true);
+  }
 });
 
 test('unknown format keys resolve to null', () => {

@@ -214,6 +214,40 @@ export const ENDPOINT_FORMATS: Record<ConnectionType, EndpointFormat[]> = {
       build: (_c, base, secret) =>
         `API_BASE_URL=${base}\nAPI_TOKEN=${secret || SECRET_PLACEHOLDER}`,
     },
+    {
+      key: 'httpx',
+      label: 'Python httpx',
+      title: 'Copy a Python httpx client wired to the endpoint',
+      needsSecret: true,
+      build: (_c, base, secret) => [
+        'import httpx',
+        '',
+        'client = httpx.Client(',
+        `    base_url="${base}",`,
+        `    headers={"Authorization": "Bearer ${secret || SECRET_PLACEHOLDER}"},`,
+        ')',
+      ].join('\n'),
+    },
+    {
+      key: 'fetch',
+      label: 'Node fetch',
+      title: 'Copy a Node fetch call presenting the endpoint secret',
+      needsSecret: true,
+      build: (_c, base, secret) => [
+        `const response = await fetch("${base}/", {`,
+        `  headers: { Authorization: "Bearer ${secret || SECRET_PLACEHOLDER}" },`,
+        '});',
+      ].join('\n'),
+    },
+    {
+      key: 'openai-env',
+      label: 'OpenAI env',
+      title: 'Copy OPENAI_BASE_URL and OPENAI_API_KEY overrides pointing an '
+        + 'OpenAI-compatible SDK at the endpoint',
+      needsSecret: true,
+      build: (_c, base, secret) =>
+        `OPENAI_BASE_URL=${base}\nOPENAI_API_KEY=${secret || SECRET_PLACEHOLDER}`,
+    },
   ],
 };
 

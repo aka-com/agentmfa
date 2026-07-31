@@ -1465,6 +1465,22 @@ fn endpoint_copy_text(
             "API_BASE_URL={}\nAPI_TOKEN={}",
             endpoint.dsn, endpoint.secret
         )),
+        ("api", "httpx") => Ok(format!(
+            "import httpx\n\nclient = httpx.Client(\n    base_url=\"{}\",\n    \
+             headers={{\"Authorization\": \"Bearer {}\"}},\n)",
+            endpoint.dsn.trim_end_matches('/'),
+            endpoint.secret
+        )),
+        ("api", "fetch") => Ok(format!(
+            "const response = await fetch(\"{}/\", {{\n  \
+             headers: {{ Authorization: \"Bearer {}\" }},\n}});",
+            endpoint.dsn.trim_end_matches('/'),
+            endpoint.secret
+        )),
+        ("api", "openai-env") => Ok(format!(
+            "OPENAI_BASE_URL={}\nOPENAI_API_KEY={}",
+            endpoint.dsn, endpoint.secret
+        )),
         (_, "secret") => Ok(endpoint.secret.clone()),
         (_, _) => Err("unknown endpoint copy format".into()),
     }
@@ -2174,6 +2190,55 @@ mod tests {
             shell_quoted("/tmp/a \"quoted\" $socket"),
             "\"/tmp/a \\\"quoted\\\" \\$socket\""
         );
+    }
+
+    #[test]
+    fn api_endpoint_copy_formats_render_the_secret_natively() {
+        let connection: aka_api::ConnectionDto = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "name": "internal-api",
+            "type": "api",
+            "target": "https://api.internal.example",
+            "secret_names": [],
+            "oauth": false,
+            "agent_access": {"enabled": true},
+        }))
+        .unwrap();
+        let endpoint = IssuedEndpointDto {
+            endpoint_id: "ep_api".into(),
+            kind: "api".into(),
+            dsn: "http://127.0.0.1:52000".into(),
+            tcp_dsn: None,
+            secret: "end_secret".into(),
+            example: String::new(),
+            expires_at: String::new(),
+            expires_in_secs: Some(60),
+        };
+        let copy = |format: &str| endpoint_copy_text(&connection, &endpoint, format, None).unwrap();
+        assert_eq!(
+            copy("curl"),
+            "curl -H \"Authorization: Bearer end_secret\" http://127.0.0.1:52000/"
+        );
+        assert_eq!(
+            copy("env"),
+            "API_BASE_URL=http://127.0.0.1:52000\nAPI_TOKEN=end_secret"
+        );
+        assert_eq!(
+            copy("httpx"),
+            "import httpx\n\nclient = httpx.Client(\n    \
+             base_url=\"http://127.0.0.1:52000\",\n    \
+             headers={\"Authorization\": \"Bearer end_secret\"},\n)"
+        );
+        assert_eq!(
+            copy("fetch"),
+            "const response = await fetch(\"http://127.0.0.1:52000/\", {\n  \
+             headers: { Authorization: \"Bearer end_secret\" },\n});"
+        );
+        assert_eq!(
+            copy("openai-env"),
+            "OPENAI_BASE_URL=http://127.0.0.1:52000\nOPENAI_API_KEY=end_secret"
+        );
+        assert!(endpoint_copy_text(&connection, &endpoint, "nope", None).is_err());
     }
 
     #[test]
