@@ -26,6 +26,7 @@ import {
   removeBrokerQueryData,
   setBrokerQueryData,
 } from './query-client';
+import { readSamplesDismissed } from './samples';
 import { UiStore } from './ui-store';
 
 export const TABS = ['start', 'connections', 'secrets', 'inbox', 'activity'] as const;
@@ -199,6 +200,10 @@ export interface AppState {
   toolSearch: string;
   secretSearch: string;
   catalogActionMenuOpen: string | null;
+  /** The ✕ on the sample-tools card was pressed (persisted per machine). */
+  samplesDismissed: boolean;
+  /** Sample id with a one-press connect in flight, disabling its button. */
+  sampleConnecting: string | null;
   sectionsExpanded: string[];
   startOption: string;
   connectMode: string;
@@ -308,6 +313,8 @@ function createInitialState(): AppState {
     toolSearch: '',
     secretSearch: '',
     catalogActionMenuOpen: null,
+    samplesDismissed: readSamplesDismissed(),
+    sampleConnecting: null,
     sectionsExpanded: [],
     startOption: 'postgres',
     connectMode: 'direct',

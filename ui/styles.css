@@ -45,6 +45,16 @@
   --brand-claude-ink: #b85535;
   --brand-openai-bg: rgba(16, 163, 127, .12);
   --brand-openai-ink: #087a60;
+  --brand-hn-bg: rgba(255, 102, 0, .14);
+  --brand-hn-ink: #c85200;
+  --brand-so-bg: rgba(244, 128, 36, .14);
+  --brand-so-ink: #b95f07;
+
+  /* the sample-tools spotlight card: the app's one tinted surface, blending
+     the interactive accent into the samples' shared brand orange */
+  --samples-border: rgba(10, 124, 255, .32);
+  --samples-wash-a: rgba(10, 124, 255, .09);
+  --samples-wash-b: rgba(255, 102, 0, .07);
 
   /* per-kind tints: one hue per kind (MCP app / database / SSH /
      stream / plain API), carried at wash strength so a mixed tool list sorts
@@ -1179,6 +1189,13 @@
     --brand-claude-ink: #ef9a7d;
     --brand-openai-bg: rgba(82,207,172,.16);
     --brand-openai-ink: #72d9bb;
+    --brand-hn-bg: rgba(255,102,0,.20);
+    --brand-hn-ink: #ff8a3d;
+    --brand-so-bg: rgba(244,128,36,.18);
+    --brand-so-ink: #f9a05c;
+    --samples-border: rgba(88,166,255,.32);
+    --samples-wash-a: rgba(88,166,255,.11);
+    --samples-wash-b: rgba(255,102,0,.10);
     --kind-mcp-ink: #a3a6ff;
     --kind-mcp-wash: rgba(88,92,220,.20);
     --kind-db-ink: #8ec4e8;
@@ -1353,6 +1370,37 @@
 .cat-ico.kind-db { color: var(--kind-db-ink); background: var(--kind-db-wash); }
 .cat-ico.kind-ssh { color: var(--kind-ssh-ink); background: var(--kind-ssh-wash); }
 .cat-ico.kind-api { color: var(--kind-api-ink); background: var(--kind-api-wash); }
+
+/* ------------------------------ Sample tools ----------------------------- */
+/* The spotlight card above the tools list (SamplesCard): a tinted surface so
+   first-run eyes land on it, holding two standard rows whose Connect pills
+   are the only filled-accent pills in the list. Brand chips carry each
+   vendor's mark at wash strength, like the kind tints above. */
+.samples-card {
+  border: 1px solid var(--samples-border); border-radius: 12px; overflow: hidden;
+  background:
+    linear-gradient(115deg, var(--samples-wash-a), var(--samples-wash-b)),
+    var(--card-bg);
+  box-shadow: 0 1px 3px rgba(20,24,50,.06);
+}
+.samples-head { display: flex; align-items: flex-start; gap: 10px; padding: 12px 12px 10px 14px; }
+.samples-spark { display: inline-flex; margin-top: 2px; color: var(--accent-text); }
+.samples-title { flex: 1; min-width: 0; }
+.samples-title b { display: block; font-size: 0.875rem; }
+.samples-title span { display: block; margin-top: 1px; color: var(--muted); font-size: 0.78125rem; }
+.samples-dismiss { flex: 0 0 auto; margin: -2px -2px 0 0; }
+.samples-card .cat-row { border-top: 1px solid var(--line); }
+.cat-ico.brand-hackernews { color: var(--brand-hn-ink); background: var(--brand-hn-bg); }
+.cat-ico.brand-stackoverflow { color: var(--brand-so-ink); background: var(--brand-so-bg); }
+/* Same pill geometry as the Connect/Add buttons beside it, in ok-green: a
+   connected sample is a done state, not another action. */
+.sample-connected {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
+  padding: 4px 12px; border: 1px solid var(--ok-border); border-radius: 999px;
+  background: var(--ok-wash); color: var(--ok-ink);
+  font-size: 0.78125rem; font-weight: 600;
+}
+.sample-connected svg { width: 12px; height: 12px; }
 
 /* ---- flat tools list (steady state) ----------------------------------- */
 /* One row per connection; the catalog waits behind "+ Add tool". */

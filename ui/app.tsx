@@ -59,6 +59,10 @@ import {
   LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
 } from '/src/broker';
 import { sameBrokerScope } from '/src/broker-scope';
+import {
+  SAMPLE_TOOLS, persistSamplesDismissed, sampleConnection, sampleToolById,
+} from '/src/samples';
+import type { SampleTool } from '/src/samples';
 import { activityIdentity } from '/src/activity';
 import { ACTIVITY_PAGE_LIMIT, refreshActivityPages } from '/src/activity-refresh';
 import { activeRequestCount, activeRequests, anchorExpiry, recentRequests } from '/src/requests';
@@ -1993,6 +1997,59 @@ function AddToolPalette(): ReactNode {
   );
 }
 
+/* ---- sample tools ------------------------------------------------------- */
+// The spotlight card above the tools list: two keyless public APIs whose
+// Connect is genuinely zero-step (see src/samples.ts). Only the tinted
+// surface is new — the rows, icon chips, and pills are the standard catalog
+// components, so the card reads as tools, not an announcement. It stays
+// pinned through first run and steady state until its ✕ dismisses it for
+// good; a connected sample flips its button to a Connected badge and the
+// card keeps offering the other one.
+
+function SampleRow({ sample }: { sample: SampleTool }): ReactNode {
+  const connected = Boolean(sampleConnection(sample, state.connections));
+  const connecting = state.sampleConnecting === sample.id;
+  return (
+    <div className="cat-row">
+      <span className={`cat-ico brand-${sample.icon}`} aria-hidden="true">
+        <Icon markup={ICONS[sample.icon]} />
+      </span>
+      <div className="cat-tx">
+        <b>{sample.name}</b>
+        <span>{sample.description}</span>
+      </div>
+      {connected
+        ? <span className="sample-connected"><Icon markup={ICONS.check} /> Connected</span>
+        : <button className="btn primary cat-add" data-act="connect-sample"
+            data-id={sample.id} disabled={connecting}>
+            {connecting ? 'Connecting…' : 'Connect'}
+          </button>}
+    </div>
+  );
+}
+
+function SamplesCard(): ReactNode {
+  if (state.samplesDismissed) return null;
+  return (
+    <div className="cat-section">
+      <div className="samples-card">
+        <div className="samples-head">
+          <span className="samples-spark" aria-hidden="true"><Icon markup={ICONS.sparkles} /></span>
+          <div className="samples-title">
+            <b>Try a sample tool</b>
+            <span>Two live public APIs. One click, zero setup, nothing to configure.</span>
+          </div>
+          <button className="icon-btn samples-dismiss" data-act="dismiss-samples"
+            title="Hide sample tools" aria-label="Hide sample tools">
+            <Icon markup={ICONS.x} />
+          </button>
+        </div>
+        {SAMPLE_TOOLS.map((sample) => <SampleRow key={sample.id} sample={sample} />)}
+      </div>
+    </div>
+  );
+}
+
 function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }): ReactNode {
   const byId = new Map(state.connections.map((connection) => [connection.id, connection] as const));
   const orderedConnections = dragConnOrder
@@ -2049,6 +2106,7 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
     <div className={`catalog ${state.connDetailOpen ? 'detail-open' : ''}`}>
       <div className="tools-split">
         <div className="tools-list">
+          {mode !== 'dropdown' ? <SamplesCard /> : null}
           {state.connections.length
             ? <div className="cat-section">
                 <div className={`cat-rows${reorderable ? ' reorderable' : ''}${dragConnId ? ' drag-active' : ''}`}
@@ -5081,6 +5139,43 @@ async function quickConnectCatalogMcp(entry: CatalogEntry): Promise<void> {
   }
 }
 
+/**
+ * One press → a live tool. A sample is a keyless public API, so there is no
+ * credential to collect and no form to open: register the pinned origin the
+ * way the add form would with "No credential" chosen (empty template), then
+ * test the saved row so its health verdict appears immediately.
+ */
+async function connectSampleTool(sampleId: string): Promise<void> {
+  const sample = sampleToolById(sampleId);
+  if (!sample || state.sampleConnecting) return;
+  if (sampleConnection(sample, state.connections)) return;
+  const epoch = brokerEpoch;
+  state.sampleConnecting = sample.id;
+  render();
+  const name = availableConnectionName(sample.name);
+  const input: ConnectionInput = {
+    name,
+    type: 'api',
+    host: sample.host,
+    scheme: 'https',
+    port: null,
+    template: '',
+    mcp_path: null,
+    trusted_ca_bundle_path: null,
+    test_path: sample.testPath,
+  };
+  const ok = await run(() => invoke('add_connection', { input }));
+  if (state.sampleConnecting === sample.id) state.sampleConnecting = null;
+  if (!brokerEpochIsCurrent(epoch)) return;
+  if (!ok) { render(); return; }
+  toast('🔌 Connected');
+  await refresh('all');
+  if (!brokerEpochIsCurrent(epoch)) return;
+  render();
+  const saved = state.connections.find((connection) => connection.name === name);
+  if (saved) void runConnectionTest(saved.id);
+}
+
 async function saveSecret(): Promise<void> {
   const sheet = state.sheet;
   if (!sheet || (sheet.kind !== 'add-secret' && sheet.kind !== 'edit-secret')) return;
@@ -6037,6 +6132,14 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       if (entry) await addCatalogEntry(entry);
       break;
     }
+    case 'connect-sample':
+      await connectSampleTool(id);
+      break;
+    case 'dismiss-samples':
+      state.samplesDismissed = true;
+      persistSamplesDismissed();
+      render();
+      break;
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
       if (!c) break;
