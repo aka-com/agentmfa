@@ -684,7 +684,10 @@ impl ConnectionInput {
                 },
                 // Dispatch-time signing and upstream mTLS are configured via
                 // the CLI/manage plane; the desktop form does not offer them
-                // yet (UI follow-up tracked in the backlog).
+                // yet (BACKLOG UI-30). A connection created here cannot carry
+                // either, and an edit made here would drop them, which is why
+                // `inherit_signer_and_mtls` re-attaches them for an edit that
+                // leaves the pinned target alone.
                 signer: None,
                 client_cert_path: None,
                 client_key_path: None,
