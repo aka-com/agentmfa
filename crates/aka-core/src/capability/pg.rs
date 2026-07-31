@@ -2763,6 +2763,11 @@ const SCAN_PEEK_CAP: usize = 1024;
 /// Statements recorded for one session before the audit entry starts counting
 /// rather than listing.
 const STATEMENT_AUDIT_MAX: usize = 100;
+/// Bound both statement loss on a crash and audit-entry fan-out on a busy
+/// session: flush after this many observed statements even if the timer has
+/// not fired yet.
+const STATEMENT_AUDIT_BATCH_MAX: u64 = 16;
+const STATEMENT_AUDIT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// One in-progress message payload.
 struct ScanBody {
@@ -2892,24 +2897,34 @@ struct SpliceAudit {
 }
 
 impl SpliceAudit {
-    /// Write the session's statement record. One entry per session rather than
-    /// one per statement, so a busy session cannot flood the log.
-    fn finish(&self, statements: Vec<String>, total: u64) {
-        if total == 0 {
+    /// Write one bounded batch of observed statements.
+    ///
+    /// Flushing before the upstream write makes the audit durable as soon as
+    /// the broker accepts a complete statement frame. Batches are bounded by
+    /// count and time rather than emitted once per statement, while
+    /// `session_statements` preserves the cumulative session context.
+    fn flush(&self, statements: &mut Vec<String>, pending: &mut u64, session_total: u64) {
+        let count = std::mem::take(pending);
+        if count == 0 {
             return;
         }
+        let statements = std::mem::take(statements);
         let mut entry = AuditEntry::new(
             AuditKind::PgStatements,
-            format!("{total} statement{} on {}", plural(total), self.connection),
+            format!("{count} statement{} on {}", plural(count), self.connection),
         )
         .agent(self.agent.clone())
         .connection(self.connection.clone())
         .field("kind", "pg")
-        .field("statements", total);
+        .field("statements", count)
+        .field("session_statements", session_total);
         if self.record_statements {
             let listed = statements.len() as u64;
-            entry = entry.detail(statements.join("\n")).field("listed", listed);
-            if listed < total {
+            entry = entry.field("listed", listed);
+            if !statements.is_empty() {
+                entry = entry.detail(statements.join("\n"));
+            }
+            if listed < count {
                 entry = entry.field("truncated", true);
             }
         }
@@ -3004,7 +3019,10 @@ async fn splice<C>(
     let mut client_scan = FrameScanner::new();
     let mut upstream_scan = FrameScanner::new();
     let mut statements: Vec<String> = Vec::new();
-    let mut statement_count = 0u64;
+    let mut pending_statement_count = 0u64;
+    let mut session_statement_count = 0u64;
+    let mut listed_statement_count = 0usize;
+    let mut statement_audit_deadline: Option<tokio::time::Instant> = None;
 
     // Observe the client's messages: what it asked, and that it is now owed a
     // reply. `record` is captured by the closure, so the text is only built
@@ -3014,13 +3032,17 @@ async fn splice<C>(
                         scan: &mut FrameScanner,
                         busy: &mut bool,
                         statements: &mut Vec<String>,
-                        count: &mut u64| {
+                        pending_count: &mut u64,
+                        session_count: &mut u64,
+                        listed_count: &mut usize| {
         scan.feed(bytes, |tag, peek| {
             *busy = true;
             if let Some(sql) = statement_text(tag, peek) {
-                *count += 1;
-                if record && statements.len() < STATEMENT_AUDIT_MAX {
+                *pending_count += 1;
+                *session_count += 1;
+                if record && *listed_count < STATEMENT_AUDIT_MAX {
                     statements.push(sql);
+                    *listed_count += 1;
                 }
             }
         });
@@ -3036,8 +3058,22 @@ async fn splice<C>(
             &mut client_scan,
             &mut backend_idle,
             &mut statements,
-            &mut statement_count,
+            &mut pending_statement_count,
+            &mut session_statement_count,
+            &mut listed_statement_count,
         );
+        if pending_statement_count > 0 {
+            statement_audit_deadline =
+                Some(tokio::time::Instant::now() + STATEMENT_AUDIT_FLUSH_INTERVAL);
+        }
+        if pending_statement_count >= STATEMENT_AUDIT_BATCH_MAX {
+            audit.flush(
+                &mut statements,
+                &mut pending_statement_count,
+                session_statement_count,
+            );
+            statement_audit_deadline = None;
+        }
         backend_idle = false;
         if let Err(reason) = splice_write(
             &mut upstream_tx,
@@ -3092,20 +3128,46 @@ async fn splice<C>(
             } else {
                 ttl_deadline + Duration::from_secs(1)
             };
+            let statement_audit_at =
+                statement_audit_deadline.unwrap_or(ttl_deadline + Duration::from_secs(1));
             tokio::select! {
                 reason = close_signal.reason() => break reason,
                 _ = tokio::time::sleep_until(ttl_deadline) => break "session_ttl",
                 _ = tokio::time::sleep_until(idle_at) => break "idle_timeout",
+                _ = tokio::time::sleep_until(statement_audit_at) => {
+                    audit.flush(
+                        &mut statements,
+                        &mut pending_statement_count,
+                        session_statement_count,
+                    );
+                    statement_audit_deadline = None;
+                },
                 read = client_rx.read(&mut client_buf) => match read {
                     Ok(n) if n > 0 => {
                         session.bytes_up.fetch_add(n as u64, Ordering::Relaxed);
+                        let batch_was_empty = pending_statement_count == 0;
                         watch_client(
                             &client_buf[..n],
                             &mut client_scan,
                             &mut backend_idle,
                             &mut statements,
-                            &mut statement_count,
+                            &mut pending_statement_count,
+                            &mut session_statement_count,
+                            &mut listed_statement_count,
                         );
+                        if batch_was_empty && pending_statement_count > 0 {
+                            statement_audit_deadline = Some(
+                                tokio::time::Instant::now() + STATEMENT_AUDIT_FLUSH_INTERVAL,
+                            );
+                        }
+                        if pending_statement_count >= STATEMENT_AUDIT_BATCH_MAX {
+                            audit.flush(
+                                &mut statements,
+                                &mut pending_statement_count,
+                                session_statement_count,
+                            );
+                            statement_audit_deadline = None;
+                        }
                         // Whatever it sent, the client is now waiting on the
                         // backend even if the scanner could not classify it.
                         backend_idle = false;
@@ -3171,7 +3233,11 @@ async fn splice<C>(
         let _ = upstream_tx.shutdown().await;
     })
     .await;
-    audit.finish(statements, statement_count);
+    audit.flush(
+        &mut statements,
+        &mut pending_statement_count,
+        session_statement_count,
+    );
     session.finish(reason);
 }
 

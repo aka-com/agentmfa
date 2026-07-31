@@ -1013,6 +1013,30 @@ async fn statements_reach_the_activity_log_when_enabled() {
         .await
         .unwrap();
     let _ = read_reply(&mut client).await;
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some(entry) = h
+                .broker
+                .audit
+                .recent(20)
+                .into_iter()
+                .find(|e| e.kind == AuditKind::PgStatements)
+            {
+                break entry;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("a live session must flush completed statement frames");
+    assert!(
+        first
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("SELECT id FROM orders")),
+        "{first:?}"
+    );
+
     // Extended-protocol statements are recorded too.
     client
         .write_all(&frame(b'P', b"s1\x00DROP TABLE audit_me\x00\x00\x00"))
@@ -1022,21 +1046,40 @@ async fn statements_reach_the_activity_log_when_enabled() {
     drop(client);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    let entry = h
+    let entries: Vec<_> = h
         .broker
         .audit
         .recent(20)
         .into_iter()
-        .find(|e| e.kind == AuditKind::PgStatements)
-        .expect("statements must be recorded");
-    assert_eq!(entry.connection.as_deref(), Some("prod-db"));
-    assert_eq!(entry.agent.as_deref(), Some("test-agent"));
-    let detail = entry.detail.clone().unwrap_or_default();
+        .filter(|e| e.kind == AuditKind::PgStatements)
+        .collect();
+    assert!(!entries.is_empty(), "statements must be recorded");
+    assert!(entries
+        .iter()
+        .all(|entry| entry.connection.as_deref() == Some("prod-db")));
+    assert!(entries
+        .iter()
+        .all(|entry| entry.agent.as_deref() == Some("test-agent")));
+    let detail = entries
+        .iter()
+        .filter_map(|entry| entry.detail.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(detail.contains("SELECT id FROM orders"), "{detail:?}");
     assert!(detail.contains("DROP TABLE audit_me"), "{detail:?}");
     assert_eq!(
-        entry.fields.get("statements").and_then(|v| v.as_u64()),
-        Some(2)
+        entries
+            .iter()
+            .filter_map(|entry| entry.fields.get("statements")?.as_u64())
+            .sum::<u64>(),
+        2
+    );
+    assert_eq!(
+        entries
+            .first()
+            .and_then(|entry| entry.fields.get("session_statements"))
+            .and_then(|value| value.as_u64()),
+        Some(2),
     );
 }
 
