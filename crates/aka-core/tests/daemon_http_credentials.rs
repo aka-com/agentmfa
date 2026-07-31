@@ -172,6 +172,27 @@ async fn upstream() -> Upstream {
                 axum::Json(json!({ "you_sent": format!("Bearer {API_KEY}") }))
             }),
         )
+        .route(
+            "/binary-safe",
+            get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                    vec![0, 1, 2, 0xff],
+                )
+            }),
+        )
+        .route(
+            "/binary-reflect",
+            get(|| async {
+                let mut body = vec![0, 1, 2];
+                body.extend_from_slice(API_KEY.as_bytes());
+                body.push(0xff);
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                    body,
+                )
+            }),
+        )
         .route("/huge", get(|| async { "x".repeat(4 * 1024 * 1024) }))
         .route(
             "/slow",
@@ -647,6 +668,46 @@ async fn a_reflected_credential_is_still_scrubbed() {
         "the secret was reflected back to the agent: {relayed}"
     );
     assert!(relayed.contains("[REDACTED]"), "{relayed}");
+}
+
+#[tokio::test]
+async fn safe_binary_responses_are_relayed_byte_for_byte() {
+    let up = upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    api_connection(&h, "github", up.port);
+
+    let (status, body) = h
+        .call("github", json!({ "method": "GET", "path": "/binary-safe" }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["body_encoding"], "base64");
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(body["body"].as_str().unwrap())
+            .unwrap(),
+        vec![0, 1, 2, 0xff],
+    );
+}
+
+#[tokio::test]
+async fn binary_responses_that_reflect_a_credential_are_refused() {
+    let up = upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    api_connection(&h, "github", up.port);
+
+    let (status, body) = h
+        .call(
+            "github",
+            json!({ "method": "GET", "path": "/binary-reflect" }),
+        )
+        .await;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["reason"], "upstream_error");
+    assert_eq!(
+        body["detail"],
+        "upstream binary response contained the injected credential; response refused",
+    );
 }
 
 /* -------------------- API-2 / API-21: reserved headers -------------------- */

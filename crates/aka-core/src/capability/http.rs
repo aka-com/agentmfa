@@ -404,6 +404,51 @@ pub(crate) struct Redactions {
     needles: Vec<Zeroizing<String>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResponseBodyMode {
+    Text,
+    Binary,
+}
+
+const BINARY_CREDENTIAL_REFUSAL: &str =
+    "upstream binary response contained the injected credential; response refused";
+
+fn response_body_mode(headers: &HeaderMap) -> ResponseBodyMode {
+    let Some(content_type) = headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return ResponseBodyMode::Binary;
+    };
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let textual = media_type.starts_with("text/")
+        || media_type.ends_with("+json")
+        || media_type.ends_with("+xml")
+        || matches!(
+            media_type.as_str(),
+            "application/json"
+                | "application/xml"
+                | "application/javascript"
+                | "application/x-javascript"
+                | "application/x-www-form-urlencoded"
+                | "application/graphql"
+                | "application/sql"
+                | "application/yaml"
+                | "application/x-yaml"
+                | "application/toml"
+        );
+    if textual {
+        ResponseBodyMode::Text
+    } else {
+        ResponseBodyMode::Binary
+    }
+}
+
 impl Redactions {
     fn from_injection(injection: &RenderedInjection) -> Self {
         let mut redactions = Self {
@@ -515,6 +560,30 @@ impl Redactions {
         out
     }
 
+    fn contains_in_bytes(&self, value: &[u8]) -> bool {
+        self.needles.iter().any(|needle| {
+            let needle = needle.as_bytes();
+            !needle.is_empty()
+                && value
+                    .windows(needle.len())
+                    .any(|candidate| candidate == needle)
+        })
+    }
+
+    fn apply_to_response_body(
+        &self,
+        value: &[u8],
+        mode: ResponseBodyMode,
+    ) -> Result<Vec<u8>, &'static str> {
+        match mode {
+            ResponseBodyMode::Text => Ok(self.apply_to_bytes(value)),
+            ResponseBodyMode::Binary if self.contains_in_bytes(value) => {
+                Err(BINARY_CREDENTIAL_REFUSAL)
+            }
+            ResponseBodyMode::Binary => Ok(value.to_vec()),
+        }
+    }
+
     /// The longest needle, which is how much tail a streaming relay has to
     /// hold back: a credential split across two chunks is only recognizable
     /// once the bytes on both sides of the boundary are in hand.
@@ -559,25 +628,43 @@ impl Redactions {
         }
         (out, buf[i..].to_vec())
     }
+
+    /// Pass through a binary prefix only once no credential can begin in it.
+    /// Unlike textual redaction this never changes bytes: a complete match
+    /// refuses the response, and the boundary tail waits for the next chunk.
+    fn split_verified_binary(&self, buf: &[u8]) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
+        if self.contains_in_bytes(buf) {
+            return Err(BINARY_CREDENTIAL_REFUSAL);
+        }
+        let hold = self.max_needle_len().saturating_sub(1);
+        if hold == 0 {
+            return Ok((buf.to_vec(), Vec::new()));
+        }
+        let emit_through = buf.len().saturating_sub(hold);
+        Ok((buf[..emit_through].to_vec(), buf[emit_through..].to_vec()))
+    }
 }
 
 /// Why a streamed response stopped producing bytes.
 pub(crate) enum StreamFinish {
     Complete,
     UpstreamError(String),
+    RefusedBinaryCredential,
     ConsumerDropped,
 }
 
-/// Forward an upstream body chunk by chunk, scrubbing reflected credentials
-/// across chunk boundaries, and report the byte total when the stream ends.
+/// Forward an upstream body chunk by chunk and report the byte total when the
+/// stream ends. Text credentials are scrubbed across chunk boundaries; binary
+/// bytes are preserved, with the response refused if a credential is found.
 ///
 /// The buffered relay can scan a whole body at once; a streaming one cannot,
 /// so it carries the boundary tail forward. `on_finish` runs exactly once,
 /// whether the stream completed, failed, or the client hung up mid-transfer —
 /// a session the broker opened must be retired either way.
-pub(crate) fn redacting_stream(
+fn redacting_stream(
     response: reqwest::Response,
     redactions: Redactions,
+    mode: ResponseBodyMode,
     on_finish: impl FnOnce(u64, StreamFinish) + Send + 'static,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send {
     use futures::StreamExt as _;
@@ -609,18 +696,37 @@ pub(crate) fn redacting_stream(
 
     let mut upstream = response.bytes_stream();
     let mut carry: Vec<u8> = Vec::new();
+    let mut stopped = false;
     let mut finish = Finish {
         callback: Some(on_finish),
         bytes: 0,
         reason: StreamFinish::ConsumerDropped,
     };
     futures::stream::poll_fn(move |cx| {
+        if stopped {
+            return std::task::Poll::Ready(None);
+        }
         loop {
             match futures::ready!(upstream.poll_next_unpin(cx)) {
                 Some(Ok(chunk)) => {
                     finish.count(chunk.len());
                     carry.extend_from_slice(&chunk);
-                    let (emit, held) = redactions.split_redacted(&carry);
+                    let split = match mode {
+                        ResponseBodyMode::Text => Ok(redactions.split_redacted(&carry)),
+                        ResponseBodyMode::Binary => redactions.split_verified_binary(&carry),
+                    };
+                    let (emit, held) = match split {
+                        Ok(parts) => parts,
+                        Err(detail) => {
+                            carry.clear();
+                            stopped = true;
+                            finish.reason = StreamFinish::RefusedBinaryCredential;
+                            return std::task::Poll::Ready(Some(Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                detail,
+                            ))));
+                        }
+                    };
                     carry = held;
                     if emit.is_empty() {
                         // Everything so far could still be the head of a
@@ -634,6 +740,7 @@ pub(crate) fn redacting_stream(
                     // The URL is stripped for the same reason the buffered
                     // path strips it: a query-form credential lives in it.
                     let detail = error.without_url().to_string();
+                    stopped = true;
                     finish.reason = StreamFinish::UpstreamError(detail.clone());
                     return std::task::Poll::Ready(Some(Err(std::io::Error::other(detail))));
                 }
@@ -643,8 +750,19 @@ pub(crate) fn redacting_stream(
                         return std::task::Poll::Ready(None);
                     }
                     // End of stream: nothing more can complete a needle, so
-                    // the held tail is scrubbed on its own terms and flushed.
-                    let tail = redactions.apply_to_bytes(&std::mem::take(&mut carry));
+                    // the held tail can be transformed on its own terms.
+                    let held = std::mem::take(&mut carry);
+                    let tail = match redactions.apply_to_response_body(&held, mode) {
+                        Ok(tail) => tail,
+                        Err(detail) => {
+                            stopped = true;
+                            finish.reason = StreamFinish::RefusedBinaryCredential;
+                            return std::task::Poll::Ready(Some(Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                detail,
+                            ))));
+                        }
+                    };
                     return std::task::Poll::Ready(Some(Ok(bytes::Bytes::from(tail))));
                 }
             }
@@ -1128,6 +1246,7 @@ impl HttpExecution {
             }
         };
         let status = response.status().as_u16();
+        let body_mode = response_body_mode(response.headers());
         let auth_challenge = response
             .headers()
             .contains_key(http::header::WWW_AUTHENTICATE);
@@ -1159,7 +1278,7 @@ impl HttpExecution {
         })
         .await;
 
-        let mut body = std::pin::pin!(redacting_stream(response, redactions, |_, _| {}));
+        let mut body = std::pin::pin!(redacting_stream(response, redactions, body_mode, |_, _| {}));
         let mut bytes = 0u64;
         let mut failure = None;
         // Kept only so the steps that run *after* the relay can still read the
@@ -1190,7 +1309,10 @@ impl HttpExecution {
                         }
                     }
                     Err(error) => {
-                        failure = Some((error.to_string(), true));
+                        failure = Some((
+                            error.to_string(),
+                            error.kind() != std::io::ErrorKind::InvalidData,
+                        ));
                         break;
                     }
                 }
@@ -1446,8 +1568,13 @@ impl HttpExecution {
                 }
             }
             if send_body && !self.body.is_empty() {
-                match self.body.bytes() {
-                    Ok(bytes) => request = request.body(bytes),
+                match self.body.upstream_body() {
+                    Ok(body) => {
+                        if matches!(self.body.as_ref(), SpooledBody::Spooled { .. }) {
+                            request = request.header(http::header::CONTENT_LENGTH, self.body.len());
+                        }
+                        request = request.body(body);
+                    }
                     Err(e) => {
                         return Err(broker_error(
                             500,
@@ -1866,6 +1993,7 @@ async fn relay_response(
     mcp_tool_call_id: Option<&Value>,
 ) -> ExecOutcome {
     let status = response.status().as_u16();
+    let body_mode = response_body_mode(response.headers());
     let is_sse = response
         .headers()
         .get(http::header::CONTENT_TYPE)
@@ -1906,7 +2034,13 @@ async fn relay_response(
                         let mut preview_bytes = body[..body.len().min(PREVIEW_CAP)].to_vec();
                         let remaining = PREVIEW_CAP.saturating_sub(preview_bytes.len());
                         preview_bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-                        let preview = redactions.apply_to_bytes(&preview_bytes);
+                        let preview =
+                            match redactions.apply_to_response_body(&preview_bytes, body_mode) {
+                                Ok(preview) => preview,
+                                Err(detail) => {
+                                    return broker_error(502, ErrorReason::UpstreamError, detail)
+                                }
+                            };
                         let preview = String::from_utf8_lossy(&preview);
                         let result = json!({
                             "jsonrpc": "2.0",
@@ -1971,7 +2105,10 @@ async fn relay_response(
             }
         }
     }
-    let body = redactions.apply_to_bytes(&body);
+    let body = match redactions.apply_to_response_body(&body, body_mode) {
+        Ok(body) => body,
+        Err(detail) => return broker_error(502, ErrorReason::UpstreamError, detail),
+    };
 
     let (body_value, encoding) = match String::from_utf8(body) {
         Ok(text) => (json!(text), "utf8"),
@@ -3108,9 +3245,10 @@ fn record_streamed_health(
 ///
 /// The buffered relay's size cap does not apply here — that cap exists because
 /// a JSON envelope has to hold the whole body in memory, and this one never
-/// does. What still applies is redaction, which runs across chunk boundaries,
-/// and the session accounting, which is retired by the stream's own guard so a
-/// client that disconnects mid-transfer is not left holding a live session.
+/// does. What still applies is text redaction or binary credential detection
+/// across chunk boundaries, plus session accounting. The stream's own guard
+/// retires the session so a client that disconnects mid-transfer is not left
+/// holding a live session.
 fn stream_response(
     response: reqwest::Response,
     redactions: Redactions,
@@ -3125,10 +3263,14 @@ fn stream_response(
 
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let body_mode = response_body_mode(response.headers());
     // A HEAD or 304 carries the upstream's length without a body; everything
-    // else is re-framed for this leg, since redaction changes the length.
-    let preserve_content_length =
-        request_method == Method::HEAD || status == StatusCode::NOT_MODIFIED;
+    // textual is re-framed for this leg, since redaction can change its length.
+    // Binary bytes are never rewritten, so their declared length remains valid
+    // (and makes a credential-triggered refusal visible as truncation).
+    let preserve_content_length = request_method == Method::HEAD
+        || status == StatusCode::NOT_MODIFIED
+        || body_mode == ResponseBodyMode::Binary;
     let mut builder = axum::response::Response::builder().status(status);
     for (name, value) in response.headers() {
         if !response_header_is_relayable(name, expose_response_credentials) {
@@ -3148,24 +3290,34 @@ fn stream_response(
         }
     }
     let status_label = status.as_u16().to_string();
-    let body = redacting_stream(response, redactions, move |bytes, finish| match finish {
-        StreamFinish::Complete => {
-            session.bytes_down.fetch_add(bytes, Ordering::Relaxed);
-            relay.finish(&status_label, Some(bytes));
-            session.finish("request_complete");
-        }
-        StreamFinish::UpstreamError(detail) => {
-            session.bytes_down.fetch_add(bytes, Ordering::Relaxed);
-            record_upstream_failure_health(&health, &connection_id, detail);
-            relay.finish("stream_interrupted", Some(bytes));
-            session.finish("request_failed");
-        }
-        StreamFinish::ConsumerDropped => {
-            session.bytes_down.fetch_add(bytes, Ordering::Relaxed);
-            relay.finish("caller_disconnected", Some(bytes));
-            session.finish("client_closed");
-        }
-    });
+    let body = redacting_stream(
+        response,
+        redactions,
+        body_mode,
+        move |bytes, finish| match finish {
+            StreamFinish::Complete => {
+                session.bytes_down.fetch_add(bytes, Ordering::Relaxed);
+                relay.finish(&status_label, Some(bytes));
+                session.finish("request_complete");
+            }
+            StreamFinish::UpstreamError(detail) => {
+                session.bytes_down.fetch_add(bytes, Ordering::Relaxed);
+                record_upstream_failure_health(&health, &connection_id, detail);
+                relay.finish("stream_interrupted", Some(bytes));
+                session.finish("request_failed");
+            }
+            StreamFinish::RefusedBinaryCredential => {
+                session.bytes_down.fetch_add(bytes, Ordering::Relaxed);
+                relay.finish("response_refused", Some(bytes));
+                session.finish("request_failed");
+            }
+            StreamFinish::ConsumerDropped => {
+                session.bytes_down.fetch_add(bytes, Ordering::Relaxed);
+                relay.finish("caller_disconnected", Some(bytes));
+                session.finish("client_closed");
+            }
+        },
+    );
     builder
         .body(axum::body::Body::from_stream(body))
         .unwrap_or_else(|_| {
@@ -3597,7 +3749,7 @@ mod tests {
     }
 
     #[test]
-    fn redactions_cover_binary_body_bytes() {
+    fn binary_response_bytes_are_preserved_when_they_are_safe() {
         let injection = RenderedInjection::Header(
             HeaderName::from_static("authorization"),
             HeaderValue::from_static("Bearer ghp_test_secret_value"),
@@ -3605,9 +3757,110 @@ mod tests {
         let redactions = Redactions::from_injection(&injection);
 
         assert_eq!(
-            redactions.apply_to_bytes(b"\x00ghp_test_secret_value\xff"),
-            b"\x00[REDACTED]\xff"
+            redactions
+                .apply_to_response_body(b"\x00safe payload\xff", ResponseBodyMode::Binary)
+                .unwrap(),
+            b"\x00safe payload\xff"
         );
+    }
+
+    #[test]
+    fn binary_response_containing_a_credential_is_refused_not_rewritten() {
+        let injection = RenderedInjection::Header(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer ghp_test_secret_value"),
+        );
+        let redactions = Redactions::from_injection(&injection);
+
+        assert_eq!(
+            redactions.apply_to_response_body(
+                b"\x00ghp_test_secret_value\xff",
+                ResponseBodyMode::Binary,
+            ),
+            Err(BINARY_CREDENTIAL_REFUSAL)
+        );
+    }
+
+    #[test]
+    fn only_recognized_text_media_types_are_redacted() {
+        for content_type in [
+            "text/plain; charset=utf-8",
+            "application/json",
+            "application/problem+json",
+            "application/xml",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_str(content_type).unwrap(),
+            );
+            assert_eq!(response_body_mode(&headers), ResponseBodyMode::Text);
+        }
+
+        for content_type in ["application/octet-stream", "image/png"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_str(content_type).unwrap(),
+            );
+            assert_eq!(response_body_mode(&headers), ResponseBodyMode::Binary);
+        }
+        assert_eq!(
+            response_body_mode(&HeaderMap::new()),
+            ResponseBodyMode::Binary
+        );
+    }
+
+    #[test]
+    fn streamed_binary_detection_preserves_safe_bytes_and_catches_split_credentials() {
+        let injection = RenderedInjection::Header(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer ghp_test_secret_value"),
+        );
+        let redactions = Redactions::from_injection(&injection);
+        let safe = b"\x00prefix with safe binary bytes\xff";
+        let unsafe_body = b"\x00prefix ghp_test_secret_value suffix\xff";
+
+        for split in 0..=safe.len() {
+            let mut emitted = Vec::new();
+            let mut carry = Vec::new();
+            for chunk in [&safe[..split], &safe[split..]] {
+                carry.extend_from_slice(chunk);
+                let (emit, held) = redactions.split_verified_binary(&carry).unwrap();
+                emitted.extend_from_slice(&emit);
+                carry = held;
+            }
+            emitted.extend_from_slice(
+                &redactions
+                    .apply_to_response_body(&carry, ResponseBodyMode::Binary)
+                    .unwrap(),
+            );
+            assert_eq!(emitted, safe);
+        }
+
+        for split in 0..=unsafe_body.len() {
+            let mut carry = Vec::new();
+            let mut refused = false;
+            for chunk in [&unsafe_body[..split], &unsafe_body[split..]] {
+                carry.extend_from_slice(chunk);
+                match redactions.split_verified_binary(&carry) {
+                    Ok((_, held)) => carry = held,
+                    Err(_) => {
+                        refused = true;
+                        break;
+                    }
+                }
+            }
+            if !refused {
+                refused = redactions
+                    .apply_to_response_body(&carry, ResponseBodyMode::Binary)
+                    .is_err();
+            }
+            assert!(
+                refused,
+                "credential split at byte {split} escaped detection"
+            );
+        }
     }
 
     /// H2. A streamed relay sees the body in whatever chunks the upstream

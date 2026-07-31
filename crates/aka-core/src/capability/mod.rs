@@ -200,6 +200,42 @@ impl SpooledBody {
         self.len() == 0
     }
 
+    /// Build one rewindable upstream attempt.
+    ///
+    /// Inline bodies retain reqwest's buffered fast path. A disk spool is
+    /// cloned at offset zero and read asynchronously in bounded chunks, so a
+    /// large upload is never reconstructed as one `Vec` for dispatch. File
+    /// clones share an offset with the unlinked spool, but attempts are
+    /// sequential: reqwest finishes (or drops) one request body before the
+    /// redirect loop asks for the next rewind.
+    pub fn upstream_body(&self) -> std::io::Result<reqwest::Body> {
+        match self {
+            SpooledBody::Empty => Ok(reqwest::Body::from(Vec::new())),
+            SpooledBody::Inline(bytes) => Ok(reqwest::Body::from(bytes.clone())),
+            SpooledBody::Spooled { file, .. } => {
+                let file = {
+                    let mut file = file.lock().unwrap();
+                    file.rewind()?;
+                    file.try_clone()?
+                };
+                let file = tokio::fs::File::from_std(file);
+                let stream = futures::stream::try_unfold(file, |mut file| async move {
+                    use tokio::io::AsyncReadExt as _;
+
+                    let mut chunk = vec![0u8; 64 * 1024];
+                    let read = file.read(&mut chunk).await?;
+                    if read == 0 {
+                        Ok::<_, std::io::Error>(None)
+                    } else {
+                        chunk.truncate(read);
+                        Ok::<_, std::io::Error>(Some((bytes::Bytes::from(chunk), file)))
+                    }
+                });
+                Ok(reqwest::Body::wrap_stream(stream))
+            }
+        }
+    }
+
     /// Feed the body through `sink` in bounded chunks.
     ///
     /// Hashing a spooled request for its idempotency key must not undo the
@@ -258,6 +294,7 @@ impl SpooledBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt as _;
 
     #[test]
     fn inline_below_threshold_spooled_above() {
@@ -292,5 +329,23 @@ mod tests {
         let body = writer.finish().unwrap();
         assert!(matches!(body, SpooledBody::Spooled { .. }));
         assert_eq!(body.bytes().unwrap(), b"123456");
+    }
+
+    #[tokio::test]
+    async fn spooled_upstream_bodies_stream_and_rewind_for_replay() {
+        let expected = vec![7u8; 256 * 1024 + 17];
+        let body = SpooledBody::from_bytes(expected.clone(), 1024).unwrap();
+        assert!(matches!(body, SpooledBody::Spooled { .. }));
+
+        for _ in 0..2 {
+            let relayed = body
+                .upstream_body()
+                .unwrap()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            assert_eq!(relayed.as_ref(), expected.as_slice());
+        }
     }
 }
