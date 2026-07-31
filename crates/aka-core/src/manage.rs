@@ -540,7 +540,7 @@ impl ApprovalSurfaceLease {
 
 impl Drop for ApprovalSurfaceLease {
     fn drop(&mut self) {
-        self.bus.approval_surfaces.lock().unwrap().remove(&self.id);
+        self.bus.release_approval_surface(&self.id);
     }
 }
 
@@ -611,6 +611,15 @@ impl ManageBus {
         self.lease_approval_surface_for(APPROVAL_SURFACE_TTL)
     }
 
+    /// Mint a TTL-backed lease for a polling request inbox. Unlike an event
+    /// stream lease there is no server-side guard to own, so the client
+    /// heartbeats while attached and explicitly releases on a clean exit.
+    pub fn mint_polling_approval_surface(&self) -> Uuid {
+        let id = Uuid::new_v4();
+        self.insert_approval_surface(id, APPROVAL_SURFACE_TTL);
+        id
+    }
+
     fn lease_approval_surface_for(
         self: &Arc<Self>,
         ttl: std::time::Duration,
@@ -633,10 +642,13 @@ impl ManageBus {
     }
 
     fn insert_approval_surface(&self, id: Uuid, ttl: std::time::Duration) {
-        self.approval_surfaces
-            .lock()
-            .unwrap()
-            .insert(id, Self::expiry_after(ttl));
+        let monotonic_now = std::time::Instant::now();
+        let wall_now = chrono::Utc::now();
+        let mut surfaces = self.approval_surfaces.lock().unwrap();
+        // Polling clients can disappear without sending DELETE. Expired
+        // leases carry no capability and need not accumulate forever.
+        surfaces.retain(|_, expiry| expiry.monotonic > monotonic_now && expiry.wall > wall_now);
+        surfaces.insert(id, Self::expiry_after(ttl));
     }
 
     /// Renew an attached request surface after a client-originated
@@ -648,6 +660,11 @@ impl ManageBus {
         };
         *expiry = Self::expiry_after(APPROVAL_SURFACE_TTL);
         true
+    }
+
+    /// Release a polling lease explicitly, or the event-stream guard on Drop.
+    pub fn release_approval_surface(&self, id: &Uuid) -> bool {
+        self.approval_surfaces.lock().unwrap().remove(id).is_some()
     }
 
     /// Whether a currently leased management client can receive and display
@@ -1942,6 +1959,17 @@ mod tests {
         assert!(!bus.has_approval_surface());
         assert!(bus.renew_approval_surface(&surface.id()));
         assert!(bus.has_approval_surface());
+    }
+
+    #[test]
+    fn polling_request_surfaces_can_be_renewed_and_released() {
+        let bus = ManageBus::new();
+        let id = bus.mint_polling_approval_surface();
+        assert!(bus.has_approval_surface());
+        assert!(bus.renew_approval_surface(&id));
+        assert!(bus.release_approval_surface(&id));
+        assert!(!bus.has_approval_surface());
+        assert!(!bus.renew_approval_surface(&id));
     }
 
     #[test]

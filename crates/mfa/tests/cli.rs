@@ -372,6 +372,69 @@ fn visibility_commands_project_sessions_requests_settings_and_connection_detail(
 }
 
 #[test]
+fn requests_can_approve_a_pending_confirmation_with_a_surface_lease() {
+    let root = tempfile::tempdir().unwrap();
+    let request_id = "00000000-0000-0000-0000-000000000002";
+    let surface_id = "00000000-0000-0000-0000-000000000099";
+    let (url, requests, handle) = stub(vec![
+        whoami(),
+        Reply {
+            method: "POST",
+            path: "/v1/manage/approval-surfaces",
+            body: json!({
+                "id": surface_id,
+                "expires_in_ms": 15000,
+            }),
+        },
+        Reply {
+            method: "GET",
+            path: "/v1/manage/approvals",
+            body: json!([{
+                "id": request_id,
+                "connection_id": "00000000-0000-0000-0000-000000000003",
+                "connection": "github",
+                "type": "api",
+                "target": "api.github.com",
+                "agent": "codex",
+                "summary": "GET /user",
+                "waiting": 1,
+                "requested_at": "2026-07-29T12:00:00Z",
+                "expires_at": "2026-07-29T12:01:00Z",
+                "window_secs": 300
+            }]),
+        },
+        Reply {
+            method: "GET",
+            path: "/v1/manage/elicitations",
+            body: json!([]),
+        },
+        Reply {
+            method: "POST",
+            path: "/v1/manage/approvals/00000000-0000-0000-0000-000000000002",
+            body: json!({"answered": true}),
+        },
+        Reply {
+            method: "DELETE",
+            path: "/v1/manage/approval-surfaces/00000000-0000-0000-0000-000000000099",
+            body: json!({"released": true}),
+        },
+    ]);
+    let output = run(
+        &["--json", "requests", "--approve", request_id],
+        root.path(),
+        Some(&url),
+        None,
+    );
+    assert_success(&output);
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["decision"], "approved");
+    assert_eq!(body["id"], request_id);
+    handle.join().unwrap();
+    let requests = requests.lock().unwrap();
+    assert!(requests[4].contains(r#""decision":"approve_window""#));
+}
+
+#[test]
 fn session_close_and_setting_updates_use_the_existing_management_contracts() {
     let root = tempfile::tempdir().unwrap();
     let (url, _, handle) = stub(vec![

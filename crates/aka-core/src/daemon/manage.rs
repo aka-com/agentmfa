@@ -141,7 +141,11 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/whoami", get(whoami))
         .route("/events", get(events))
-        .route("/approval-surfaces/{id}", put(heartbeat_approval_surface))
+        .route("/approval-surfaces", post(create_approval_surface))
+        .route(
+            "/approval-surfaces/{id}",
+            put(heartbeat_approval_surface).delete(release_approval_surface),
+        )
         .route("/secrets", get(list_secrets).post(add_secret))
         .route("/secrets/{id}", patch(edit_secret).delete(delete_secret))
         .route("/secrets/{id}/reveal-prefix", post(reveal_secret_prefix))
@@ -235,9 +239,18 @@ async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Respons
     }))
 }
 
-/// Renew a capability that was minted for a still-attached request-inbox
-/// event stream. Heartbeats cannot create capabilities: an id disappears
-/// when its stream is dropped, and an unknown id fails closed.
+async fn create_approval_surface(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
+    let id = state.broker.manage_bus().mint_polling_approval_surface();
+    ok(serde_json::to_value(aka_api::ApprovalSurfaceDto {
+        id: id.to_string(),
+        expires_in_ms: aka_api::APPROVAL_SURFACE_TTL_MS,
+    })
+    .expect("approval surface DTO serializes"))
+}
+
+/// Renew a capability minted for an attached event-stream or polling inbox.
+/// Heartbeats cannot create capabilities: a released or unknown id fails
+/// closed.
 async fn heartbeat_approval_surface(
     State(state): State<AppState>,
     _authed: ManageAuthed,
@@ -254,6 +267,16 @@ async fn heartbeat_approval_surface(
         )
             .into_response()
     }
+}
+
+async fn release_approval_surface(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    ok(json!({
+        "released": state.broker.manage_bus().release_approval_surface(&id),
+    }))
 }
 
 /// The SSE change feed with reconnect resume. Each frame carries an

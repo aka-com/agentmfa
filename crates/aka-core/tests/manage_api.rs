@@ -180,6 +180,40 @@ async fn manage_routes_require_the_management_token() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn polling_request_surface_lease_round_trips_over_manage_api() {
+    let h = harness().await;
+    assert!(!h.broker.events.has_approval_surface());
+
+    let (status, body) = h.manage("POST", "/v1/manage/approval-surfaces", None).await;
+    assert_eq!(status, 200, "{body}");
+    let id = body["id"].as_str().expect("surface id");
+    assert_eq!(
+        body["expires_in_ms"].as_u64(),
+        Some(aka_api::APPROVAL_SURFACE_TTL_MS)
+    );
+    assert!(h.broker.events.has_approval_surface());
+
+    let (status, _) = h
+        .manage(
+            "PUT",
+            &format!("/v1/manage/approval-surfaces/{id}"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, body) = h
+        .manage(
+            "DELETE",
+            &format!("/v1/manage/approval-surfaces/{id}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["released"], true);
+    assert!(!h.broker.events.has_approval_surface());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_expired_manage_token_is_rejected_over_http() {
     let h = harness().await;
     // Issue a token that is already past its horizon; the live one the

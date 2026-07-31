@@ -34,6 +34,13 @@ pub const APPROVAL_SURFACE_ID_HEADER: &str = "x-aka-approval-surface-id";
 pub const APPROVAL_SURFACE_HEARTBEAT_MS: u64 = 5_000;
 pub const APPROVAL_SURFACE_TTL_MS: u64 = 15_000;
 
+/// A short-lived request-inbox lease minted for a polling management client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalSurfaceDto {
+    pub id: String,
+    pub expires_in_ms: u64,
+}
+
 /// A connection field whose authoritative validation failed. Keeping this
 /// structured lets desktop clients attach the error to the relevant input
 /// without parsing human-readable error strings.

@@ -62,6 +62,17 @@ async fn harness() -> Harness {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn polling_request_surface_lease_works_through_remote_backend() {
+    let h = harness().await;
+    let surface = h.backend.open_approval_surface().await.unwrap();
+    let id = surface.id.parse().unwrap();
+    assert_eq!(surface.expires_in_ms, aka_api::APPROVAL_SURFACE_TTL_MS);
+    h.backend.renew_approval_surface(id).await.unwrap();
+    assert!(h.backend.close_approval_surface(id).await.unwrap());
+    assert!(!h.backend.close_approval_surface(id).await.unwrap());
+}
+
 fn api_spec(name: &str, template: &str) -> ConnectionSpec {
     ConnectionSpec {
         name: name.into(),

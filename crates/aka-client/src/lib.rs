@@ -18,8 +18,8 @@ pub mod events;
 
 use aka_api::{
     ActivityDto, ActivityPageDto, ApprovalDecisionDto, ApprovalDto, ApprovalSnapshotDto,
-    ConnectionDto, IdentityDto, IssuedEndpointDto, ManageError, RequestDto, SecretDto, SessionDto,
-    SettingsDto,
+    ApprovalSurfaceDto, ConnectionDto, IdentityDto, IssuedEndpointDto, ManageError, RequestDto,
+    SecretDto, SessionDto, SettingsDto,
 };
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
@@ -441,6 +441,30 @@ impl RemoteBackend {
     /// reconciler. Ordinary UI reads keep using `ManagementBackend::approvals`.
     pub async fn approval_snapshot(&self) -> ManageResult<ApprovalSnapshotDto> {
         self.get("/v1/manage/approvals/snapshot").await
+    }
+
+    pub async fn open_approval_surface(&self) -> ManageResult<ApprovalSurfaceDto> {
+        self.post_empty("/v1/manage/approval-surfaces").await
+    }
+
+    pub async fn renew_approval_surface(&self, id: Uuid) -> ManageResult<()> {
+        let _: serde_json::Value = self
+            .put(
+                &format!("/v1/manage/approval-surfaces/{id}"),
+                &serde_json::json!({}),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn close_approval_surface(&self, id: Uuid) -> ManageResult<bool> {
+        #[derive(serde::Deserialize)]
+        struct Released {
+            released: bool,
+        }
+        self.delete::<Released>(&format!("/v1/manage/approval-surfaces/{id}"))
+            .await
+            .map(|body| body.released)
     }
 
     async fn send<T: DeserializeOwned>(

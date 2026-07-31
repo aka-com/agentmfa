@@ -15,7 +15,8 @@
 //!   and access/endpoint side effects cannot drift from the app.
 //! - `mfa sessions`, `mfa requests`, and `mfa settings` expose the remaining
 //!   day-to-day broker visibility and lifecycle controls without requiring
-//!   the desktop UI.
+//!   the desktop UI. The request command can hold a leased headless inbox and
+//!   answer approvals or elicitations.
 //! - `mfa dsn` / `mfa ssh` open data-plane sessions on a running broker.
 //!   Postgres prints shell-safe `PG*` exports by default so the ticket stays
 //!   out of argv; SSH prints the `SSH_AUTH_SOCK` path.
@@ -96,6 +97,16 @@ fn parse_positive_seconds(value: &str) -> Result<u64, String> {
 
 fn parse_public_url(value: &str) -> Result<String, String> {
     RemoteConfig::normalize_url(value)
+}
+
+fn parse_field_value(value: &str) -> Result<String, String> {
+    let Some((name, _)) = value.split_once('=') else {
+        return Err("must be NAME=VALUE".into());
+    };
+    if name.trim().is_empty() {
+        return Err("field name must not be empty".into());
+    }
+    Ok(value.to_string())
 }
 
 #[derive(Parser)]
@@ -327,6 +338,24 @@ enum Command {
     },
     /// List pending and recent approval/elicitation decision records.
     Requests {
+        /// Attach a polling request inbox until Ctrl-C. Use another terminal
+        /// with --approve or --deny to answer an id it prints.
+        #[arg(long, conflicts_with_all = ["approve", "deny"])]
+        watch: bool,
+        /// Approve one pending request for its bounded confirmation window.
+        #[arg(long, value_name = "ID", conflicts_with = "deny")]
+        approve: Option<Uuid>,
+        /// Deny one pending approval or elicitation.
+        #[arg(long, value_name = "ID")]
+        deny: Option<Uuid>,
+        /// Elicitation answer in NAME=VALUE form; repeat for multiple fields.
+        #[arg(
+            long = "value",
+            value_name = "NAME=VALUE",
+            requires = "approve",
+            value_parser = parse_field_value
+        )]
+        values: Vec<String>,
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -1161,7 +1190,14 @@ fn run_cli() {
             root,
             broker,
         } => cmd_sessions(close, root, broker, json),
-        Command::Requests { root, broker } => cmd_requests(root, broker, json),
+        Command::Requests {
+            watch,
+            approve,
+            deny,
+            values,
+            root,
+            broker,
+        } => cmd_requests(watch, approve, deny, values, root, broker, json),
         Command::Settings { command } => match command {
             SettingsCommand::Get { root, broker } => cmd_settings_get(root, broker, json),
             SettingsCommand::Set {
@@ -2097,8 +2133,30 @@ fn cmd_sessions(close: Option<u64>, root: Option<PathBuf>, url: Option<String>, 
     }
 }
 
-fn cmd_requests(root: Option<PathBuf>, url: Option<String>, json: bool) {
+fn cmd_requests(
+    watch: bool,
+    approve: Option<Uuid>,
+    deny: Option<Uuid>,
+    values: Vec<String>,
+    root: Option<PathBuf>,
+    url: Option<String>,
+    json: bool,
+) {
     let managed = management_backend(root, url);
+    if watch {
+        if json {
+            die_with(
+                ExitCode::Usage,
+                "--json cannot be combined with the unbounded --watch mode",
+            );
+        }
+        watch_requests(&managed);
+        return;
+    }
+    if let Some(id) = approve.or(deny) {
+        answer_request(&managed, id, approve.is_some(), values, json);
+        return;
+    }
     let requests = managed.run(managed.backend.requests());
     if json {
         print_json(&requests);
@@ -2121,6 +2179,148 @@ fn cmd_requests(root: Option<PathBuf>, url: Option<String>, json: bool) {
             );
         }
     }
+}
+
+fn answer_request(managed: &Managed, id: Uuid, approve: bool, values: Vec<String>, json: bool) {
+    let Some(remote) = managed.remote.clone() else {
+        die_with(
+            ExitCode::NoBroker,
+            "request decisions require a running broker",
+        );
+    };
+    let surface = managed.run(remote.open_approval_surface());
+    let surface_id = dto_id(&surface.id);
+
+    let approvals = managed.run(managed.backend.approvals());
+    let elicitations = managed.run(managed.backend.elicitations());
+    let answered = if approvals.iter().any(|request| request.id == id.to_string()) {
+        if !values.is_empty() {
+            let _ = managed.run(remote.close_approval_surface(surface_id));
+            die_with(
+                ExitCode::Usage,
+                "--value applies only when approving an elicitation",
+            );
+        }
+        managed.run(managed.backend.respond_approval(
+            id,
+            if approve {
+                aka_api::ApprovalDecisionDto::ApproveWindow
+            } else {
+                aka_api::ApprovalDecisionDto::Deny
+            },
+        ))
+    } else if elicitations
+        .iter()
+        .any(|request| request.id == id.to_string())
+    {
+        let mut fields = std::collections::HashMap::new();
+        if approve {
+            for value in values {
+                let (name, value) = value.split_once('=').expect("validated by clap");
+                if fields.insert(name.to_string(), value.to_string()).is_some() {
+                    let _ = managed.run(remote.close_approval_surface(surface_id));
+                    die_with(
+                        ExitCode::Usage,
+                        format!("elicitation field {name:?} was supplied more than once"),
+                    );
+                }
+            }
+        }
+        managed.run(managed.backend.respond_elicitation(id, approve, fields))
+    } else {
+        let _ = managed.run(remote.close_approval_surface(surface_id));
+        die_with(
+            ExitCode::NotFound,
+            format!("no pending approval or elicitation with id {id}"),
+        );
+    };
+    let _ = managed.run(remote.close_approval_surface(surface_id));
+    if !answered {
+        die_with(
+            ExitCode::Conflict,
+            format!("request {id} was already answered, revoked, or expired"),
+        );
+    }
+    let decision = if approve { "approved" } else { "denied" };
+    if json {
+        print_json(&serde_json::json!({
+            "answered": true,
+            "id": id,
+            "decision": decision,
+        }));
+    } else {
+        eprintln!("{decision} request {id}");
+    }
+}
+
+fn watch_requests(managed: &Managed) {
+    let Some(remote) = managed.remote.clone() else {
+        die_with(
+            ExitCode::NoBroker,
+            "the request inbox requires a running broker",
+        );
+    };
+    let surface = managed.run(remote.open_approval_surface());
+    let surface_id = dto_id(&surface.id);
+    eprintln!(
+        "request inbox attached; press Ctrl-C to detach\n\
+         answer from another terminal with `mfa requests --approve ID` or `--deny ID`"
+    );
+
+    let backend = managed.backend.clone();
+    let result: ManageResult<()> = managed.runtime.block_on(async {
+        let mut seen = std::collections::HashSet::new();
+        let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(
+            aka_api::APPROVAL_SURFACE_HEARTBEAT_MS,
+        ));
+        let shutdown = tokio::signal::ctrl_c();
+        tokio::pin!(shutdown);
+        // The lease minted above covers startup; do not immediately issue a
+        // redundant heartbeat.
+        poll.tick().await;
+        heartbeat.tick().await;
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => break,
+                _ = heartbeat.tick() => remote.renew_approval_surface(surface_id).await?,
+                _ = poll.tick() => {
+                    for request in backend.approvals().await? {
+                        if seen.insert(request.id.clone()) {
+                            println!(
+                                "{}  approval  {}  {}  {}",
+                                request.id, request.connection, request.agent, request.summary
+                            );
+                            if let Some(detail) = request.detail {
+                                println!("  {detail}");
+                            }
+                            if let Some(consequence) = request.consequence {
+                                println!("  {consequence}");
+                            }
+                        }
+                    }
+                    for request in backend.elicitations().await? {
+                        if seen.insert(request.id.clone()) {
+                            println!(
+                                "{}  elicitation  {}  {}  {}",
+                                request.id, request.connection, request.agent, request.prompt
+                            );
+                            for field in request.fields {
+                                let required = if field.required { " (required)" } else { "" };
+                                println!("  {}{required}", field.name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    });
+    let _ = managed.run(remote.close_approval_surface(surface_id));
+    if let Err(error) = result {
+        die_manage(error);
+    }
+    eprintln!("request inbox detached");
 }
 
 fn cmd_settings_get(root: Option<PathBuf>, url: Option<String>, json: bool) {
