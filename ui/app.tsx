@@ -1282,25 +1282,17 @@ function stripTargetParen(name: string, target: string): string {
 function confirmUnitLabel(c: ConnectionSummary): string {
   if (c.type === 'pg') return 'Ask before database sessions';
   if (c.type === 'ssh') return 'Ask before SSH logins';
-  return c.mcp_path ? 'Ask before tool calls' : 'Ask before requests';
+  return c.mcp_path ? 'Confirm tool calls before sending' : 'Confirm requests before sending';
 }
 
-/**
- * The limit of what a kind's switch can promise, where that differs from
- * what the label implies. Both planes confirm something coarser than a
- * single operation, and the row says which — a switch that quietly means
- * less than it reads is worse than no switch.
- */
+/** The caption under the switch's label, where the unit needs saying. */
 function confirmScopeNote(c: ConnectionSummary): string {
-  if (c.type === 'ssh') {
-    return 'Each login is confirmed. Commands in the session that follows are not — '
-      + 'AgentMFA signs the login and is then out of the connection.';
+  if (c.type === 'ssh' || c.type === 'pg') {
+    return 'Agents will confirm before logging into each new session.';
   }
-  if (c.type === 'pg') {
-    return 'Each session is confirmed. Statements within it are not: one approval covers '
-      + 'every query the client sends.';
-  }
-  return '';
+  return c.mcp_path
+    ? 'Agents will confirm each tool call with you before it’s sent.'
+    : 'Agents will confirm each request with you before it’s sent.';
 }
 
 /**
@@ -1624,8 +1616,8 @@ function StatementRecording({ connection: c }: { connection: ConnectionSummary }
         {on
           ? 'The SQL of each statement is written to the activity log, where it can '
             + 'carry credentials and personal data.'
-          : 'Only the number of statements per session is recorded, not their text.'}
-        {overridden ? ' Set on this tool.' : ' Following the broker default.'}
+          : 'Only records the number of statements per session.'}
+        {overridden ? ' Set on this tool.' : null}
       </div>
     </div>
     <button className={`switch ${on ? 'on' : ''}`} role="switch" aria-checked={on}
@@ -3805,7 +3797,7 @@ function CredentialChooser({ type, allowNew = true, valueHint }: {
   const secretLabel = type === 'pg' ? 'Database password'
     : type === 'ssh' ? 'SSH private key'
     : 'Token or API key';
-  const keyBadge = <span className="cred-badge" aria-hidden="true"><Icon markup={ICONS.keyRound} /></span>;
+  const keyBadge = <span className="cred-badge" aria-hidden="true"><Icon markup={ICONS.key} /></span>;
   const plusBadge = <span className="cred-badge plus" aria-hidden="true"><Icon markup={ICONS.plus} /></span>;
   const noneBadge = <span className="cred-badge none" aria-hidden="true"><Icon markup={ICONS.circleSlash} /></span>;
   let picker: ReactNode = null;

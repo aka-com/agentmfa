@@ -1344,7 +1344,7 @@
    under the row), a muted dot when agents are switched off. */
 .cat-conn-status {
   display: flex; align-items: center; gap: 8px;
-  flex: 0 0 auto; margin-top: 2px; min-height: 18px;
+  flex: 0 0 auto; margin-top: 2px; margin-right: 3px; min-height: 18px;
 }
 .cc-live {
   flex: 0 0 auto; color: var(--muted); font-size: 0.71875rem;
@@ -1504,9 +1504,10 @@
    tooltip. The sub-line names the unit, which differs per kind. */
 .cd-confirm-row { display: flex; align-items: flex-start; gap: 12px; }
 .cd-confirm-txt { flex: 1; min-width: 0; }
-.cd-confirm-lbl { font-size: 0.8125rem; font-weight: 600; }
-.cd-confirm-sub { margin-top: 2px; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
-.cd-confirm-row .switch { flex: 0 0 auto; margin-top: 2px; }
+.cd-confirm-lbl { font-size: 0.8125rem; font-weight: 600; line-height: 1.4; }
+.cd-confirm-sub { margin-top: 5px; color: var(--muted); font-size: 0.75rem; line-height: 1.35; }
+/* The switch centers on the label's first line (18px line vs 22px switch). */
+.cd-confirm-row .switch { flex: 0 0 auto; margin-top: -2px; }
 /* Secondary per-tool policies share the same row grammar inside Advanced. */
 .cd-statements { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .cd-ep-auth { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
