@@ -349,6 +349,13 @@ pub struct RemoteBackend {
     opener: Option<UrlOpener>,
 }
 
+/// A freshly rotated management credential. The plaintext is zeroized when
+/// the caller finishes printing or storing it.
+pub struct IssuedManagementToken {
+    pub token: Zeroizing<String>,
+    pub expires_at: String,
+}
+
 impl RemoteBackend {
     pub fn new(config: RemoteConfig) -> Self {
         let http = reqwest::Client::builder()
@@ -465,6 +472,40 @@ impl RemoteBackend {
         self.delete::<Released>(&format!("/v1/manage/approval-surfaces/{id}"))
             .await
             .map(|body| body.released)
+    }
+
+    /// Rotate through the authenticated online endpoint. The bearer carried
+    /// by this backend is accepted only if it is still current at mutation
+    /// time; the returned token supersedes it immediately.
+    pub async fn rotate_management_token(
+        &self,
+        ttl_days: u64,
+    ) -> ManageResult<IssuedManagementToken> {
+        #[derive(serde::Deserialize)]
+        struct Rotated {
+            token: String,
+            expires_at: String,
+        }
+        let rotated: Rotated = self
+            .post(
+                "/v1/manage/management-token",
+                &serde_json::json!({ "ttl_days": ttl_days }),
+            )
+            .await?;
+        Ok(IssuedManagementToken {
+            token: Zeroizing::new(rotated.token),
+            expires_at: rotated.expires_at,
+        })
+    }
+
+    pub async fn revoke_management_token(&self) -> ManageResult<bool> {
+        #[derive(serde::Deserialize)]
+        struct Revoked {
+            revoked: bool,
+        }
+        self.delete::<Revoked>("/v1/manage/management-token")
+            .await
+            .map(|body| body.revoked)
     }
 
     async fn send<T: DeserializeOwned>(

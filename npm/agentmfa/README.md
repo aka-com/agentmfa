@@ -65,16 +65,17 @@ stop/start needed — over its manage API, authorized by the management
 token (never the agent key):
 
 ```sh
-mfa manage token                # once, while the broker is stopped
-mfa manage login                # paste the token; stored per broker
-mfa conn disable github        # edits the live broker over its socket
+mfa serve                       # first start writes ~/.aka/manage-token (0600)
+mfa manage token                # rotate it online and store the replacement
+mfa conn disable github         # edits the live broker over its socket
 mfa conn list --broker https://broker.example.dev   # hosted brokers too
 ```
 
 `mfa manage login --broker <url>` stores a token for a hosted broker
 (macOS: the Keychain; elsewhere a 0600 file), and `AKA_MANAGE_TOKEN`
-overrides for CI. With no broker running, the same commands fall back
-to editing the local files offline, exactly as before.
+overrides for CI. `mfa manage token --broker <url>` rotates a hosted
+broker using that current credential. With no local broker running,
+commands fall back to editing the local files offline, exactly as before.
 
 The operator's view is covered by `mfa key` (print the shared agent
 key; `--rotate` disconnects every agent at once), `mfa status` (is a

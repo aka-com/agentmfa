@@ -42,6 +42,12 @@ pub struct ManageAuthed {
     token: Zeroizing<String>,
 }
 
+impl ManageAuthed {
+    fn token(&self) -> &str {
+        &self.token
+    }
+}
+
 impl FromRequestParts<AppState> for ManageAuthed {
     type Rejection = Response;
 
@@ -140,6 +146,10 @@ fn respond<T: serde::Serialize>(result: Result<T, ManageError>) -> Response {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/whoami", get(whoami))
+        .route(
+            "/management-token",
+            post(rotate_management_token).delete(revoke_management_token),
+        )
         .route("/events", get(events))
         .route("/approval-surfaces", post(create_approval_surface))
         .route(
@@ -237,6 +247,103 @@ async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Respons
         "capabilities": [aka_api::APPROVAL_SURFACE_CAPABILITY],
         "approval_surface_attached": state.broker.events.has_approval_surface(),
     }))
+}
+
+#[derive(serde::Deserialize)]
+struct RotateManagementTokenBody {
+    ttl_days: u64,
+}
+
+fn token_mutation_error(error: crate::identity::ManageTokenMutationError) -> Response {
+    match error {
+        crate::identity::ManageTokenMutationError::Unauthorized(error) => {
+            let detail = if error == crate::identity::TokenError::Expired {
+                "the management token expired before it could authorize rotation"
+            } else {
+                "the management token was rotated or revoked before this request completed"
+            };
+            manage_error_response(ManageError::InvalidManageToken {
+                detail: Some(detail.into()),
+            })
+        }
+        crate::identity::ManageTokenMutationError::Persist(error) => {
+            manage_error_response(ManageError::from(error))
+        }
+    }
+}
+
+/// Rotate only under authority of the still-current management token. The
+/// identity store performs the second verification and mutation under one
+/// lock, closing the extractor-to-handler race between concurrent rotations.
+async fn rotate_management_token(
+    State(state): State<AppState>,
+    authed: ManageAuthed,
+    ApiJson(body): ApiJson<RotateManagementTokenBody>,
+) -> Response {
+    if !(1..=3650).contains(&body.ttl_days) {
+        return manage_error_response(ManageError::InvalidSetting {
+            message: "management-token TTL must be between 1 and 3650 days".into(),
+        });
+    }
+    let ttl = std::time::Duration::from_secs(body.ttl_days * 86_400);
+    match state
+        .broker
+        .identity
+        .rotate_manage_token_with_ttl(authed.token(), Some(ttl))
+    {
+        Ok(token) => {
+            if let Err(error) = state.broker.paths.remove_manage_bootstrap_token() {
+                tracing::warn!("could not remove consumed management bootstrap token: {error}");
+            }
+            let expires_at = state
+                .broker
+                .identity
+                .manage_token_expires_at()
+                .expect("online rotations always carry a TTL");
+            let mut entry = crate::audit::AuditEntry::new(
+                crate::audit::AuditKind::ManagementTokenIssued,
+                "Management token rotated online",
+            )
+            .outcome("rotated")
+            .field("expires_at", expires_at.to_rfc3339())
+            .confirmation(crate::types::ConfirmationMethod::ManagementToken);
+            if let Some(context) = crate::audit::current_decision_context() {
+                entry = entry.context(&context);
+            }
+            state.broker.audit.append(entry);
+            ok(json!({
+                "token": token,
+                "expires_at": expires_at.to_rfc3339(),
+            }))
+        }
+        Err(error) => token_mutation_error(error),
+    }
+}
+
+async fn revoke_management_token(State(state): State<AppState>, authed: ManageAuthed) -> Response {
+    match state
+        .broker
+        .identity
+        .revoke_manage_token_with_token(authed.token())
+    {
+        Ok(()) => {
+            if let Err(error) = state.broker.paths.remove_manage_bootstrap_token() {
+                tracing::warn!("could not remove consumed management bootstrap token: {error}");
+            }
+            let mut entry = crate::audit::AuditEntry::new(
+                crate::audit::AuditKind::ManagementTokenRevoked,
+                "Management token revoked online",
+            )
+            .outcome("revoked")
+            .confirmation(crate::types::ConfirmationMethod::ManagementToken);
+            if let Some(context) = crate::audit::current_decision_context() {
+                entry = entry.context(&context);
+            }
+            state.broker.audit.append(entry);
+            ok(json!({ "revoked": true }))
+        }
+        Err(error) => token_mutation_error(error),
+    }
 }
 
 async fn create_approval_surface(State(state): State<AppState>, _authed: ManageAuthed) -> Response {

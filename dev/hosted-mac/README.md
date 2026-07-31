@@ -11,16 +11,6 @@ plain HTTP on the address you give it.
 Install the CLI (`npm install -g agentmfa`) or use a checkout. Then:
 
 ```sh
-# Issue the management token (offline; stop any running broker first).
-# Printed once — only its hash is stored. This is what you enter in the
-# desktop app.
-mfa manage token
-
-# Optionally bound a leaked token's blast radius with an expiry; the app
-# re-prompts for a fresh one when it lapses. Re-run to rotate, --revoke
-# to close the manage API.
-mfa manage token --ttl-days 90
-
 # Optionally seed tools/secrets offline (or do it all from the app later,
 # or live once the broker is up: `mfa manage login`, then the same
 # commands drive the running broker — remotely too, with
@@ -33,6 +23,26 @@ mfa conn add github --kind api --host api.github.com \
 # --public-url is what remote clients will reach it at through your proxy.
 mfa serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev
 ```
+
+On its first start, `mfa serve` writes a bounded, owner-only bootstrap
+credential to `~/.aka/manage-token` (mode 0600). In another terminal, rotate
+and store it while the broker remains live:
+
+```sh
+# Printed once — only its hash and the locally stored replacement remain.
+mfa manage token
+
+# Future rotations authenticate with the saved current token.
+mfa manage token --ttl-days 90
+
+# Close the manage API entirely.
+mfa manage token --revoke
+```
+
+The first successful rotation removes the bootstrap file. To rotate from
+another machine, first store the current token with
+`mfa manage login --broker https://broker.example.dev`, then run
+`mfa manage token --broker https://broker.example.dev`.
 
 Notes:
 

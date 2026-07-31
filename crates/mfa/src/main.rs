@@ -84,6 +84,8 @@ fn parse_manage_ttl_days(value: &str) -> Result<u64, String> {
     }
 }
 
+const DEFAULT_MANAGE_TOKEN_TTL_DAYS: u64 = 30;
+
 fn parse_positive_seconds(value: &str) -> Result<u64, String> {
     let secs: u64 = value
         .parse()
@@ -523,9 +525,10 @@ enum ManageCommand {
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    /// Issue (or rotate) this broker's management token and print it once.
-    /// Enter it in the desktop app to manage this broker remotely. Offline:
-    /// run on the broker host while the broker is stopped.
+    /// Rotate this broker's management token and print it once. When the
+    /// broker is running, authorizes with the current saved/environment
+    /// token or its owner-only first-start token file. Falls back to an
+    /// offline issue when the local broker is stopped.
     Token {
         /// Revoke the management token instead (closes the manage API).
         #[arg(long)]
@@ -541,8 +544,11 @@ enum ManageCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Rotate a hosted broker through its manage API.
+        #[arg(long, conflicts_with = "create_root")]
+        broker: Option<String>,
         /// Create a missing explicit --root before issuing its first token.
-        #[arg(long, requires = "root")]
+        #[arg(long, requires = "root", conflicts_with = "broker")]
         create_root: bool,
     },
 }
@@ -1230,10 +1236,11 @@ fn run_cli() {
                 revoke,
                 ttl_days,
                 root,
+                broker,
                 create_root,
             } => {
                 reject_json_for_mutation(json);
-                cmd_manage_token(revoke, ttl_days, root, create_root)
+                cmd_manage_token(revoke, ttl_days, root, broker, create_root)
             }
         },
         Command::Key {
@@ -1680,10 +1687,9 @@ fn management_backend_with_create(
                 ExitCode::Authentication,
                 format!(
                     "a broker is running on {key}.\n\
-                 To edit it live, store its management token with `mfa manage \
-                 login` (issue one with `mfa manage token` while the broker is \
-                 stopped) or set AKA_MANAGE_TOKEN — or stop the broker for an \
-                 offline edit."
+                 To edit it live, run `mfa manage token` to consume its \
+                 first-start credential or rotate a saved token, store a token \
+                 with `mfa manage login`, or set AKA_MANAGE_TOKEN."
                 ),
             );
         };
@@ -3009,14 +3015,184 @@ fn cmd_manage_logout(url: Option<String>, root: Option<PathBuf>) {
     eprintln!("management token forgotten for {key}");
 }
 
-/// Issue, rotate, or revoke the management token. Offline like `secret add`:
-/// a live broker holds identity state in memory and would overwrite the
-/// edit, so it must be stopped first.
-fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>, create_root: bool) {
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ManageTokenSource {
+    Environment,
+    Stored,
+    Bootstrap,
+}
+
+fn online_manage_token(
+    paths: &Paths,
+    url: Option<String>,
+    revoke: bool,
+    ttl_days: Option<u64>,
+    runtime: &tokio::runtime::Runtime,
+) {
+    let (key, backend, source) = match url {
+        Some(url) => {
+            let url = match RemoteConfig::normalize_url(&url) {
+                Ok(url) => url,
+                Err(error) => die_with(ExitCode::Usage, error),
+            };
+            let (token, source) = if let Ok(token) = std::env::var("AKA_MANAGE_TOKEN") {
+                let token = token.trim();
+                if token.is_empty() {
+                    die_with(
+                        ExitCode::Authentication,
+                        format!(
+                            "AKA_MANAGE_TOKEN is empty; set the current token or run \
+                             `mfa manage login --broker {url}`"
+                        ),
+                    );
+                }
+                (
+                    Zeroizing::new(token.to_string()),
+                    ManageTokenSource::Environment,
+                )
+            } else if let Some(token) = manage_token_store(paths).load(&url) {
+                (token, ManageTokenSource::Stored)
+            } else {
+                die_with(
+                    ExitCode::Authentication,
+                    format!(
+                        "no current management token for {url} — set AKA_MANAGE_TOKEN \
+                         or store one with `mfa manage login --broker {url}`; initial \
+                         bootstrap must be run on the broker host"
+                    ),
+                );
+            };
+            let config = match RemoteConfig::new(&url, &token) {
+                Ok(config) => config,
+                Err(error) => die_with(ExitCode::Usage, error),
+            };
+            (url, RemoteBackend::new(config), source)
+        }
+        None => {
+            let socket = paths.socket_file();
+            let key = socket.display().to_string();
+            let (token, source) = if let Ok(token) = std::env::var("AKA_MANAGE_TOKEN") {
+                let token = token.trim();
+                if token.is_empty() {
+                    die_with(
+                        ExitCode::Authentication,
+                        "AKA_MANAGE_TOKEN is empty; set the current token or unset it \
+                         to use a saved or first-start token",
+                    );
+                }
+                (
+                    Zeroizing::new(token.to_string()),
+                    ManageTokenSource::Environment,
+                )
+            } else if let Some(token) = manage_token_store(paths).load(&key) {
+                (token, ManageTokenSource::Stored)
+            } else {
+                let path = paths.manage_bootstrap_token_file();
+                let token = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+                    die_with(
+                        ExitCode::Authentication,
+                        format!(
+                            "no saved management token and could not read the first-start \
+                             credential {}: {error}",
+                            path.display()
+                        ),
+                    )
+                });
+                let token = token.trim();
+                if token.is_empty() {
+                    die_with(
+                        ExitCode::Authentication,
+                        format!("the first-start credential {} is empty", path.display()),
+                    );
+                }
+                (
+                    Zeroizing::new(token.to_string()),
+                    ManageTokenSource::Bootstrap,
+                )
+            };
+            (key, RemoteBackend::over_unix_socket(socket, &token), source)
+        }
+    };
+
+    if revoke {
+        match runtime.block_on(backend.revoke_management_token()) {
+            Ok(true) => {
+                if let Err(error) = manage_token_store(paths).delete(&key) {
+                    eprintln!("warning: could not forget the saved token for {key}: {error}");
+                }
+                if source == ManageTokenSource::Environment {
+                    eprintln!("warning: unset AKA_MANAGE_TOKEN; its value is now revoked");
+                }
+                eprintln!("management token revoked; the manage API is closed");
+            }
+            Ok(false) => eprintln!("no management token was issued"),
+            Err(error) => die_manage(error),
+        }
+        return;
+    }
+
+    let days = ttl_days.expect("the CLI always supplies a bounded management-token TTL");
+    let issued = runtime
+        .block_on(backend.rotate_management_token(days))
+        .unwrap_or_else(|error| die_manage(error));
+    eprintln!("management token (shown once — the broker stores only its hash):\n");
+    println!("{}", issued.token.as_str());
+    if source == ManageTokenSource::Environment {
+        eprintln!(
+            "\nwarning: AKA_MANAGE_TOKEN still contains the superseded token; update or unset it"
+        );
+    } else {
+        let store = manage_token_store(paths);
+        if let Err(error) = store.save(&key, &issued.token) {
+            eprintln!(
+                "\nwarning: the token was rotated but could not be saved ({error}); \
+                 capture the value printed above before it is lost"
+            );
+        } else {
+            eprintln!(
+                "\nmanagement token stored for {key} ({})",
+                store.storage_description(&key)
+            );
+        }
+    }
+    eprintln!("expires: {}", issued.expires_at);
+}
+
+/// Rotate or revoke through a running broker when possible. A stopped local
+/// broker retains the explicit offline path for recovery and first setup.
+fn cmd_manage_token(
+    revoke: bool,
+    ttl_days: Option<u64>,
+    root: Option<PathBuf>,
+    url: Option<String>,
+    create_root: bool,
+) {
+    let url = effective_broker_url(url);
+    if create_root && url.is_some() {
+        die_with(
+            ExitCode::Usage,
+            "--create-root is only valid for offline local issuance; unset AKA_BROKER_URL \
+             or omit --broker",
+        );
+    }
     if !create_root {
-        require_existing_root_for_read(root.as_deref(), false);
+        require_existing_root_for_read(root.as_deref(), url.is_some());
     }
     let paths = store_paths(root.as_deref());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let broker_running = match &url {
+        Some(_) => true,
+        None => runtime
+            .block_on(tokio::net::UnixStream::connect(paths.socket_file()))
+            .is_ok(),
+    };
+    if broker_running {
+        return online_manage_token(&paths, url, revoke, ttl_days, &runtime);
+    }
+
     let _lock = match acquire_offline_store_lock(&paths) {
         Ok(lock) => lock,
         Err(CoreError::BrokerAlreadyRunning(_)) => die_with(
@@ -3040,10 +3216,6 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>, 
         Ok(vault) => vault,
         Err(e) => die(format!("could not open the secret vault: {e}")),
     };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
     let integrity = match runtime.block_on(aka_core::integrity::StateIntegrity::open_for_paths(
         &*vault, &paths,
     )) {
@@ -3071,6 +3243,12 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>, 
     if revoke {
         match identity.revoke_manage_token() {
             Ok(true) => {
+                if let Err(error) = paths.remove_manage_bootstrap_token() {
+                    eprintln!(
+                        "warning: could not remove {}: {error}",
+                        paths.manage_bootstrap_token_file().display()
+                    );
+                }
                 audit.append(aka_core::audit::AuditEntry::new(
                     aka_core::audit::AuditKind::ManagementTokenRevoked,
                     "Management token revoked",
@@ -3086,6 +3264,12 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>, 
     match identity.issue_manage_token_with_ttl(ttl) {
         Ok(token) => {
             let token = Zeroizing::new(token);
+            if let Err(error) = paths.remove_manage_bootstrap_token() {
+                eprintln!(
+                    "warning: could not remove {}: {error}",
+                    paths.manage_bootstrap_token_file().display()
+                );
+            }
             let mut entry = aka_core::audit::AuditEntry::new(
                 aka_core::audit::AuditKind::ManagementTokenIssued,
                 "Management token issued",
@@ -4140,6 +4324,45 @@ struct ServeArgs {
     no_mcp: bool,
 }
 
+/// Give a never-managed headless broker one bounded, owner-only credential.
+/// This is bootstrap, not an unauthenticated API: possession of the file is
+/// what lets the host operator make the first authenticated online rotation.
+fn ensure_first_start_management_token(broker: &Broker) -> Result<Option<PathBuf>, String> {
+    if broker.identity.manage_token_issued() {
+        return Ok(None);
+    }
+    let ttl = std::time::Duration::from_secs(DEFAULT_MANAGE_TOKEN_TTL_DAYS * 86_400);
+    let token = Zeroizing::new(
+        broker
+            .identity
+            .issue_manage_token_with_ttl(Some(ttl))
+            .map_err(|error| format!("could not issue first-start management token: {error}"))?,
+    );
+    if let Err(error) = broker.paths.write_manage_bootstrap_token(&token) {
+        let rollback = broker.identity.revoke_manage_token();
+        return Err(match rollback {
+            Ok(_) => format!("could not write first-start management token: {error}"),
+            Err(rollback) => format!(
+                "could not write first-start management token: {error}; \
+                 could not close the partially opened management plane: {rollback}"
+            ),
+        });
+    }
+    let expires_at = broker
+        .identity
+        .manage_token_expires_at()
+        .expect("first-start management tokens are bounded");
+    broker.audit.append(
+        aka_core::audit::AuditEntry::new(
+            aka_core::audit::AuditKind::ManagementTokenIssued,
+            "First-start management token issued",
+        )
+        .outcome("bootstrap")
+        .field("expires_at", expires_at.to_rfc3339()),
+    );
+    Ok(Some(broker.paths.manage_bootstrap_token_file()))
+}
+
 fn cmd_serve(args: ServeArgs) {
     let ServeArgs {
         root,
@@ -4188,6 +4411,10 @@ fn cmd_serve(args: ServeArgs) {
         Ok(broker) => broker,
         Err(e) => fail("could not start the broker", &e),
     };
+    let first_start_manage_token = match ensure_first_start_management_token(&broker) {
+        Ok(path) => path,
+        Err(error) => die(error),
+    };
     let options = daemon::ServeOptions {
         listen,
         public_url: public_url.clone(),
@@ -4219,6 +4446,19 @@ fn cmd_serve(args: ServeArgs) {
     };
 
     eprintln!("AKA broker listening on {}", daemon.socket_path.display());
+    if let Some(path) = first_start_manage_token {
+        eprintln!(
+            "  first-start management token: {} (0600, expires in {} days)",
+            path.display(),
+            DEFAULT_MANAGE_TOKEN_TTL_DAYS,
+        );
+        eprintln!(
+            "  run `mfa manage token{}` while the broker is live to rotate and store it",
+            root.as_ref()
+                .map(|root| format!(" --root {}", shell_quote(&root.display().to_string())))
+                .unwrap_or_default(),
+        );
+    }
     let confirm_count = broker
         .store
         .list_connections()
@@ -4379,6 +4619,17 @@ mod tests {
         assert_eq!(ttl_days, Some(30));
         assert!(parse_manage_ttl_days("0").is_err());
         assert!(parse_manage_ttl_days("3651").is_err());
+        assert!(Cli::try_parse_from([
+            "mfa",
+            "manage",
+            "token",
+            "--broker",
+            "https://broker.example.test",
+            "--create-root",
+            "--root",
+            "/tmp/example",
+        ])
+        .is_err());
     }
 
     #[test]
@@ -4562,6 +4813,44 @@ mod tests {
         ));
         drop(broker);
         assert!(acquire_offline_store_lock(&paths).is_ok());
+    }
+
+    #[test]
+    fn first_start_management_token_is_private_bounded_and_not_reissued() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let broker = runtime
+            .block_on(Broker::new(
+                paths.clone(),
+                Arc::new(MemoryVault::new()),
+                BrokerConfig::default(),
+                Arc::new(TestEvents),
+            ))
+            .unwrap();
+
+        let path = ensure_first_start_management_token(&broker)
+            .unwrap()
+            .expect("a new broker needs a bootstrap credential");
+        let token = std::fs::read_to_string(&path).unwrap();
+        broker.identity.verify_manage(token.trim()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(broker.identity.manage_token_expires_at().is_some());
+        assert!(
+            ensure_first_start_management_token(&broker)
+                .unwrap()
+                .is_none(),
+            "restart must not overwrite the only available bootstrap token"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), token);
     }
 
     #[test]

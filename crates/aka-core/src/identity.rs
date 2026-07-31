@@ -45,6 +45,15 @@ impl TokenError {
     }
 }
 
+/// An online management-token mutation must distinguish stale authority from
+/// a persistence failure. The daemon maps the former to 401 and the latter to
+/// its ordinary structured internal error.
+#[derive(Debug)]
+pub enum ManageTokenMutationError {
+    Unauthorized(TokenError),
+    Persist(crate::error::CoreError),
+}
+
 /// A successful verification. `via_alias` marks a legacy per-agent token
 /// still riding the migration grace period, so `/v1/whoami` can steer its
 /// holder to the shared token file.
@@ -102,6 +111,28 @@ fn mint_manage_token() -> String {
     let mut buf = [0u8; 32];
     getrandom::fill(&mut buf).expect("os rng");
     format!("{MANAGE_TOKEN_PREFIX}{}", hex(&buf))
+}
+
+fn verify_manage_identity(
+    identity: &BrokerIdentity,
+    token: &str,
+) -> std::result::Result<(), TokenError> {
+    if !token.starts_with(MANAGE_TOKEN_PREFIX) {
+        return Err(TokenError::Invalid);
+    }
+    let hash = hash_token(token);
+    match &identity.manage_token_hash {
+        Some(stored) if *stored == hash => {
+            if identity
+                .manage_token_expires_at
+                .is_some_and(|expires_at| Utc::now() >= expires_at)
+            {
+                return Err(TokenError::Expired);
+            }
+            Ok(())
+        }
+        _ => Err(TokenError::Invalid),
+    }
 }
 
 /// The shape of the per-agent-era `agents.json`, read once to carry its
@@ -417,12 +448,39 @@ impl IdentityStore {
     pub fn issue_manage_token_with_ttl(&self, ttl: Option<Duration>) -> Result<String> {
         let mut state = self.state.lock().unwrap();
         let token = mint_manage_token();
-        state.identity.manage_token_hash = Some(hash_token(&token));
-        state.identity.manage_token_expires_at = ttl.map(|ttl| {
+        let mut next = state.identity.clone();
+        next.manage_token_hash = Some(hash_token(&token));
+        next.manage_token_expires_at = ttl.map(|ttl| {
             Utc::now()
                 + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::days(3650))
         });
-        self.persist(&state.identity)?;
+        self.persist(&next)?;
+        state.identity = next;
+        Ok(token)
+    }
+
+    /// Rotate a live management token without a check/use race. Verification,
+    /// minting, persistence, and the in-memory swap all happen under the same
+    /// identity lock, so two concurrent callers cannot both receive a token
+    /// that appeared current when returned.
+    pub fn rotate_manage_token_with_ttl(
+        &self,
+        current: &str,
+        ttl: Option<Duration>,
+    ) -> std::result::Result<String, ManageTokenMutationError> {
+        let mut state = self.state.lock().unwrap();
+        verify_manage_identity(&state.identity, current)
+            .map_err(ManageTokenMutationError::Unauthorized)?;
+        let token = mint_manage_token();
+        let mut next = state.identity.clone();
+        next.manage_token_hash = Some(hash_token(&token));
+        next.manage_token_expires_at = ttl.map(|ttl| {
+            Utc::now()
+                + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::days(3650))
+        });
+        self.persist(&next)
+            .map_err(ManageTokenMutationError::Persist)?;
+        state.identity = next;
         Ok(token)
     }
 
@@ -435,12 +493,33 @@ impl IdentityStore {
     /// one existed.
     pub fn revoke_manage_token(&self) -> Result<bool> {
         let mut state = self.state.lock().unwrap();
-        let had = state.identity.manage_token_hash.take().is_some();
-        state.identity.manage_token_expires_at = None;
+        let had = state.identity.manage_token_hash.is_some();
         if had {
-            self.persist(&state.identity)?;
+            let mut next = state.identity.clone();
+            next.manage_token_hash = None;
+            next.manage_token_expires_at = None;
+            self.persist(&next)?;
+            state.identity = next;
         }
         Ok(had)
+    }
+
+    /// Revoke through the live manage API, atomically requiring that the
+    /// credential authorizing this request is still the current one.
+    pub fn revoke_manage_token_with_token(
+        &self,
+        current: &str,
+    ) -> std::result::Result<(), ManageTokenMutationError> {
+        let mut state = self.state.lock().unwrap();
+        verify_manage_identity(&state.identity, current)
+            .map_err(ManageTokenMutationError::Unauthorized)?;
+        let mut next = state.identity.clone();
+        next.manage_token_hash = None;
+        next.manage_token_expires_at = None;
+        self.persist(&next)
+            .map_err(ManageTokenMutationError::Persist)?;
+        state.identity = next;
+        Ok(())
     }
 
     /// Verify a presented management token. Long-lived unless issued with a
@@ -450,22 +529,8 @@ impl IdentityStore {
     /// `Expired`, distinct from `Invalid`, so the client can tell "re-issue
     /// this" apart from "wrong token".
     pub fn verify_manage(&self, token: &str) -> std::result::Result<(), TokenError> {
-        if !token.starts_with(MANAGE_TOKEN_PREFIX) {
-            return Err(TokenError::Invalid);
-        }
-        let hash = hash_token(token);
         let state = self.state.lock().unwrap();
-        match &state.identity.manage_token_hash {
-            Some(stored) if *stored == hash => {
-                if let Some(expires_at) = state.identity.manage_token_expires_at {
-                    if Utc::now() >= expires_at {
-                        return Err(TokenError::Expired);
-                    }
-                }
-                Ok(())
-            }
-            _ => Err(TokenError::Invalid),
-        }
+        verify_manage_identity(&state.identity, token)
     }
 
     /// Rotate the key: mint a fresh one, clear the migration aliases, and
@@ -931,6 +996,32 @@ mod tests {
         assert!(s.revoke_manage_token().unwrap());
         assert_eq!(s.verify_manage(&second).unwrap_err(), TokenError::Invalid);
         assert!(!s.revoke_manage_token().unwrap());
+    }
+
+    #[test]
+    fn online_manage_token_mutations_require_the_still_current_token() {
+        let (s, _dir) = store(Duration::from_secs(3600));
+        let first = s
+            .issue_manage_token_with_ttl(Some(Duration::from_secs(3600)))
+            .unwrap();
+        let second = s
+            .rotate_manage_token_with_ttl(&first, Some(Duration::from_secs(7200)))
+            .unwrap();
+
+        assert_eq!(s.verify_manage(&first), Err(TokenError::Invalid));
+        s.verify_manage(&second).unwrap();
+        assert!(matches!(
+            s.rotate_manage_token_with_ttl(&first, Some(Duration::from_secs(3600))),
+            Err(ManageTokenMutationError::Unauthorized(TokenError::Invalid))
+        ));
+        assert!(matches!(
+            s.revoke_manage_token_with_token(&first),
+            Err(ManageTokenMutationError::Unauthorized(TokenError::Invalid))
+        ));
+
+        s.revoke_manage_token_with_token(&second).unwrap();
+        assert!(!s.manage_token_issued());
+        assert_eq!(s.verify_manage(&second), Err(TokenError::Invalid));
     }
 
     #[test]

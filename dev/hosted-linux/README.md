@@ -51,21 +51,22 @@ needed); its in-process Rust MCP host serves `<public-url>/mcp`. Args after
 the image name are appended to the entrypoint's
 `mfa serve --root /var/lib/aka --listen 0.0.0.0:4780`.
 
-Issue the management token once (offline; the broker holds identity state
-in memory, so stop it first), then enter it in the desktop app:
+On its first start, the broker writes a bounded bootstrap credential to
+`/var/lib/aka/sock/manage-token` (mode 0600). Rotate it online immediately;
+the CLI authenticates with that file, stores the replacement, and the broker
+removes the bootstrap file:
 
 ```sh
-docker stop aka-broker
-docker run --rm -e AKA_VAULT_KEY="$AKA_VAULT_KEY" -v aka-state:/var/lib/aka \
-    --entrypoint mfa aka-broker manage token --root /var/lib/aka
-docker start aka-broker
+docker exec aka-broker mfa manage token --root /var/lib/aka
 ```
 
-That one-time issuance is the only stop/start: with the token stored
-(`mfa manage login --broker <public-url>`, from any machine with the
-CLI), every management command drives the **running** broker over its
-manage API — seed secrets and tools, flip agent access, test
-connections, read the activity trail:
+The command prints the replacement once; enter it in the desktop app. Future
+rotations use the saved current token and also happen while the broker runs.
+From another machine, store the current token with
+`mfa manage login --broker <public-url>` and then rotate with
+`mfa manage token --broker <public-url>`. Every management command drives the
+**running** broker over its manage API — seed secrets and tools, flip agent
+access, test connections, read the activity trail:
 
 ```sh
 printf '%s' "$GITHUB_TOKEN" | mfa secret add GITHUB_TOKEN --broker https://broker.example.dev

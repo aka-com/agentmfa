@@ -180,6 +180,76 @@ async fn manage_routes_require_the_management_token() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn management_token_rotation_and_revocation_require_current_authority() {
+    let h = harness().await;
+    let first = h.manage_token.clone();
+
+    let (status, invalid) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/manage/management-token",
+        &[("authorization", &format!("Bearer {first}"))],
+        Some(json!({ "ttl_days": 0 })),
+    )
+    .await;
+    assert_eq!(status, 422, "{invalid}");
+    h.broker.identity.verify_manage(&first).unwrap();
+
+    let (status, rotated) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/manage/management-token",
+        &[("authorization", &format!("Bearer {first}"))],
+        Some(json!({ "ttl_days": 30 })),
+    )
+    .await;
+    assert_eq!(status, 200, "{rotated}");
+    let second = rotated["token"].as_str().unwrap().to_string();
+    assert!(second.starts_with("akamgr_"));
+    assert!(rotated["expires_at"].as_str().is_some());
+    assert_eq!(
+        h.broker.identity.verify_manage(&first),
+        Err(aka_core::identity::TokenError::Invalid)
+    );
+    h.broker.identity.verify_manage(&second).unwrap();
+
+    // A stale administrator cannot overwrite the winning rotation.
+    let (status, stale) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/manage/management-token",
+        &[("authorization", &format!("Bearer {first}"))],
+        Some(json!({ "ttl_days": 30 })),
+    )
+    .await;
+    assert_eq!(status, 401, "{stale}");
+    h.broker.identity.verify_manage(&second).unwrap();
+
+    let (status, revoked) = uds_request(
+        &h.socket,
+        "DELETE",
+        "/v1/manage/management-token",
+        &[("authorization", &format!("Bearer {second}"))],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{revoked}");
+    assert_eq!(revoked["revoked"], true);
+    assert!(!h.broker.identity.manage_token_issued());
+
+    let entries = h.broker.audit.recent(20);
+    assert!(entries.iter().any(|entry| {
+        entry.kind == aka_core::audit::AuditKind::ManagementTokenIssued
+            && entry.outcome.as_deref() == Some("rotated")
+            && entry.confirmation == Some(aka_core::types::ConfirmationMethod::ManagementToken)
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry.kind == aka_core::audit::AuditKind::ManagementTokenRevoked
+            && entry.outcome.as_deref() == Some("revoked")
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn polling_request_surface_lease_round_trips_over_manage_api() {
     let h = harness().await;
     assert!(!h.broker.events.has_approval_surface());

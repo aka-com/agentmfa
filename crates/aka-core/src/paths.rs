@@ -237,6 +237,30 @@ impl Paths {
         self.socket_dir.join("token")
     }
 
+    /// First-start management credential (`<socket-dir>/manage-token`, 0600).
+    ///
+    /// `mfa serve` creates this only when the broker has never had a
+    /// management token. It gives an operator on the broker host a bounded
+    /// credential with which to perform the first authenticated online
+    /// rotation; ordinary agents are never told this path.
+    pub fn manage_bootstrap_token_file(&self) -> PathBuf {
+        self.socket_dir.join("manage-token")
+    }
+
+    /// Publish a first-start management credential atomically and privately.
+    pub fn write_manage_bootstrap_token(&self, token: &str) -> io::Result<()> {
+        write_private_atomic(&self.manage_bootstrap_token_file(), token.as_bytes())
+    }
+
+    /// Remove a consumed/stale first-start credential. Missing is success.
+    pub fn remove_manage_bootstrap_token(&self) -> io::Result<()> {
+        match fs::remove_file(self.manage_bootstrap_token_file()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Client-side stored management tokens (`mfa manage login`), one file
     /// per broker, 0600. macOS clients store in the login Keychain instead;
     /// see aka-client's `TokenStore`.

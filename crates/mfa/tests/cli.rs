@@ -269,20 +269,48 @@ fn broker_url_environment_variable_matches_the_broker_flag() {
 }
 
 #[test]
-fn broker_url_environment_cannot_bypass_local_only_root_guards() {
-    let parent = tempfile::tempdir().unwrap();
-    let missing = parent.path().join("typo");
+fn broker_url_environment_rotates_the_current_management_token_online() {
+    let root = tempfile::tempdir().unwrap();
+    let (url, requests, handle) = stub(vec![Reply {
+        method: "POST",
+        path: "/v1/manage/management-token",
+        body: json!({
+            "token": "akamgr_rotated",
+            "expires_at": "2026-08-29T12:00:00Z"
+        }),
+    }]);
     let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
-        .args(["manage", "token", "--root", missing.to_str().unwrap()])
-        .env("AKA_BROKER_URL", "https://broker.example.test")
+        .args([
+            "manage",
+            "token",
+            "--ttl-days",
+            "30",
+            "--root",
+            root.path().to_str().unwrap(),
+        ])
+        .env("AKA_MANAGE_TOKEN", "akamgr_test")
+        .env("AKA_BROKER_URL", &url)
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not an existing broker root"));
-    assert!(
-        !missing.exists(),
-        "the local-only command created a typoed root"
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "akamgr_rotated"
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("AKA_MANAGE_TOKEN still contains the superseded token"),
+        "{stderr}"
+    );
+    handle.join().unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "rotation must not make a stale whoami call"
+    );
+    assert!(requests[0].contains("authorization: Bearer akamgr_test"));
+    assert!(requests[0].ends_with(r#"{"ttl_days":30}"#));
 }
 
 #[test]

@@ -51,7 +51,10 @@ Store `AKA_VAULT_KEY` or `AKA_VAULT_KEY_FILE` outside the broker data
 directory and inject it through the hosting platform's secret mechanism.
 Management tokens are stored in a plaintext 0600 file on non-macOS clients;
 prefer `AKA_MANAGE_TOKEN` in CI. The default management-token lifetime is 30
-days.
+days. A never-managed broker writes one bounded first-start credential to its
+owner-only socket directory. `mfa manage token` consumes it to perform the
+first authenticated online rotation; subsequent rotations require the still
+current saved or environment token and do not stop the broker.
 
 Disabling a connection refuses new calls and closes transports the broker
 owns. Rotating the shared agent key revokes outstanding tickets and direct
