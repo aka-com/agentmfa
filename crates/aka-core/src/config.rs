@@ -100,6 +100,10 @@ pub struct BrokerConfig {
     pub audit_pg_statements: bool,
     /// Per-approval (per-ticket) concurrent session cap.
     pub per_ticket_sessions: usize,
+    /// Per-approval (per-ticket) *cumulative* session cap: sessions ever
+    /// opened under one ticket, which bounds a captured ticket's total
+    /// fan-out rather than just its instantaneous width (SEC-33).
+    pub per_ticket_total_sessions: usize,
     /// Global concurrent session backstop.
     pub global_sessions: usize,
 
@@ -305,6 +309,7 @@ impl Default for BrokerConfig {
             max_pending_pg_handshakes: 64,
             audit_pg_statements: false,
             per_ticket_sessions: 60,
+            per_ticket_total_sessions: 120,
             global_sessions: 300,
             max_endpoints: 64,
             approval_timeout: Duration::from_secs(90),

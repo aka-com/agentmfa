@@ -113,6 +113,23 @@ fn mint_manage_token() -> String {
     format!("{MANAGE_TOKEN_PREFIX}{}", hex(&buf))
 }
 
+/// Wall-clock "now" that cannot be pulled backwards within one process
+/// lifetime: the later of the system clock and a monotonic projection from a
+/// process-start anchor. Winding the system clock back therefore cannot
+/// extend an alias or management-token expiry (SEC-39); winding it forward
+/// still expires early, which fails closed. Across restarts the anchor
+/// resets — the bounded wall-clock fallback, since persisted expiries have
+/// only the wall clock to compare against on a fresh process.
+fn skew_guarded_now() -> chrono::DateTime<Utc> {
+    static ANCHOR: std::sync::OnceLock<(std::time::Instant, chrono::DateTime<Utc>)> =
+        std::sync::OnceLock::new();
+    let (instant, wall) = *ANCHOR.get_or_init(|| (std::time::Instant::now(), Utc::now()));
+    let projected = wall
+        + chrono::Duration::from_std(instant.elapsed())
+            .unwrap_or_else(|_| chrono::Duration::zero());
+    Utc::now().max(projected)
+}
+
 fn verify_manage_identity(
     identity: &BrokerIdentity,
     token: &str,
@@ -125,7 +142,7 @@ fn verify_manage_identity(
         Some(stored) if *stored == hash => {
             if identity
                 .manage_token_expires_at
-                .is_some_and(|expires_at| Utc::now() >= expires_at)
+                .is_some_and(|expires_at| skew_guarded_now() >= expires_at)
             {
                 return Err(TokenError::Expired);
             }
@@ -332,7 +349,7 @@ impl IdentityStore {
     /// past that clock's TTL, as still accepted.
     pub fn active_alias_count(&self) -> usize {
         let state = self.state.lock().unwrap();
-        let now = Utc::now();
+        let now = skew_guarded_now();
         state
             .identity
             .alias_hashes
@@ -373,7 +390,7 @@ impl IdentityStore {
                 .identity
                 .alias_expires_at
                 .get(&hash)
-                .is_some_and(|expires_at| Utc::now() >= *expires_at)
+                .is_some_and(|expires_at| skew_guarded_now() >= *expires_at)
             {
                 return Err(TokenError::Expired);
             }
@@ -389,7 +406,9 @@ impl IdentityStore {
         } else {
             return Err(TokenError::Invalid);
         };
-        let now = Utc::now();
+        // Skew-guarded: a rolled-back wall clock must not revive an idle key
+        // by shrinking its apparent age.
+        let now = skew_guarded_now();
         let age = now.signed_duration_since(last_used);
         if age.num_seconds() > self.ttl.as_secs() as i64 {
             return Err(TokenError::Expired);
@@ -589,6 +608,23 @@ pub fn validate_agent_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_skew_guarded_clock_never_runs_behind_its_monotonic_projection() {
+        // The guard is `max(wall, anchor + monotonic elapsed)`: with the wall
+        // clock honest the two agree to within scheduling noise, and a wall
+        // clock wound backwards is overruled by the projection — which is the
+        // property that stops a rollback extending alias or manage-token
+        // validity. The rollback itself cannot be simulated in-process, so
+        // assert the monotone floor the enforcement relies on.
+        let first = skew_guarded_now();
+        let second = skew_guarded_now();
+        assert!(second >= first, "guarded now never decreases");
+        assert!(
+            (skew_guarded_now() - Utc::now()).num_seconds().abs() <= 5,
+            "with an honest wall clock the guard tracks it"
+        );
+    }
 
     fn integrity() -> Arc<StateIntegrity> {
         Arc::new(

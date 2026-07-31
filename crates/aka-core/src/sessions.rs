@@ -1,11 +1,13 @@
 //! Data-plane tickets and live sessions.
 //!
 //! PG DSN tickets and SSH agent-socket tickets are 128-bit random values that
-//! expire 60 s after issue. A ticket may be redeemed any number of times
-//! within that window, each redemption opening its own proxied session, all
-//! under the single approval. Concurrent sessions are
-//! bounded at two levels, a per-ticket cap (default 60) inside a global
-//! backstop (default 300), with distinct reasons naming the budget hit.
+//! expire 60 s after issue. A ticket may be redeemed repeatedly within that
+//! window, each redemption opening its own proxied session, all under the
+//! single approval. Sessions are bounded at three levels: a per-ticket
+//! concurrency cap (default 60) and a per-ticket *cumulative* cap (default
+//! 120 — what bounds a captured ticket's total fan-out, since each session
+//! may outlive the ticket by up to the session TTL) inside a global backstop
+//! (default 300), with distinct reasons naming the budget hit.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +38,11 @@ struct TicketEntry {
     connection: Connection,
     issued: Instant,
     active_sessions: usize,
+    /// Sessions ever opened under this ticket. Unlike `active_sessions` this
+    /// never decreases on session close (only a failed establishment refunds
+    /// it), so it bounds a captured ticket's total amplification rather than
+    /// just its instantaneous width.
+    total_sessions: usize,
     invalidated: bool,
 }
 
@@ -145,6 +152,7 @@ impl SessionCloseSignal {
 struct DataPlaneInner {
     ticket_ttl: Duration,
     per_ticket: usize,
+    per_ticket_total: usize,
     global: usize,
     audit: Arc<AuditLog>,
     events: Arc<dyn BrokerEvents>,
@@ -174,6 +182,7 @@ impl DataPlane {
     pub fn new(
         ticket_ttl: Duration,
         per_ticket: usize,
+        per_ticket_total: usize,
         global: usize,
         audit: Arc<AuditLog>,
         events: Arc<dyn BrokerEvents>,
@@ -182,6 +191,7 @@ impl DataPlane {
             inner: Arc::new(DataPlaneInner {
                 ticket_ttl,
                 per_ticket,
+                per_ticket_total,
                 global,
                 audit,
                 events,
@@ -202,6 +212,7 @@ impl DataPlane {
                 connection: connection.clone(),
                 issued: Instant::now(),
                 active_sessions: 0,
+                total_sessions: 0,
                 invalidated: false,
             },
         );
@@ -222,13 +233,16 @@ impl DataPlane {
             return Err(RedeemError::Expired);
         }
         // Fail fast with the budget it hit.
-        if entry.active_sessions >= self.inner.per_ticket {
+        if entry.active_sessions >= self.inner.per_ticket
+            || entry.total_sessions >= self.inner.per_ticket_total
+        {
             return Err(RedeemError::TicketSessionLimit);
         }
         if global_active >= self.inner.global {
             return Err(RedeemError::BrokerSessionLimit);
         }
         entry.active_sessions += 1;
+        entry.total_sessions += 1;
         Ok(Redemption {
             plane: self.inner.clone(),
             ticket: value.to_string(),
@@ -517,10 +531,12 @@ impl Drop for Redemption {
         if self.started {
             return;
         }
-        // Establishment failed: release the reserved budget slot.
+        // Establishment failed: release the reserved budget slot, including
+        // the cumulative one — a failed upstream dial is not fan-out.
         let mut state = self.plane.state.lock().unwrap();
         if let Some(ticket) = state.tickets.get_mut(&self.ticket) {
             ticket.active_sessions = ticket.active_sessions.saturating_sub(1);
+            ticket.total_sessions = ticket.total_sessions.saturating_sub(1);
         }
     }
 }
@@ -630,10 +646,26 @@ mod tests {
     }
 
     fn plane(ttl: Duration, per_ticket: usize, global: usize) -> (DataPlane, tempfile::TempDir) {
+        plane_with_total(ttl, per_ticket, per_ticket.saturating_mul(2), global)
+    }
+
+    fn plane_with_total(
+        ttl: Duration,
+        per_ticket: usize,
+        per_ticket_total: usize,
+        global: usize,
+    ) -> (DataPlane, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let audit = Arc::new(AuditLog::open(dir.path().join("audit.jsonl")).unwrap());
         (
-            DataPlane::new(ttl, per_ticket, global, audit, Arc::new(NoopEvents)),
+            DataPlane::new(
+                ttl,
+                per_ticket,
+                per_ticket_total,
+                global,
+                audit,
+                Arc::new(NoopEvents),
+            ),
             dir,
         )
     }
@@ -709,6 +741,31 @@ mod tests {
 
     fn plane_global_one() -> (DataPlane, tempfile::TempDir) {
         plane(Duration::from_secs(60), 60, 1)
+    }
+
+    #[test]
+    fn a_ticket_has_a_cumulative_session_budget() {
+        // Concurrency alone does not bound fan-out: sessions that close free
+        // their slot, so a captured ticket could churn through an unbounded
+        // number of them inside its window. The cumulative cap stops that.
+        let (plane, _dir) = plane_with_total(Duration::from_secs(60), 60, 2, 300);
+        let ticket = plane.issue("a", &pg_connection());
+        for _ in 0..2 {
+            let session = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
+            session.finish("test");
+        }
+        // No sessions are live, yet the ticket's total budget is spent.
+        assert!(plane.sessions().is_empty());
+        assert_eq!(
+            expect_err(plane.redeem(&ticket)),
+            RedeemError::TicketSessionLimit
+        );
+        // A failed establishment refunds the cumulative slot too.
+        let (plane, _dir) = plane_with_total(Duration::from_secs(60), 60, 1, 300);
+        let ticket = plane.issue("a", &pg_connection());
+        drop(plane.redeem(&ticket).unwrap()); // dial failed
+        let session = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
+        session.finish("test");
     }
 
     #[test]

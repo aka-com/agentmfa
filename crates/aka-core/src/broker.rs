@@ -333,6 +333,7 @@ impl Broker {
         let data_plane = DataPlane::new(
             config.ticket_ttl,
             config.per_ticket_sessions,
+            config.per_ticket_total_sessions,
             config.global_sessions,
             audit.clone(),
             events.clone(),
