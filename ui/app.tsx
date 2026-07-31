@@ -1810,9 +1810,7 @@ function ConnectionDetail({ connection: c }: {
     : 'Connect to this service';
   const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
     ? <div className="cd-sec">
-        <div className="cd-connect-lbl"><span>{connectTitle}</span>
-          <span className="cd-connect-tag">Agent endpoint</span>
-        </div>
+        <div className="cd-connect-lbl"><span>{connectTitle}</span></div>
         <EndpointStrip connection={c} withFormats />
       </div>
     : null;

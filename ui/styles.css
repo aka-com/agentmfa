@@ -1470,6 +1470,11 @@
   height: fit-content; max-height: calc(100vh - 130px);
   height: calc(100cqh - 14px); max-height: calc(100cqh - 14px);
 }
+/* CAUTION: overflow-y makes the pane a clip box — anything absolutely
+   positioned inside (the ⋯ tool-options menu, the endpoint Copy ▾ menu)
+   is cut off at the pane's edges. Keep those menus anchored so they stay
+   inside the pane's box (see .cd-actions below), and never let a popover
+   in here hang past the pane border. */
 .conn-detail-pane {
   --cd-gutter-x: 16px;
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
@@ -1478,11 +1483,18 @@
   background: var(--card-bg); box-shadow: 0 1px 3px rgba(20,24,50,.06);
 }
 .cd-head { display: flex; align-items: center; gap: 10px; }
-.cd-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.cd-actions { position: relative; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 /* The switch's nudge is for labelled settings rows, where it aligns with a
    first line of text; here it is centered against the whole title block. */
 .cd-actions .switch { margin-top: 0; }
 .cd-actions .icon-btn, .cd-actions .tile-menu-wrap { flex: 0 0 auto; }
+/* The ⋯ menu anchors to the action cluster's right edge — flush with the
+   pane's gutter — not to its own wrap. The wrap sits left of the enable
+   switch, and a 250px menu hung off it pokes past the pane's left border,
+   where the pane's overflow (see .conn-detail-pane) clips the item icons
+   off. If this header changes, re-check the open menu against both pane
+   edges. */
+.cd-actions .tile-menu-wrap { position: static; }
 .cd-actions .tile-menu { min-width: 250px; }
 .cd-actions .icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
@@ -1512,14 +1524,6 @@
   font-size: 0.8125rem; font-weight: 600;
 }
 .cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
-/* Names which of the pane's two addresses a section shows: the broker-issued
-   address agents connect to, as opposed to the pinned upstream in Details. */
-.cd-connect-tag {
-  flex: 0 0 auto; margin-left: auto; padding: 2px 9px;
-  border: 1px solid var(--line); border-radius: 999px;
-  background: var(--wash); color: var(--muted);
-  font-size: 0.65625rem; font-weight: 600;
-}
 .cd-help { margin-top: 8px; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
 /* Traffic confirmation: a labelled switch row, so the promise ("Confirm
    each request") sits beside the control that makes it rather than in a
@@ -1950,16 +1954,19 @@
   flex: 1; min-width: 0; overflow-wrap: break-word;
   color: var(--ink-2); font-size: 0.75rem; line-height: 1.35;
 }
-/* Copy sits below the DSN so the address gets the field's full width.
+/* Copy sits below the DSN, at the field's right edge, so the address gets
+   the field's full width. The Copy ▾ variant nests the button in a wrap
+   (its menu's positioning context) — align the wrap, not just the button.
    Reserve the wider feedback label so Copy → Copied keeps a steady size. */
+.ep-strip .ep-field .ep-copy, .ep-strip .ep-field .ep-copy-wrap{ align-self: flex-end; }
 .ep-strip .ep-field .ep-copy{
-  align-self: flex-end; flex: 0 0 auto; display: inline-flex; align-items: center;
+  flex: 0 0 auto; display: inline-flex; align-items: center;
   justify-content: center; gap: 5px; width: 76px; white-space: nowrap;
 }
 .ep-strip .ep-field .ep-copy svg{ width: 14px; height: 14px; }
-/* Collapsed by default in the detail pane: a masked one-liner with Copy
-   beside it. Clicking the line expands to the full wrapping DSN. */
-.ep-strip .ep-field.collapsed{ flex-direction: row; align-items: center; }
+/* Collapsed differs only in masking: the address still wraps at full field
+   width with Copy below-right of it (same stacked layout as expanded — a
+   long SSH command beside a centered button squeezed both into columns). */
 /* The masked line wraps rather than truncates — the address is the
    section's payload, so every character stays visible even collapsed. */
 .ep-strip .ep-field .ep-addr-masked{
@@ -1970,7 +1977,6 @@
   overflow-wrap: anywhere;
 }
 .ep-strip .ep-field .ep-addr-masked:hover{ color: var(--ink); }
-.ep-strip .ep-field.collapsed .ep-copy{ align-self: center; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); font-size: 0.75rem; }
 .ep-expiry{
   display: flex; align-items: center; gap: 8px; margin-top: 8px;
