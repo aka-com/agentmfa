@@ -1708,7 +1708,9 @@ function McpStatus({ connection: c }: { connection: ConnectionSummary }): ReactN
 function connectionFactRows(c: ConnectionSummary): Array<[string, string]> {
   const rows: Array<[string, string]> = [];
   if (c.mcp_path) {
-    if (c.host) rows.push(['Server', `${c.host}${c.mcp_path === '/' ? '' : c.mcp_path}`]);
+    // target is the full pinned origin — scheme and non-default port
+    // included — so a local server never shows a truncated address here.
+    if (c.host) rows.push(['Upstream', `${c.target}${c.mcp_path === '/' ? '' : c.mcp_path}`]);
     if (c.account) rows.push(['Signs in as', c.account]);
   } else if (c.type === 'pg') {
     if (c.host) rows.push(['Host', c.host]);
@@ -1723,7 +1725,7 @@ function connectionFactRows(c: ConnectionSummary): Array<[string, string]> {
     if (c.user) rows.push(['User', c.user]);
     rows.push(['Host key', c.host_key_fingerprint ? 'Pinned' : 'Not pinned yet']);
   } else if (c.host) {
-    rows.push(['Server', `${c.scheme ? `${c.scheme}://` : ''}${c.host}`]);
+    rows.push(['Upstream', c.target]);
   }
   if (c.signer?.algorithm === 'gcp_service_account') {
     rows.push(['Credential',
@@ -1753,7 +1755,9 @@ function ConnectionDetail({ connection: c }: {
     : 'Connect to this service';
   const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
     ? <div className="cd-sec">
-        <div className="cd-connect-lbl"><span>{connectTitle}</span></div>
+        <div className="cd-connect-lbl"><span>{connectTitle}</span>
+          <span className="cd-connect-tag">Agent endpoint</span>
+        </div>
         <EndpointStrip connection={c} withFormats />
       </div>
     : null;

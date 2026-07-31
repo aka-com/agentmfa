@@ -1483,6 +1483,14 @@
   font-size: 0.8125rem; font-weight: 600;
 }
 .cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
+/* Names which of the pane's two addresses a section shows: the broker-issued
+   address agents connect to, as opposed to the pinned upstream in Details. */
+.cd-connect-tag {
+  flex: 0 0 auto; margin-left: auto; padding: 2px 9px;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--wash); color: var(--muted);
+  font-size: 0.65625rem; font-weight: 600;
+}
 .cd-help { margin-top: 8px; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
 /* Traffic confirmation: a labelled switch row, so the promise ("Confirm
    each request") sits beside the control that makes it rather than in a
