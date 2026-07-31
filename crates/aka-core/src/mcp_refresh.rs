@@ -573,6 +573,9 @@ mod tests {
                     mcp_path: Some("/mcp".into()),
                     test_path: None,
                     oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
                 },
                 secrets: vec![secret.id],
             })
@@ -778,6 +781,9 @@ mod tests {
                         extra_auth_params: Vec::new(),
                         token_secret_id: None,
                     }),
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
                 },
                 secrets: vec![secret.id],
             })

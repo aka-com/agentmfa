@@ -409,6 +409,9 @@ fn api_connection(harness: &Harness, name: &str, port: u16) {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -1024,6 +1027,9 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -1228,6 +1234,9 @@ async fn mutating_request_id_is_independent_per_connection() {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -1570,6 +1579,9 @@ async fn recognized_mcp_envelope_legs_do_not_spend_the_tool_call_budget() {
                 mcp_path: Some("/echo".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -1818,6 +1830,9 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
                 mcp_path: Some("/echo".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -1936,6 +1951,9 @@ async fn an_oversized_mcp_tool_result_becomes_a_bounded_explicit_tool_error() {
                 mcp_path: Some("/large-mcp".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -2057,6 +2075,9 @@ async fn elicitations_require_an_exact_upstream_correlation_capability() {
                 mcp_path: Some("/needs-input".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -2664,6 +2685,9 @@ async fn http_direct_endpoint_rejects_client_supplied_custom_credential_header()
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -3094,6 +3118,9 @@ async fn a_streamed_answer_still_carries_what_the_broker_attached_after_it() {
                 mcp_path: Some("/needs-input".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })

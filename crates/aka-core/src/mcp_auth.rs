@@ -541,6 +541,9 @@ impl Broker {
             // `test_upstream` already falls back to.
             test_path: None,
             oauth: None,
+            signer: None,
+            client_cert_path: None,
+            client_key_path: None,
         };
         let spec = ConnectionSpec {
             name: name.clone(),
@@ -731,7 +734,7 @@ async fn run_flow(
     // these requests.
     let mut client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(5));
     if let Some(tls) =
-        crate::capability::http::trusted_ca_tls_config(trusted_ca_bundle_path.as_deref())
+        crate::capability::http::trusted_ca_tls_config(trusted_ca_bundle_path.as_deref(), None)
             .map_err(|error| FlowFailure::plain(format!("trusted CA: {error}")))?
     {
         client = client.use_preconfigured_tls(tls);

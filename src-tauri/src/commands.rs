@@ -682,6 +682,12 @@ impl ConnectionInput {
                     }
                     _ => None,
                 },
+                // Dispatch-time signing and upstream mTLS are configured via
+                // the CLI/manage plane; the desktop form does not offer them
+                // yet (UI follow-up tracked in the backlog).
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             "pg" => ConnectionConfig::Pg {
                 host: self.host.unwrap_or_default(),

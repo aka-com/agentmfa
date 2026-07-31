@@ -410,6 +410,31 @@ pub struct ConnectionDto {
     pub last_detail: Option<String>,
     #[serde(default)]
     pub last_checked_at: Option<String>,
+    /// Set when the connection signs each request at dispatch time (e.g.
+    /// AWS SigV4) instead of injecting a rendered template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<SignerDto>,
+    /// PEM client-certificate chain presented on the upstream TLS leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_cert_path: Option<String>,
+    /// PEM private key for `client_cert_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key_path: Option<String>,
+}
+
+/// A dispatch-time request signer, mirrored from the connection config.
+/// Only credential *references* (vault secret names) appear here; the key
+/// material never rides the manage plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignerDto {
+    /// "aws_sigv4" for now.
+    pub algorithm: String,
+    pub region: String,
+    pub service: String,
+    pub access_key_ref: String,
+    pub secret_key_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_token_ref: Option<String>,
 }
 
 /// The shared broker identity, for the Connect page's key card. Never the
@@ -797,6 +822,9 @@ mod tests {
             last_status: None,
             last_detail: None,
             last_checked_at: None,
+            signer: None,
+            client_cert_path: None,
+            client_key_path: None,
         };
         let value = serde_json::to_value(&dto).unwrap();
         assert_eq!(value["type"], "api");

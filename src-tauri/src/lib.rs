@@ -41,7 +41,7 @@ pub(crate) fn start_local_runtime(handle: &AppHandle) -> Result<LocalRuntime, Co
 
     let paths = Paths::default_locations()?;
     let vault = platform_vault(&paths)?;
-    let config = BrokerConfig::default();
+    let config = BrokerConfig::default().overridden_from_env();
     let events = events::observer(handle.clone());
 
     let broker: Arc<Broker> = runtime.block_on(Broker::new(paths, vault, config, events))?;

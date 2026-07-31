@@ -226,6 +226,9 @@ async fn broker_http_relay_matches_the_shared_mcp_fixture() {
                 mcp_path: Some("/mcp".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -307,6 +310,9 @@ async fn broker_mcp_relay_returns_when_the_matching_sse_frame_arrives() {
                 mcp_path: Some("/mcp".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -447,6 +453,9 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                     mcp_path: None,
                     test_path: None,
                     oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
                 },
                 secrets: vec![],
             })
@@ -466,6 +475,9 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                 mcp_path: Some("/mcp".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })

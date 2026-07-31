@@ -36,6 +36,7 @@ pub mod policy;
 pub mod ratelimit;
 pub mod request_history;
 pub mod sessions;
+pub(crate) mod sigv4;
 pub mod store;
 pub mod template;
 pub mod types;

@@ -289,6 +289,9 @@ fn api_connection(harness: &Harness, name: &str, port: u16, mcp_path: Option<&st
                 mcp_path: mcp_path.map(str::to_string),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -479,6 +482,9 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })

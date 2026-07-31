@@ -315,6 +315,87 @@ pub(crate) enum RenderedInjection {
     /// Raw query-string fragment (already percent-encoded by the template's
     /// `url(…)` transform), e.g. `token=abc%20def`.
     Query(Zeroizing<String>),
+    /// Dispatch-time signing credentials. Unlike the variants above this is
+    /// not a finished header: the signature covers method, URL, and payload,
+    /// so each redirect hop computes its own inside the dial loop.
+    Sigv4(Box<Sigv4Credentials>),
+}
+
+/// Resolved SigV4 signing material, held only for the life of one dial.
+pub(crate) struct Sigv4Credentials {
+    pub access_key: Zeroizing<String>,
+    pub secret_key: Zeroizing<String>,
+    pub session_token: Option<Zeroizing<String>>,
+    pub region: String,
+    pub service: String,
+}
+
+/// The headers one SigV4-signed request carries: `Authorization`,
+/// `x-amz-date`, `x-amz-content-sha256`, and the session token when the
+/// credentials are temporary. Values derived from credential material are
+/// marked sensitive.
+fn sigv4_hop_headers(
+    credentials: &Sigv4Credentials,
+    method: &Method,
+    url: &Url,
+    payload_hash: &str,
+) -> Result<Vec<(HeaderName, HeaderValue)>, String> {
+    // Sign the Host value reqwest will send: `url` never carries a
+    // scheme-default port (the url crate normalizes those away), so an
+    // explicit port here is a non-default one that rides the header too.
+    let host_header = match (url.host_str(), url.port()) {
+        (Some(host), Some(port)) => format!("{host}:{port}"),
+        (Some(host), None) => host.to_string(),
+        _ => return Err("upstream URL has no host".to_string()),
+    };
+    let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let mut signed = vec![
+        ("host".to_string(), host_header),
+        ("x-amz-content-sha256".to_string(), payload_hash.to_string()),
+        ("x-amz-date".to_string(), amz_date.clone()),
+    ];
+    if let Some(token) = &credentials.session_token {
+        signed.push(("x-amz-security-token".to_string(), token.to_string()));
+    }
+    let signature = crate::sigv4::sign(&crate::sigv4::SignParams {
+        access_key: &credentials.access_key,
+        secret_key: &credentials.secret_key,
+        region: &credentials.region,
+        service: &credentials.service,
+        method: method.as_str(),
+        url,
+        headers: &signed,
+        payload_hash,
+        timestamp: &amz_date,
+    });
+    let sensitive = |value: &str| -> Result<HeaderValue, String> {
+        let mut value = HeaderValue::from_str(value)
+            .map_err(|_| "signer produced an invalid header value".to_string())?;
+        value.set_sensitive(true);
+        Ok(value)
+    };
+    let plain = |value: &str| -> Result<HeaderValue, String> {
+        HeaderValue::from_str(value)
+            .map_err(|_| "signer produced an invalid header value".to_string())
+    };
+    let mut headers = vec![
+        (
+            http::header::AUTHORIZATION,
+            sensitive(&signature.authorization)?,
+        ),
+        (
+            HeaderName::from_static("x-amz-content-sha256"),
+            plain(payload_hash)?,
+        ),
+        (HeaderName::from_static("x-amz-date"), plain(&amz_date)?),
+    ];
+    if let Some(token) = &credentials.session_token {
+        headers.push((
+            HeaderName::from_static("x-amz-security-token"),
+            sensitive(token)?,
+        ));
+    }
+    Ok(headers)
 }
 
 /// Best-effort response scrubber for reflected credentials. This deliberately
@@ -368,6 +449,19 @@ impl Redactions {
                             redactions.add_component(decoded.as_ref());
                         }
                     }
+                }
+            }
+            RenderedInjection::Sigv4(credentials) => {
+                // The signature itself changes per hop and never appears in
+                // responses; the durable secrets are the secret key and the
+                // session token. The access key ID is deliberately not a
+                // needle: it is an identifier, not a credential, and IAM
+                // responses legitimately contain access key IDs — scrubbing
+                // them would corrupt those bodies the same way the Bearer
+                // scheme word once did.
+                redactions.add_component(&*credentials.secret_key);
+                if let Some(token) = &credentials.session_token {
+                    redactions.add_component(&**token);
                 }
             }
         }
@@ -659,12 +753,23 @@ pub(crate) fn client_for_connection(
 ) -> Result<reqwest::Client, String> {
     let ConnectionConfig::Api {
         trusted_ca_bundle_path,
+        client_cert_path,
+        client_key_path,
         ..
     } = &connection.config
     else {
         return Ok(default.clone());
     };
-    let Some(tls) = trusted_ca_tls_config(trusted_ca_bundle_path.as_deref())? else {
+    let identity = match (client_cert_path.as_deref(), client_key_path.as_deref()) {
+        (Some(cert), Some(key)) => Some((cert, key)),
+        // The store refuses half-configured pairs; a stored config that
+        // has one anyway must not silently fall back to no client auth.
+        (Some(_), None) | (None, Some(_)) => {
+            return Err("client certificate and key must be configured together".to_string());
+        }
+        (None, None) => None,
+    };
+    let Some(tls) = trusted_ca_tls_config(trusted_ca_bundle_path.as_deref(), identity)? else {
         return Ok(default.clone());
     };
     reqwest::Client::builder()
@@ -676,21 +781,103 @@ pub(crate) fn client_for_connection(
 
 pub(crate) fn trusted_ca_tls_config(
     path: Option<&str>,
+    client_identity: Option<(&str, &str)>,
 ) -> Result<Option<rustls::ClientConfig>, String> {
-    let Some(path) = path.filter(|path| !path.trim().is_empty()) else {
+    let path = path.filter(|path| !path.trim().is_empty());
+    if path.is_none() && client_identity.is_none() {
         return Ok(None);
-    };
+    }
     // Match Postgres' `sslrootcert` semantics: a configured private bundle
-    // replaces public roots, rather than widening trust to both sets.
-    let roots = crate::capability::pg::root_cert_store(Some(path))?;
-    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+    // replaces public roots, rather than widening trust to both sets. With
+    // only a client identity configured, public roots stay in force.
+    let roots = crate::capability::pg::root_cert_store(path)?;
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .map_err(|error| format!("trusted CA TLS configuration failed: {error}"))?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+    .with_root_certificates(roots);
+    let tls = match client_identity {
+        Some((cert_path, key_path)) => {
+            let chain = client_cert_chain(cert_path)?;
+            let key = client_private_key(key_path)?;
+            builder
+                .with_client_auth_cert(chain, key)
+                .map_err(|error| format!("client certificate rejected: {error}"))?
+        }
+        None => builder.with_no_client_auth(),
+    };
     Ok(Some(tls))
+}
+
+/// Load a PEM certificate chain for the upstream mTLS leg.
+fn client_cert_chain(
+    path: &str,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    let ders = pem_blocks(path, "CERTIFICATE")?;
+    if ders.is_empty() {
+        return Err(format!(
+            "client certificate {path:?} contains no CERTIFICATE blocks"
+        ));
+    }
+    Ok(ders
+        .into_iter()
+        .map(rustls::pki_types::CertificateDer::from)
+        .collect())
+}
+
+/// Load a PEM private key: PKCS#8 (`PRIVATE KEY`), PKCS#1 (`RSA PRIVATE
+/// KEY`), or SEC1 (`EC PRIVATE KEY`).
+fn client_private_key(path: &str) -> Result<rustls::pki_types::PrivateKeyDer<'static>, String> {
+    use rustls::pki_types::{PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer};
+    for (label, wrap) in [
+        (
+            "PRIVATE KEY",
+            (|der: Vec<u8>| PrivatePkcs8KeyDer::from(der).into())
+                as fn(Vec<u8>) -> rustls::pki_types::PrivateKeyDer<'static>,
+        ),
+        ("RSA PRIVATE KEY", |der| {
+            PrivatePkcs1KeyDer::from(der).into()
+        }),
+        ("EC PRIVATE KEY", |der| PrivateSec1KeyDer::from(der).into()),
+    ] {
+        if let Some(der) = pem_blocks(path, label)?.into_iter().next() {
+            return Ok(wrap(der));
+        }
+    }
+    Err(format!(
+        "client key {path:?} has no PRIVATE KEY, RSA PRIVATE KEY, or EC PRIVATE KEY block \
+         (encrypted keys are not supported; decrypt to PKCS#8 first)"
+    ))
+}
+
+/// Extract the DER payloads of every `-----BEGIN <label>-----` block in a
+/// PEM file. The same minimal walk `pg::add_ca_bundle_roots` uses, shaped
+/// for arbitrary labels.
+fn pem_blocks(path: &str, label: &str) -> Result<Vec<Vec<u8>>, String> {
+    use base64::Engine as _;
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let pem = std::fs::read_to_string(path)
+        .map_err(|e| format!("PEM file {path:?} could not be read: {e}"))?;
+    let mut rest = pem.as_str();
+    let mut blocks = Vec::new();
+    while let Some(start) = rest.find(&begin) {
+        let body_start = start + begin.len();
+        let body_end = rest[body_start..]
+            .find(&end)
+            .ok_or_else(|| format!("PEM file {path:?} has an unterminated {label} block"))?;
+        let b64: String = rest[body_start..body_start + body_end]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .map_err(|e| format!("PEM file {path:?} has invalid base64: {e}"))?;
+        blocks.push(der);
+        rest = &rest[body_start + body_end + end.len()..];
+    }
+    Ok(blocks)
 }
 
 fn test_request_error(error: reqwest::Error, host: &str) -> TestError {
@@ -1184,6 +1371,15 @@ impl HttpExecution {
         let mut method = self.method.clone();
         let mut send_body = true;
         let mut hops = 0usize;
+        // SigV4 signs a payload hash on every hop. An inline body hashes
+        // once here and is reused; a spooled body is declared
+        // UNSIGNED-PAYLOAD rather than re-reading the spool file per hop.
+        let sigv4_inline_hash = match (&injection, self.body.as_ref()) {
+            (RenderedInjection::Sigv4(_), SpooledBody::Inline(bytes)) => {
+                Some(crate::sigv4::sha256_hex(bytes))
+            }
+            _ => None,
+        };
         // An MCP server that rejects an OAuth token has not accepted the
         // JSON-RPC operation. Renew once and replay that same request with the
         // replacement token. The bound prevents a bad grant or a permissions
@@ -1214,6 +1410,39 @@ impl HttpExecution {
                         .request(method.clone(), hop)
                         .timeout(per_request_timeout)
                         .headers(self.headers.clone());
+                }
+                RenderedInjection::Sigv4(credentials) => {
+                    // Signed fresh on every hop: a redirect changes the URI
+                    // (and possibly the method), which invalidates the
+                    // previous hop's signature. The broker owns the
+                    // authentication material on a signer connection, so
+                    // agent-supplied copies of the signed headers are
+                    // dropped rather than left to corrupt the canonical
+                    // form (`authorization` is already reserved upstream
+                    // of here).
+                    let mut headers = self.headers.clone();
+                    for name in ["x-amz-date", "x-amz-content-sha256", "x-amz-security-token"] {
+                        headers.remove(name);
+                    }
+                    let payload_hash = if !send_body || self.body.is_empty() {
+                        crate::sigv4::EMPTY_PAYLOAD_SHA256.to_string()
+                    } else if let Some(hash) = &sigv4_inline_hash {
+                        hash.clone()
+                    } else {
+                        crate::sigv4::UNSIGNED_PAYLOAD.to_string()
+                    };
+                    let hop_headers =
+                        sigv4_hop_headers(credentials, &method, &current, &payload_hash).map_err(
+                            |error| broker_error(500, ErrorReason::CredentialRenderFailed, error),
+                        )?;
+                    let mut hop_request = upstream_client
+                        .request(method.clone(), current.clone())
+                        .timeout(per_request_timeout)
+                        .headers(headers);
+                    for (name, value) in hop_headers {
+                        hop_request = hop_request.header(name, value);
+                    }
+                    request = hop_request;
                 }
             }
             if send_body && !self.body.is_empty() {
@@ -1434,6 +1663,20 @@ pub async fn test_upstream(
             url.set_query(Some(&query));
             upstream_client.request(Method::GET, url.clone())
         }
+        RenderedInjection::Sigv4(credentials) => {
+            let headers = sigv4_hop_headers(
+                credentials,
+                &Method::GET,
+                &url,
+                crate::sigv4::EMPTY_PAYLOAD_SHA256,
+            )
+            .map_err(TestError::from)?;
+            let mut request = upstream_client.request(Method::GET, url.clone());
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            request
+        }
     };
     let response = request
         .timeout(timeout)
@@ -1509,17 +1752,52 @@ impl std::fmt::Display for CredentialFailure {
     }
 }
 
+/// Resolve one signer credential by vault name. Key material is never valid
+/// with surrounding whitespace, and a trailing newline from a pasted secret
+/// would corrupt every signature without any legible error from AWS — so
+/// the value is trimmed here, once.
+async fn signer_secret(store: &Arc<Store>, name: &str) -> Result<Zeroizing<String>, String> {
+    store
+        .secret_value_by_name(name)
+        .await
+        .map(|value| Zeroizing::new(value.trim().to_string()))
+        .map_err(|e| format!("signer credential {name:?} unavailable: {e}"))
+}
+
 pub(crate) async fn render_connection_injection(
     store: &Arc<Store>,
     client: &reqwest::Client,
     connection: &Connection,
 ) -> Result<RenderedInjection, CredentialFailure> {
     let ConnectionConfig::Api {
-        template, oauth, ..
+        template,
+        oauth,
+        signer,
+        ..
     } = &connection.config
     else {
         return Err("not an api connection".to_string().into());
     };
+    if let Some(spec) = signer {
+        let crate::types::SignerSpec::AwsSigv4 {
+            region,
+            service,
+            access_key_ref,
+            secret_key_ref,
+            session_token_ref,
+        } = spec;
+        let session_token = match session_token_ref {
+            Some(name) => Some(signer_secret(store, name).await?),
+            None => None,
+        };
+        return Ok(RenderedInjection::Sigv4(Box::new(Sigv4Credentials {
+            access_key: signer_secret(store, access_key_ref).await?,
+            secret_key: signer_secret(store, secret_key_ref).await?,
+            session_token,
+            region: region.clone(),
+            service: service.clone(),
+        })));
+    }
     if oauth.is_some() {
         let token = crate::oauth::fresh_bearer(store, client, connection)
             .await

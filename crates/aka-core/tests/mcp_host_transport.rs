@@ -240,6 +240,9 @@ async fn rust_host_projects_and_invokes_native_broker_tools() {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -401,6 +404,9 @@ async fn rust_host_cancels_active_calls_and_notifies_the_upstream() {
                 mcp_path: Some("/mcp".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -679,6 +685,9 @@ async fn rust_host_serves_tool_calls_before_the_first_listing() {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -919,6 +928,9 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
                 mcp_path: Some("/mcp".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -1108,6 +1120,9 @@ fn add_mcp_connection(broker: &Broker, name: &str, port: u16) {
                 mcp_path: Some("/mcp".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })

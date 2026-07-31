@@ -178,6 +178,9 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
         last_status: health.as_ref().map(|h| h.status.as_str().to_string()),
         last_detail: health.as_ref().map(|h| h.detail.clone()),
         last_checked_at: health.as_ref().map(|h| h.checked_at.to_rfc3339()),
+        signer: None,
+        client_cert_path: None,
+        client_key_path: None,
     };
     match &conn.config {
         Api {
@@ -189,6 +192,9 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
             mcp_path,
             test_path,
             oauth,
+            signer,
+            client_cert_path,
+            client_key_path,
         } => {
             dto.host = Some(host.clone());
             dto.scheme = Some(scheme.clone());
@@ -204,6 +210,25 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                 scopes: o.scopes.clone(),
                 extra_auth_params: o.extra_auth_params.clone(),
             });
+            dto.signer = signer.as_ref().map(|spec| {
+                let crate::types::SignerSpec::AwsSigv4 {
+                    region,
+                    service,
+                    access_key_ref,
+                    secret_key_ref,
+                    session_token_ref,
+                } = spec;
+                aka_api::SignerDto {
+                    algorithm: "aws_sigv4".to_string(),
+                    region: region.clone(),
+                    service: service.clone(),
+                    access_key_ref: access_key_ref.clone(),
+                    secret_key_ref: secret_key_ref.clone(),
+                    session_token_ref: session_token_ref.clone(),
+                }
+            });
+            dto.client_cert_path = client_cert_path.clone();
+            dto.client_key_path = client_key_path.clone();
         }
         Pg {
             host,
@@ -957,6 +982,9 @@ fn patched_connection_spec(
             mcp_path,
             test_path,
             oauth,
+            signer,
+            client_cert_path,
+            client_key_path,
         } => {
             for (field, present) in [
                 ("dbname", patch.dbname.is_some()),
@@ -968,6 +996,19 @@ fn patched_connection_spec(
                 if present {
                     return Err(invalid_patch(field, "API"));
                 }
+            }
+            // A signer connection's template is fixed empty; a template
+            // patch against it would silently create the combination the
+            // store refuses.
+            if signer.is_some()
+                && patch
+                    .template
+                    .as_deref()
+                    .is_some_and(|t| !t.trim().is_empty())
+            {
+                return Err(ManageError::InvalidConnectionConfig {
+                    message: "this connection signs requests; it has no injection template".into(),
+                });
             }
             ConnectionConfig::Api {
                 host: patch.host.unwrap_or_else(|| host.clone()),
@@ -982,6 +1023,9 @@ fn patched_connection_spec(
                     patch.test_path.clone().or_else(|| test_path.clone())
                 },
                 oauth: oauth.clone(),
+                signer: signer.clone(),
+                client_cert_path: client_cert_path.clone(),
+                client_key_path: client_key_path.clone(),
             }
         }
         ConnectionConfig::Pg {
@@ -1963,6 +2007,9 @@ mod tests {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         }
@@ -2057,6 +2104,9 @@ mod tests {
                     mcp_path: None,
                     test_path: None,
                     oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
                 },
                 secrets: vec![],
             })
@@ -2165,6 +2215,9 @@ mod tests {
                 mcp_path: Some("/mcp".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![secret],
             account: Some("operator@example.com".into()),

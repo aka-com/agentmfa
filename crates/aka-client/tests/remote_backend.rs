@@ -74,6 +74,9 @@ fn api_spec(name: &str, template: &str) -> ConnectionSpec {
             mcp_path: None,
             test_path: None,
             oauth: None,
+            signer: None,
+            client_cert_path: None,
+            client_key_path: None,
         },
         secrets: vec![],
     }
@@ -339,6 +342,9 @@ async fn byo_oauth_relays_through_the_client_loopback() {
                 extra_auth_params: vec![],
                 token_secret_id: None,
             }),
+            signer: None,
+            client_cert_path: None,
+            client_key_path: None,
         },
         secrets: vec![],
     };

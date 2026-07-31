@@ -150,11 +150,17 @@ enum Credential {
 }
 
 impl Credential {
-    fn from_rendered(rendered: RenderedInjection) -> Self {
+    fn from_rendered(rendered: RenderedInjection) -> Result<Self, String> {
         match rendered {
-            RenderedInjection::None => Credential::None,
-            RenderedInjection::Header(name, value) => Credential::Header(name, value),
-            RenderedInjection::Query(fragment) => Credential::Query(fragment),
+            RenderedInjection::None => Ok(Credential::None),
+            RenderedInjection::Header(name, value) => Ok(Credential::Header(name, value)),
+            RenderedInjection::Query(fragment) => Ok(Credential::Query(fragment)),
+            // The store refuses signer+mcp_path, so this cannot be reached
+            // through configuration; fail closed rather than ever letting an
+            // MCP session proceed unsigned.
+            RenderedInjection::Sigv4(_) => {
+                Err("SigV4-signed connections do not speak MCP".to_string())
+            }
         }
     }
 
@@ -430,7 +436,10 @@ pub async fn check_connection(
         Err(detail) => return McpStatusReport::failed(detail),
     };
     let credential = match render_connection_injection(store, client, connection).await {
-        Ok(rendered) => Credential::from_rendered(rendered),
+        Ok(rendered) => match Credential::from_rendered(rendered) {
+            Ok(credential) => credential,
+            Err(detail) => return McpStatusReport::failed(detail),
+        },
         Err(failure) => {
             let detail = failure.to_string();
             return McpStatusReport::failed(format!("could not render credential: {detail}"));
@@ -500,7 +509,7 @@ pub async fn list_tools(
         .await
         .map_err(|failure| format!("could not render credential: {failure}"))?;
     let client = crate::capability::http::client_for_connection(client, connection)?;
-    let mut session = McpSession::new(client, endpoint, Credential::from_rendered(rendered));
+    let mut session = McpSession::new(client, endpoint, Credential::from_rendered(rendered)?);
     let result = async {
         let initialize = session
             .request(
@@ -904,6 +913,9 @@ mod tests {
                 mcp_path: Some("/mcp".into()),
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
             account: None,

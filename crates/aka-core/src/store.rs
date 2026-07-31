@@ -27,6 +27,7 @@ use crate::paths::Paths;
 use crate::template::{is_valid_secret_name, Template};
 use crate::types::{
     reveal_prefix, Connection, ConnectionConfig, ConnectionKind, SecretMeta, SecretValue, Settings,
+    SignerSpec,
 };
 use crate::vault::{SecretVault, VaultAttrs};
 use crate::Result;
@@ -325,17 +326,28 @@ impl Store {
         let mut next = state.clone();
         let mut rewritten = 0usize;
         for conn in next.connections.iter_mut() {
-            let template = match &mut conn.config {
-                ConnectionConfig::Api { template, .. } => Some(template),
-                ConnectionConfig::Pg { .. } | ConnectionConfig::Ssh { .. } => None,
+            let (template, signer) = match &mut conn.config {
+                ConnectionConfig::Api {
+                    template, signer, ..
+                } => (Some(template), signer.as_mut()),
+                ConnectionConfig::Pg { .. } | ConnectionConfig::Ssh { .. } => (None, None),
             };
+            let mut touched = false;
             if let Some(template) = template {
                 let parsed = Template::parse(template)?;
                 if parsed.refs().contains(&old_name) {
                     *template = parsed.rename_ref(&old_name, new_name);
-                    conn.updated_at = next_connection_updated_at(&conn.updated_at);
-                    rewritten += 1;
+                    touched = true;
                 }
+            }
+            // Signer credential references name secrets the same way template
+            // refs do, so a rename rewrites them in the same transaction.
+            if let Some(signer) = signer {
+                touched |= signer.rename_ref(&old_name, new_name);
+            }
+            if touched {
+                conn.updated_at = next_connection_updated_at(&conn.updated_at);
+                rewritten += 1;
             }
         }
         let now = Utc::now();
@@ -617,6 +629,7 @@ impl Store {
         }
         inherit_oauth_spec(&existing.config, &mut spec.config);
         inherit_oauth_token_secret_id(&existing.config, &mut spec.config);
+        inherit_signer_and_mtls(&existing.config, &mut spec.config);
         let broker_managed_oauth = existing.oauth.is_some()
             && matches!(
                 &existing.config,
@@ -1121,6 +1134,9 @@ fn validate_config_and_bind_secrets(
             mcp_path,
             test_path,
             oauth,
+            signer,
+            client_cert_path,
+            client_key_path,
         } => {
             if host.is_empty() || host.contains('/') || host.contains('@') || host.contains(':') {
                 return Err(CoreError::InvalidConnectionField {
@@ -1166,6 +1182,67 @@ fn validate_config_and_bind_secrets(
                             .into(),
                     });
                 }
+            }
+            // mTLS: the certificate and key only make sense together.
+            match (client_cert_path, client_key_path) {
+                (None, None) | (Some(_), Some(_)) => {}
+                _ => {
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Url,
+                        message: "A client certificate and its private key must be \
+                                  configured together"
+                            .into(),
+                    });
+                }
+            }
+            if client_cert_path
+                .iter()
+                .chain(client_key_path.iter())
+                .any(|path| path.trim().is_empty())
+            {
+                return Err(CoreError::InvalidConnectionField {
+                    field: ConnectionField::Url,
+                    message: "Client certificate paths cannot be blank".into(),
+                });
+            }
+            if let Some(signer) = signer {
+                // One injection mechanism per connection: a signer computes
+                // the whole Authorization header itself, so a template or an
+                // OAuth grant alongside it could only fight over the header.
+                if oauth.is_some() {
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Template,
+                        message: "A request signer cannot be combined with OAuth".into(),
+                    });
+                }
+                if !template.trim().is_empty() {
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Template,
+                        message: "A request signer cannot be combined with an injection \
+                                  template"
+                            .into(),
+                    });
+                }
+                if mcp_path.is_some() {
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Url,
+                        message: "A request signer cannot be combined with an MCP path".into(),
+                    });
+                }
+                let SignerSpec::AwsSigv4 {
+                    region, service, ..
+                } = signer;
+                if region.trim().is_empty() || service.trim().is_empty() {
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Template,
+                        message: "A SigV4 signer needs both a region and a service".into(),
+                    });
+                }
+                return signer
+                    .refs()
+                    .iter()
+                    .map(|name| find_by_name(name))
+                    .collect();
             }
             if mcp_path.is_some() && oauth.is_some() {
                 return Err(CoreError::InvalidConnectionField {
@@ -1321,6 +1398,38 @@ fn inherit_oauth_spec(existing: &ConnectionConfig, incoming: &mut ConnectionConf
     *incoming_oauth = Some(existing_spec.clone());
 }
 
+/// Same reasoning as `inherit_oauth_spec` for the dispatch-time signer and
+/// the mTLS identity: the desktop edit sheet does not round-trip them, so an
+/// incoming `None` on a connection that has them means "unspecified", not
+/// "remove". Removal happens through the manage plane's patch path, which
+/// carries the current values explicitly.
+fn inherit_signer_and_mtls(existing: &ConnectionConfig, incoming: &mut ConnectionConfig) {
+    let (
+        ConnectionConfig::Api {
+            signer: existing_signer,
+            client_cert_path: existing_cert,
+            client_key_path: existing_key,
+            ..
+        },
+        ConnectionConfig::Api {
+            signer,
+            client_cert_path,
+            client_key_path,
+            ..
+        },
+    ) = (existing, incoming)
+    else {
+        return;
+    };
+    if signer.is_none() {
+        *signer = existing_signer.clone();
+    }
+    if client_cert_path.is_none() && client_key_path.is_none() {
+        *client_cert_path = existing_cert.clone();
+        *client_key_path = existing_key.clone();
+    }
+}
+
 fn inherit_oauth_token_secret_id(existing: &ConnectionConfig, incoming: &mut ConnectionConfig) {
     let (
         ConnectionConfig::Api {
@@ -1423,9 +1532,115 @@ mod tests {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         }
+    }
+
+    fn sigv4_spec(name: &str) -> ConnectionSpec {
+        let mut spec = api_spec(name, "s3.amazonaws.com", "");
+        let ConnectionConfig::Api { signer, .. } = &mut spec.config else {
+            unreachable!()
+        };
+        *signer = Some(SignerSpec::AwsSigv4 {
+            region: "us-east-1".into(),
+            service: "s3".into(),
+            access_key_ref: "AWS_ACCESS_KEY_ID".into(),
+            secret_key_ref: "AWS_SECRET_ACCESS_KEY".into(),
+            session_token_ref: None,
+        });
+        spec
+    }
+
+    #[tokio::test]
+    async fn signer_refs_bind_secrets_and_follow_renames() {
+        let (store, _vault, _dir) = store().await;
+        // Missing refs refuse the connection outright.
+        assert!(store.add_connection(sigv4_spec("aws")).is_err());
+        let ak = store.add_secret("AWS_ACCESS_KEY_ID", val("AKID")).unwrap();
+        let sk = store
+            .add_secret("AWS_SECRET_ACCESS_KEY", val("shhh"))
+            .unwrap();
+        let conn = store.add_connection(sigv4_spec("aws")).unwrap();
+        // Both signer refs are bound, so deletion protection covers them.
+        assert_eq!(conn.secrets.len(), 2);
+        assert!(store.delete_secret(&sk.id).is_err());
+        // A rename rewrites the signer ref like a template ref.
+        let (_meta, rewritten) = store.rename_secret(&ak.id, "AWS_AK").unwrap();
+        assert_eq!(rewritten, 1);
+        let conn = store.connection_by_name("aws").unwrap();
+        let ConnectionConfig::Api {
+            signer: Some(SignerSpec::AwsSigv4 { access_key_ref, .. }),
+            ..
+        } = &conn.config
+        else {
+            panic!("signer survived the rename");
+        };
+        assert_eq!(access_key_ref, "AWS_AK");
+    }
+
+    #[tokio::test]
+    async fn signer_excludes_other_injection_mechanisms() {
+        let (store, _vault, _dir) = store().await;
+        store.add_secret("AWS_ACCESS_KEY_ID", val("AKID")).unwrap();
+        store
+            .add_secret("AWS_SECRET_ACCESS_KEY", val("shhh"))
+            .unwrap();
+        // Signer + template.
+        let mut spec = sigv4_spec("aws");
+        let ConnectionConfig::Api { template, .. } = &mut spec.config else {
+            unreachable!()
+        };
+        *template = "Authorization: Bearer {{AWS_ACCESS_KEY_ID}}".into();
+        assert!(store.add_connection(spec).is_err());
+        // Signer + MCP path.
+        let mut spec = sigv4_spec("aws");
+        let ConnectionConfig::Api { mcp_path, .. } = &mut spec.config else {
+            unreachable!()
+        };
+        *mcp_path = Some("/mcp".into());
+        assert!(store.add_connection(spec).is_err());
+        // A half-configured mTLS identity.
+        let mut spec = sigv4_spec("aws");
+        let ConnectionConfig::Api {
+            client_cert_path, ..
+        } = &mut spec.config
+        else {
+            unreachable!()
+        };
+        *client_cert_path = Some("/tmp/leaf.pem".into());
+        assert!(store.add_connection(spec).is_err());
+        // The intact spec still lands.
+        assert!(store.add_connection(sigv4_spec("aws")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_ui_edit_cannot_strip_the_signer() {
+        let (store, _vault, _dir) = store().await;
+        store.add_secret("AWS_ACCESS_KEY_ID", val("AKID")).unwrap();
+        store
+            .add_secret("AWS_SECRET_ACCESS_KEY", val("shhh"))
+            .unwrap();
+        let conn = store.add_connection(sigv4_spec("aws")).unwrap();
+        // The desktop edit sheet round-trips a spec without signer fields; a
+        // rename must inherit them rather than silently removing the signer.
+        let mut renamed = api_spec("aws-prod", "s3.amazonaws.com", "");
+        let ConnectionConfig::Api { port, .. } = &mut renamed.config else {
+            unreachable!()
+        };
+        *port = None;
+        let (updated, _target_changed) = store.update_connection(&conn.id, renamed).unwrap();
+        assert!(matches!(
+            updated.config,
+            ConnectionConfig::Api {
+                signer: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(updated.secrets.len(), 2, "signer refs stay bound");
     }
 
     #[tokio::test]
@@ -1578,6 +1793,9 @@ mod tests {
                     mcp_path: None,
                     test_path: None,
                     oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
                 },
                 secrets: vec![token.id],
             })
@@ -1974,6 +2192,9 @@ mod tests {
                     extra_auth_params: vec![],
                     token_secret_id: None,
                 }),
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         };
@@ -2077,6 +2298,9 @@ mod tests {
                         extra_auth_params: vec![],
                         token_secret_id: None,
                     }),
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
                 },
                 // Explicit creation input identifies the token set even
                 // though the derived secret list sorts AUXILIARY first.
@@ -2246,6 +2470,9 @@ mod tests {
                         extra_auth_params: vec![],
                         token_secret_id: None,
                     }),
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
                 },
                 secrets: vec![token.id],
             })
@@ -2422,6 +2649,9 @@ mod tests {
                     mcp_path: None,
                     test_path: None,
                     oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
                 },
                 secrets: vec![tok.id],
             })
@@ -2439,6 +2669,9 @@ mod tests {
                         mcp_path: None,
                         test_path: None,
                         oauth: None,
+                        signer: None,
+                        client_cert_path: None,
+                        client_key_path: None,
                     },
                     secrets: vec![tok.id],
                 })

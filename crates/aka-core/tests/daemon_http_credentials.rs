@@ -17,7 +17,7 @@ use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConnectionConfig, ConnectionHealth, HealthStatus, OAuthSpec};
+use aka_core::types::{ConnectionConfig, ConnectionHealth, HealthStatus, OAuthSpec, SignerSpec};
 use aka_core::vault::MemoryVault;
 use axum::routing::{any, get, post};
 use axum::Router;
@@ -311,6 +311,9 @@ fn api_connection(h: &Harness, name: &str, port: u16) {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -331,10 +334,239 @@ fn api_tls_connection(h: &Harness, name: &str, port: u16, ca: Option<String>) {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
         .unwrap();
+}
+
+/* ------------------------------- API: SigV4 -------------------------------- */
+
+const AWS_ACCESS_KEY: &str = "AKIDEXAMPLE";
+const AWS_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+const SIGV4_REGION: &str = "us-east-1";
+const SIGV4_SERVICE: &str = "execute-api";
+
+/// A SigV4-signed API connection. The secret access key is stored with a
+/// trailing newline on purpose: pasted AWS keys often carry one, and an
+/// untrimmed key corrupts every signature with no legible error.
+fn sigv4_connection(h: &Harness, name: &str, port: u16) {
+    h.broker
+        .store
+        .add_secret("AWS_ACCESS_KEY_ID", Zeroizing::new(AWS_ACCESS_KEY.into()))
+        .unwrap();
+    h.broker
+        .store
+        .add_secret(
+            "AWS_SECRET_ACCESS_KEY",
+            Zeroizing::new(format!("{AWS_SECRET_KEY}\n")),
+        )
+        .unwrap();
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: name.into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(port),
+                trusted_ca_bundle_path: None,
+                template: String::new(),
+                mcp_path: None,
+                test_path: None,
+                oauth: None,
+                signer: Some(SignerSpec::AwsSigv4 {
+                    region: SIGV4_REGION.into(),
+                    service: SIGV4_SERVICE.into(),
+                    access_key_ref: "AWS_ACCESS_KEY_ID".into(),
+                    secret_key_ref: "AWS_SECRET_ACCESS_KEY".into(),
+                    session_token_ref: None,
+                }),
+                client_cert_path: None,
+                client_key_path: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+}
+
+/// Recompute the SigV4 signature from what the upstream actually received —
+/// a test-local implementation, so a broker-side canonicalisation bug cannot
+/// vouch for itself. Queries in these tests use pre-sorted, unreserved
+/// key/value pairs so both sides canonicalise them identically.
+fn expected_sigv4(
+    method: &str,
+    path_and_query: &str,
+    received: &HashMap<String, String>,
+    payload_sha256: &str,
+) -> String {
+    use hmac::Mac;
+    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+    let hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+    let mac = |key: &[u8], data: &str| -> Vec<u8> {
+        let mut mac = HmacSha256::new_from_slice(key).unwrap();
+        mac.update(data.as_bytes());
+        mac.finalize().into_bytes().to_vec()
+    };
+    let (path, query) = path_and_query
+        .split_once('?')
+        .unwrap_or((path_and_query, ""));
+    let mut pairs: Vec<String> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            if pair.contains('=') {
+                pair.to_string()
+            } else {
+                format!("{pair}=")
+            }
+        })
+        .collect();
+    pairs.sort();
+    let amz_date = received["x-amz-date"].clone();
+    let date = &amz_date[..8];
+    let canonical = format!(
+        "{method}\n{path}\n{}\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n\n\
+         host;x-amz-content-sha256;x-amz-date\n{payload_sha256}",
+        pairs.join("&"),
+        received["host"],
+        received["x-amz-content-sha256"],
+        amz_date,
+    );
+    let scope = format!("{date}/{SIGV4_REGION}/{SIGV4_SERVICE}/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        hex(&<sha2::Sha256 as sha2::Digest>::digest(
+            canonical.as_bytes()
+        )),
+    );
+    let key = mac(format!("AWS4{AWS_SECRET_KEY}").as_bytes(), date);
+    let key = mac(&key, SIGV4_REGION);
+    let key = mac(&key, SIGV4_SERVICE);
+    let key = mac(&key, "aws4_request");
+    format!(
+        "AWS4-HMAC-SHA256 Credential={AWS_ACCESS_KEY}/{scope}, \
+         SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={}",
+        hex(&mac(&key, &string_to_sign)),
+    )
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    <sha2::Sha256 as sha2::Digest>::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// HTTP-C3: a SigV4 connection signs the request at dispatch time, the
+/// signature verifies against an independent recomputation from what the
+/// upstream received, and the payload hash covers the actual body. The
+/// stored secret key carries a trailing newline, which must not reach the
+/// signing key.
+#[tokio::test]
+async fn sigv4_signature_verifies_and_covers_the_payload() {
+    let up = upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    sigv4_connection(&h, "aws", up.port);
+
+    let (status, body) = h
+        .call(
+            "aws",
+            json!({ "method": "POST", "path": "/echo?a=1&b=2", "body": "payload" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let echoed: Value = serde_json::from_str(body["body"].as_str().unwrap()).unwrap();
+    let received: HashMap<String, String> =
+        serde_json::from_value(echoed["headers"].clone()).unwrap();
+
+    assert_eq!(
+        received["x-amz-content-sha256"],
+        sha256_hex(b"payload"),
+        "the signed payload hash must cover the actual body"
+    );
+    assert_eq!(
+        received["authorization"],
+        expected_sigv4("POST", "/echo?a=1&b=2", &received, &sha256_hex(b"payload")),
+        "the broker's signature must verify against an independent recomputation"
+    );
+}
+
+/// HTTP-C3: each redirect hop is re-signed. A 307 keeps the method and body;
+/// the final hop's signature must verify against the *final* URI — the
+/// original hop's signature could not, since the canonical request differs.
+#[tokio::test]
+async fn sigv4_resigns_each_redirect_hop() {
+    let up = upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    sigv4_connection(&h, "aws", up.port);
+
+    let (status, body) = h
+        .call(
+            "aws",
+            json!({ "method": "POST", "path": "/redirect/307/1", "body": "payload" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let echoed: Value = serde_json::from_str(body["body"].as_str().unwrap()).unwrap();
+    assert_eq!(echoed["method"], "POST");
+    let received: HashMap<String, String> =
+        serde_json::from_value(echoed["headers"].clone()).unwrap();
+    assert_eq!(
+        received["authorization"],
+        expected_sigv4("POST", "/echo", &received, &sha256_hex(b"payload")),
+        "the delivered hop must carry a signature over its own URI"
+    );
+}
+
+/// HTTP-C3: the broker owns the SigV4 material. An agent-supplied
+/// `x-amz-date` is dropped, not signed — otherwise the agent could skew the
+/// signing clock — and `authorization` is refused outright by the reserved
+/// header rule.
+#[tokio::test]
+async fn sigv4_headers_are_broker_owned() {
+    let up = upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    sigv4_connection(&h, "aws", up.port);
+
+    let (status, body) = h
+        .call(
+            "aws",
+            json!({
+                "method": "GET",
+                "path": "/echo",
+                "headers": { "x-amz-date": "19700101T000000Z" },
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let echoed: Value = serde_json::from_str(body["body"].as_str().unwrap()).unwrap();
+    let received: HashMap<String, String> =
+        serde_json::from_value(echoed["headers"].clone()).unwrap();
+    assert_ne!(
+        received["x-amz-date"], "19700101T000000Z",
+        "the agent-supplied signing date must be replaced by the broker's"
+    );
+    assert_eq!(
+        received["authorization"],
+        expected_sigv4("GET", "/echo", &received, &sha256_hex(b"")),
+    );
+
+    let (status, body) = h
+        .call(
+            "aws",
+            json!({
+                "method": "GET",
+                "path": "/echo",
+                "headers": { "authorization": "Bearer mine" },
+            }),
+        )
+        .await;
+    assert_ne!(status, 200, "agent-supplied authorization must be refused");
+    let _ = body;
 }
 
 /* ---------------------------- API-1: redaction ---------------------------- */
@@ -467,6 +699,9 @@ async fn authorization_is_reserved_even_for_a_query_form_connection() {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })
@@ -838,6 +1073,9 @@ fn oauth_connection(h: &Harness, upstream_port: u16, token_port: u16, refresh: O
                     extra_auth_params: Vec::new(),
                     token_secret_id: None,
                 }),
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![secret.id],
         })
@@ -1202,6 +1440,9 @@ async fn the_endpoint_secret_is_recoverable_from_the_vault_after_a_reload() {
                 mcp_path: None,
                 test_path: None,
                 oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
             },
             secrets: vec![],
         })

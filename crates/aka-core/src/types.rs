@@ -66,6 +66,76 @@ pub enum PgSslMode {
     VerifyFull,
 }
 
+/// Request signing for credentials a static template cannot express: the
+/// signature covers the whole request (method, path, query, payload hash),
+/// so it is computed per hop at dispatch time rather than rendered once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "algorithm", rename_all = "snake_case")]
+pub enum SignerSpec {
+    /// AWS Signature Version 4.
+    AwsSigv4 {
+        /// Signing region, e.g. "us-east-1".
+        region: String,
+        /// Signing service name, e.g. "s3", "execute-api". S3 additionally
+        /// selects the single-encoded canonical path the service requires.
+        service: String,
+        /// Vault secret name holding the access key ID.
+        access_key_ref: String,
+        /// Vault secret name holding the secret access key.
+        secret_key_ref: String,
+        /// Vault secret name holding a session token (temporary
+        /// credentials); sent and signed as `x-amz-security-token`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_token_ref: Option<String>,
+    },
+}
+
+impl SignerSpec {
+    /// The vault secret names this signer reads, for binding and rename
+    /// bookkeeping — the signer analogue of `Template::refs`.
+    pub fn refs(&self) -> Vec<&str> {
+        match self {
+            Self::AwsSigv4 {
+                access_key_ref,
+                secret_key_ref,
+                session_token_ref,
+                ..
+            } => {
+                let mut refs = vec![access_key_ref.as_str(), secret_key_ref.as_str()];
+                if let Some(token) = session_token_ref {
+                    refs.push(token.as_str());
+                }
+                refs
+            }
+        }
+    }
+
+    /// Rewrite any reference to a renamed secret, the counterpart of
+    /// `Template::rename_ref`.
+    pub fn rename_ref(&mut self, old: &str, new: &str) -> bool {
+        match self {
+            Self::AwsSigv4 {
+                access_key_ref,
+                secret_key_ref,
+                session_token_ref,
+                ..
+            } => {
+                let mut renamed = false;
+                for field in [access_key_ref, secret_key_ref]
+                    .into_iter()
+                    .chain(session_token_ref.as_mut())
+                {
+                    if field == old {
+                        *field = new.to_string();
+                        renamed = true;
+                    }
+                }
+                renamed
+            }
+        }
+    }
+}
+
 /// Type-specific connection config: the *where* plus how the credential is
 /// injected. The agent never supplies any of this.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +187,18 @@ pub enum ConnectionConfig {
         /// upstream leg injects a live bearer, refreshing on expiry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         oauth: Option<OAuthSpec>,
+        /// When set, the credential is a per-request signature computed at
+        /// dispatch time (e.g. AWS SigV4) instead of a rendered template.
+        /// Mutually exclusive with `template` and `oauth`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signer: Option<SignerSpec>,
+        /// Optional PEM client-certificate chain presented on the upstream
+        /// TLS leg (mTLS). Requires `client_key_path`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_cert_path: Option<String>,
+        /// PEM private key for `client_cert_path` (PKCS#8, PKCS#1, or SEC1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_key_path: Option<String>,
     },
     Pg {
         host: String,
@@ -814,6 +896,9 @@ mod tests {
             mcp_path: None,
             test_path: None,
             oauth: None,
+            signer: None,
+            client_cert_path: None,
+            client_key_path: None,
         };
         assert_eq!(api.target(), "https://api.github.com");
         let pg = ConnectionConfig::Pg {
@@ -888,6 +973,9 @@ mod tests {
             mcp_path: None,
             test_path: None,
             oauth: None,
+            signer: None,
+            client_cert_path: None,
+            client_key_path: None,
         };
         let api_b = ConnectionConfig::Api {
             host: "api.example.com".into(),
@@ -899,6 +987,9 @@ mod tests {
             mcp_path: None,
             test_path: None,
             oauth: None,
+            signer: None,
+            client_cert_path: None,
+            client_key_path: None,
         };
         assert!(api_a.has_equivalent_target(&api_b));
 

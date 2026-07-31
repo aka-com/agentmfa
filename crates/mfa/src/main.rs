@@ -46,7 +46,7 @@ use aka_core::manage::{
 };
 use aka_core::paths::{BrokerInstanceLock, BrokerLockAttempt, BrokerLockRole, Paths};
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConnectionConfig, PgSslMode, SecretValue};
+use aka_core::types::{ConnectionConfig, PgSslMode, SecretValue, SignerSpec};
 use aka_core::vault::{
     platform_vault, platform_vault_for_root, recorded_platform_vault_backend,
     selected_platform_vault_backend, PlatformVaultBackend, SecretVault,
@@ -805,6 +805,31 @@ struct ConnAdd {
     /// the account and the test answers the question it is being asked.
     #[arg(long)]
     test_path: Option<String>,
+    /// api: sign each request with AWS SigV4 for this region instead of
+    /// injecting a template. Requires --sigv4-service and both credential
+    /// refs; replaces --template.
+    #[arg(long)]
+    sigv4_region: Option<String>,
+    /// api: SigV4 signing service name (e.g. s3, execute-api, bedrock).
+    #[arg(long, requires = "sigv4_region")]
+    sigv4_service: Option<String>,
+    /// api: vault secret name holding the AWS access key ID.
+    #[arg(long, requires = "sigv4_region")]
+    sigv4_access_key_ref: Option<String>,
+    /// api: vault secret name holding the AWS secret access key.
+    #[arg(long, requires = "sigv4_region")]
+    sigv4_secret_key_ref: Option<String>,
+    /// api: vault secret name holding a session token (temporary
+    /// credentials), signed and sent as x-amz-security-token.
+    #[arg(long, requires = "sigv4_region")]
+    sigv4_session_token_ref: Option<String>,
+    /// api: PEM client-certificate chain presented on the upstream TLS leg
+    /// (mTLS). Requires --client-key.
+    #[arg(long, requires = "client_key")]
+    client_cert: Option<String>,
+    /// api: PEM private key for --client-cert (PKCS#8, PKCS#1, or SEC1).
+    #[arg(long, requires = "client_cert")]
+    client_key: Option<String>,
     /// Operate on a broker rooted here instead of the default layout.
     #[arg(long)]
     root: Option<PathBuf>,
@@ -1790,16 +1815,48 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("sslmode", args.sslmode.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
+            let signer = match &args.sigv4_region {
+                Some(region) => {
+                    if args.template.is_some() {
+                        return Err(
+                            "--template does not apply to a SigV4 connection; the signer \
+                             computes the Authorization header"
+                                .into(),
+                        );
+                    }
+                    Some(SignerSpec::AwsSigv4 {
+                        region: region.clone(),
+                        service: require("sigv4-service", &args.sigv4_service)?,
+                        access_key_ref: require(
+                            "sigv4-access-key-ref",
+                            &args.sigv4_access_key_ref,
+                        )?,
+                        secret_key_ref: require(
+                            "sigv4-secret-key-ref",
+                            &args.sigv4_secret_key_ref,
+                        )?,
+                        session_token_ref: args.sigv4_session_token_ref.clone(),
+                    })
+                }
+                None => None,
+            };
+            let template = if signer.is_some() {
+                String::new()
+            } else {
+                require("template", &args.template)?
+            };
             Ok(ConnectionConfig::Api {
                 host: require("host", &args.host)?,
                 scheme: args.scheme.clone().unwrap_or_else(|| "https".into()),
                 port: args.port,
                 trusted_ca_bundle_path: args.ca_bundle.clone(),
-                template: require("template", &args.template)?,
-
+                template,
                 mcp_path: args.mcp_path.clone(),
                 test_path: args.test_path.clone(),
                 oauth: None,
+                signer,
+                client_cert_path: args.client_cert.clone(),
+                client_key_path: args.client_key.clone(),
             })
         }
         ConnKind::Pg => {
@@ -3915,7 +3972,8 @@ fn cmd_serve(args: ServeArgs) {
     // interactive desktop, while a nightly `pg_dump` or a LISTEN/NOTIFY worker
     // needs longer ones. They were compile-time constants before, which left
     // those workloads with no way to run at all.
-    let mut config = BrokerConfig::default();
+    // Environment first, explicit flags after: a flag always wins.
+    let mut config = BrokerConfig::default().overridden_from_env();
     if let Some(secs) = session_idle_timeout {
         config.session_idle_timeout = std::time::Duration::from_secs(secs);
     }
@@ -4655,6 +4713,13 @@ mod tests {
             ca_bundle: None,
             mcp_path: None,
             test_path: None,
+            sigv4_region: None,
+            sigv4_service: None,
+            sigv4_access_key_ref: None,
+            sigv4_secret_key_ref: None,
+            sigv4_session_token_ref: None,
+            client_cert: None,
+            client_key: None,
             root: None,
             create_root: false,
             broker: None,
@@ -4865,6 +4930,9 @@ mod tests {
             last_status: None,
             last_detail: None,
             last_checked_at: None,
+            signer: None,
+            client_cert_path: None,
+            client_key_path: None,
         }
     }
 
