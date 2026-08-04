@@ -314,6 +314,8 @@ pub struct OnePasswordHealthDto {
 pub struct OnePasswordVaultDto {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub item_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

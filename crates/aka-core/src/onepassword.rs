@@ -942,6 +942,7 @@ impl ConnectClient {
             .map(|vault| OnePasswordVaultDto {
                 id: vault.id,
                 title: vault.name,
+                item_count: vault.items,
             })
             .collect())
     }
@@ -1044,6 +1045,8 @@ impl ConnectClient {
 struct ConnectVault {
     id: String,
     name: String,
+    #[serde(default)]
+    items: u32,
 }
 
 #[derive(Deserialize)]
@@ -1255,7 +1258,7 @@ mod tests {
                 assert!(request.contains("authorization: Bearer connect-token"));
                 let first = request.lines().next().unwrap();
                 let body = if first.contains("GET /v1/vaults ") {
-                    r#"[{"id":"vault1","name":"Production"}]"#
+                    r#"[{"id":"vault1","name":"Production","items":1}]"#
                 } else if first.contains("GET /v1/vaults/vault1/items ") {
                     r#"[{"id":"item1","title":"GitHub","category":"API_CREDENTIAL"}]"#
                 } else {
@@ -1288,10 +1291,9 @@ mod tests {
                 base_url: format!("http://{address}"),
             },
         );
-        assert_eq!(
-            resolver.list_vaults(&integration).await.unwrap()[0].title,
-            "Production"
-        );
+        let vaults = resolver.list_vaults(&integration).await.unwrap();
+        assert_eq!(vaults[0].title, "Production");
+        assert_eq!(vaults[0].item_count, 1);
         assert_eq!(
             resolver.list_items(&integration, "vault1").await.unwrap()[0].title,
             "GitHub"
@@ -1338,7 +1340,7 @@ EOF
 )
   case "$line" in
     *'"operation":"initialize"'*) result='{"initialized":true}' ;;
-    *'"operation":"list_vaults"'*) result='[{"id":"vault1","title":"Production"}]' ;;
+    *'"operation":"list_vaults"'*) result='[{"id":"vault1","title":"Production","item_count":3}]' ;;
     *'"operation":"resolve"'*) result='{"value":"sdk-secret"}' ;;
     *) printf '{"id":%s,"ok":false,"error":{"code":"invalid_request","message":"unsupported"}}\n' "$id"; continue ;;
   esac
@@ -1360,10 +1362,9 @@ done
                 account: "Work".into(),
             },
         );
-        assert_eq!(
-            resolver.list_vaults(&integration).await.unwrap()[0].id,
-            "vault1"
-        );
+        let vaults = resolver.list_vaults(&integration).await.unwrap();
+        assert_eq!(vaults[0].id, "vault1");
+        assert_eq!(vaults[0].item_count, 3);
         assert_eq!(
             resolver
                 .resolve(&integration, &reference(id))

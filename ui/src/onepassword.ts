@@ -1,6 +1,19 @@
 import type { OnePasswordField, OnePasswordItem, OnePasswordVault } from './types';
 
 export const ONEPASSWORD_ALIAS_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const ONEPASSWORD_ALL_VAULTS_ID = '__all_vaults__';
+export const ONEPASSWORD_ALL_VAULTS_LIMIT = 10;
+
+export function onePasswordAllVaultsOption(
+  vaults: readonly OnePasswordVault[],
+): OnePasswordVault | null {
+  if (!vaults.length || vaults.length > ONEPASSWORD_ALL_VAULTS_LIMIT) return null;
+  return {
+    id: ONEPASSWORD_ALL_VAULTS_ID,
+    title: 'All vaults',
+    item_count: vaults.reduce((count, vault) => count + vault.item_count, 0),
+  };
+}
 
 export function onePasswordFieldKey(field: OnePasswordField): string {
   return `${field.section_id ?? ''}:${field.id}`;

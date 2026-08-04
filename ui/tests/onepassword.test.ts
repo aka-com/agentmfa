@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   onePasswordAliasError,
+  onePasswordAllVaultsOption,
   onePasswordFieldKey,
   onePasswordFieldIsUnsupported,
   onePasswordSelectionKey,
@@ -21,7 +22,7 @@ test('1Password fields have stable section-aware selection keys', () => {
   assert.equal(onePasswordFieldKey(field), 'oauth:credential');
   assert.equal(onePasswordFieldKey({ ...field, section_id: null }), ':credential');
   assert.equal(
-    onePasswordSelectionKey({ id: 'vault-1', title: 'Work' }, item, field),
+    onePasswordSelectionKey({ id: 'vault-1', title: 'Work', item_count: 1 }, item, field),
     'vault-1:item-1:oauth:credential',
   );
 });
@@ -30,6 +31,19 @@ test('1Password unsupported fields are recognized across provider spellings', ()
   assert.equal(onePasswordFieldIsUnsupported({ ...field, field_type: 'Unsupported' }), true);
   assert.equal(onePasswordFieldIsUnsupported({ ...field, field_type: 'UNKNOWN' }), true);
   assert.equal(onePasswordFieldIsUnsupported({ ...field, field_type: 'Totp' }), false);
+});
+
+test('1Password offers aggregate browsing only for one to ten vaults', () => {
+  const vaults = Array.from({ length: 10 }, (_, index) => ({
+    id: `vault-${index}`,
+    title: `Vault ${index}`,
+    item_count: index,
+  }));
+  assert.equal(onePasswordAllVaultsOption([]), null);
+  assert.equal(onePasswordAllVaultsOption(vaults)?.item_count, 45);
+  assert.equal(onePasswordAllVaultsOption([...vaults, {
+    id: 'vault-10', title: 'Vault 10', item_count: 10,
+  }]), null);
 });
 
 test('1Password alias suggestions are valid and avoid existing names', () => {

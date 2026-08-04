@@ -61,8 +61,9 @@ type catalogPayload struct {
 }
 
 type vaultResult struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	ItemCount uint32 `json:"item_count"`
 }
 
 type itemResult struct {
@@ -165,7 +166,11 @@ func handle(client *onepassword.Client, req request) (any, error) {
 		}
 		result := make([]vaultResult, 0, len(vaults))
 		for _, vault := range vaults {
-			result = append(result, vaultResult{ID: vault.ID, Title: vault.Title})
+			result = append(result, vaultResult{
+				ID:        vault.ID,
+				Title:     vault.Title,
+				ItemCount: vault.ActiveItemCount,
+			})
 		}
 		return result, nil
 	case "list_items":

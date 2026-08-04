@@ -13,31 +13,27 @@ npm run build      # build .app and .dmg bundles
 
 ### Testing against the sandbox
 
-`npm test` is hermetic — it never reaches a network service. The broker's
-end-to-end behaviour is covered separately, against the disposable Docker
-stack in `dev/sandbox`:
+`npm test` is hermetic and never reaches a network service. The
+broker's end-to-end behaviour is covered separately, against a
+disposable Docker stack:
 
 ```sh
 npm run sandbox:up     # start the four upstreams (Docker required)
 npm run sandbox:test   # drive real brokers against them
 ```
 
-Each test file in `dev/sandbox/tests/` starts its own headless `multitool serve`
-on a throwaway root and speaks the real wire planes — control socket,
-manage plane, Postgres proxy, SSH agent socket, MCP host — against the
-sandbox's HTTP, MCP, Postgres, and SSH services. It is not part of
-`npm test` because it needs Docker; run it when changing the broker,
-the data planes, or the approval path. See
-[dev/sandbox/README.md](dev/sandbox/README.md) §5.
+Each test file in `dev/sandbox/tests/` starts its own headless
+`multitool serve` on a throwaway root and exercises real connections,
+including control socket, manage plane, Postgres proxy, SSH agent
+socket, MCP host, against the sandbox's HTTP, MCP, Postgres, and SSH
+services. See dev/sandbox/README.md.
 
 ### Frontend-only mode
 
-You can run the UI standalone in a browser, against a self-contained dev
-mock (`ui/src/mock-bridge.ts`). The production bridge loads it only through a
-compile-time development branch, so fixtures do not ship in the desktop
-bundle. This is useful for rapidly iterating on the UI,
-or if you're an AI agent, previewing design changes when it isn't possible
-to build a Tauri application.
+You can run the UI standalone in a browser, against a self-contained
+dev mock (`ui/src/mock-bridge.ts`). This is useful for rapidly
+iterating on the UI, or if you're an AI agent, previewing design
+changes when it isn't possible to build a Tauri application.
 
 When running in frontend-only mode, there is no remote broker, and
 every command is served from an in-memory fixture store, with seeded

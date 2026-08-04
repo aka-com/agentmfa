@@ -846,9 +846,9 @@
   .copied-badge{
   display: inline-flex; align-items: center; gap: 4px;
   color: var(--ok-ink); font-weight: 600; font-size: 0.78125rem; line-height: 1;
-  letter-spacing: normal; animation: copied-pop .22s ease;
+  letter-spacing: normal; transform: translateY(-2px); animation: copied-pop .22s ease;
 }
-  @keyframes copied-pop{ from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+  @keyframes copied-pop{ from { opacity: 0; transform: none; } to { opacity: 1; transform: translateY(-2px); } }
   .icon-btn{ border: none; background: transparent; cursor: pointer; color: var(--muted-2); padding: 4px; border-radius: 5px; line-height: 0; }
   .icon-btn:hover{ background: var(--hover-2); color: var(--ink-2); }
   /* The copy button is centered over the masked value, whose slot sits ~3.5px
@@ -1836,11 +1836,71 @@
 .onepassword-method small {
   display: block; margin-top: 3px; color: var(--muted); font-size: 0.71875rem; line-height: 1.35;
 }
-.onepassword-form { padding: 0 18px; }
+.onepassword-form { padding: 0 18px 4px; }
 .onepassword-form .f-row { max-width: 520px; }
+.onepassword-form--with-guide {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(168px, 210px);
+  gap: 18px 24px;
+  align-items: start;
+}
+.onepassword-form-main { min-width: 0; }
 .onepassword-method-hint {
   max-width: 620px; margin: -2px 0 12px; color: var(--muted);
   font-size: 0.75rem; line-height: 1.45;
+}
+
+/* Stylized 1Password sidebar crop: shows where the account name lives.
+   Token-colored so light/dark both stay readable; no outer card chrome. */
+.onepassword-account-guide {
+  display: flex; flex-direction: column; gap: 10px; min-width: 0;
+  padding-top: 4px;
+}
+.onepassword-account-preview {
+  border: 1px solid var(--line); border-radius: 11px;
+  background: var(--wash-2); overflow: hidden;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .06);
+}
+.onepassword-account-preview-titlebar {
+  display: flex; align-items: center; gap: 5px; padding: 9px 11px 6px;
+}
+.onepassword-account-preview-titlebar > span {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong);
+}
+.onepassword-account-preview-titlebar > span:nth-child(1) { background: #ff5f57; }
+.onepassword-account-preview-titlebar > span:nth-child(2) { background: #febc2e; }
+.onepassword-account-preview-titlebar > span:nth-child(3) { background: #28c840; }
+.onepassword-account-preview-body { padding: 2px 8px 12px; }
+.onepassword-account-preview-account {
+  display: flex; align-items: center; gap: 8px; padding: 7px 8px;
+  border-radius: 8px; background: var(--field-bg);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent),
+    0 0 0 3px color-mix(in srgb, var(--accent-wash-2) 70%, transparent);
+  color: var(--ink); font-size: 0.75rem; font-weight: 650; letter-spacing: -0.01em;
+}
+.onepassword-account-preview-avatar {
+  flex: 0 0 auto; width: 19.8px; height: 19.8px; border-radius: 6px;
+  background:
+    radial-gradient(circle at 50% 38%, var(--chip-ink) 0 28%, transparent 29%),
+    radial-gradient(circle at 50% 92%, var(--chip-ink) 0 42%, transparent 43%),
+    var(--chip-bg);
+  opacity: .85;
+}
+.onepassword-account-preview-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.onepassword-account-preview-chevron {
+  flex: 0 0 auto; width: 6px; height: 6px; margin-right: 2px;
+  border-right: 1.6px solid var(--muted-2); border-bottom: 1.6px solid var(--muted-2);
+  transform: rotate(45deg) translateY(-1px); opacity: .7;
+}
+.onepassword-account-preview-nav {
+  display: flex; flex-direction: column; gap: 1px; margin-top: 8px; padding: 0 4px;
+}
+.onepassword-account-preview-nav > span {
+  padding: 5px 6px; border-radius: 6px;
+  color: var(--muted); font-size: 0.6875rem; font-weight: 500; opacity: .85;
 }
 .onepassword-sheet .form-global-error {
   margin-right: 18px; margin-bottom: 16px; margin-left: 18px;
@@ -1863,6 +1923,7 @@
 }
 .onepassword-breadcrumb button:hover { text-decoration: underline; }
 .onepassword-delimiter { color: var(--muted-2); font-size: 1rem; line-height: 1; }
+.onepassword-breadcrumb-placeholder { color: var(--muted); }
 .onepassword-browser {
   display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 300px;
   max-height: min(430px, calc(100vh - 220px)); overflow: hidden;
@@ -1886,7 +1947,12 @@
 .onepassword-browser-list > button > span { flex: 1; min-width: 0; font-size: 0.78125rem; }
 .onepassword-browser-list > button > small { color: var(--muted); font-size: 0.65625rem; }
 .onepassword-browser-list > button > svg { width: 12px; height: 12px; color: var(--muted); }
-.onepassword-loading { padding: 8px; color: var(--muted); font-size: 0.78125rem; }
+.onepassword-vault-count { color: var(--muted); }
+.onepassword-browser-list > .onepassword-list-back {
+  margin-top: 6px; color: var(--accent-text); font-size: 0.75rem;
+}
+.onepassword-loading,
+.onepassword-list-empty { padding: 8px; color: var(--muted); font-size: 0.78125rem; }
 .onepassword-fields { overflow-y: auto; padding: 12px 14px; }
 .onepassword-fields-head {
   display: grid; grid-template-columns: minmax(180px, 1fr) minmax(210px, .9fr);
@@ -1945,6 +2011,13 @@
 @media (max-width: 620px) {
   .onepassword-methods { grid-template-columns: 1fr; }
   .onepassword-method { min-height: 0; }
+  .onepassword-form--with-guide {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .onepassword-account-guide {
+    max-width: 240px; padding-top: 0; padding-bottom: 8px;
+  }
   .onepassword-browser { grid-template-columns: 1fr; max-height: calc(100vh - 220px); overflow-y: auto; }
   .onepassword-browser-list { max-height: 150px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
   .onepassword-fields { overflow: visible; }

@@ -1,14 +1,5 @@
 # Try Multitool against the local sandbox
 
-```text
-     _                    _   __  __ _____ _
-    / \   __ _  ___ _ __ | |_|  \/  |  ___/ \
-   / _ \ / _` |/ _ \ '_ \| __| |\/| | |_ / _ \
-  / ___ \ (_| |  __/ | | | |_| |  | |  _/ ___ \
- /_/   \_\__, |\___|_| |_|\__|_|  |_|_|/_/   \_\
-         |___/
-```
-
 The sandbox is a disposable Docker Compose stack with one upstream for
 every Multitool connection type — an authenticated HTTP API, an MCP server,
 Postgres, and SSH — so you can try the whole app in

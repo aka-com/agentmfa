@@ -43,12 +43,16 @@ export interface OnePasswordHealth {
 export interface OnePasswordVault {
   id: string;
   title: string;
+  item_count: number;
 }
 
 export interface OnePasswordItem {
   id: string;
   title: string;
   category?: string | null;
+  /** Present only when the UI aggregates items from several vaults. */
+  vault_id?: string;
+  vault_title?: string;
 }
 
 export interface OnePasswordField {

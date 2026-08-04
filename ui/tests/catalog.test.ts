@@ -177,6 +177,7 @@ test('the built-in credentials store is a Secrets row', () => {
   const credentials = CATALOG.find((entry) => entry.id === 'credentials');
   assert.equal(credentials?.via, 'builtin');
   assert.equal(credentials?.section, 'Secrets');
+  assert.equal(credentials?.description, 'API keys, passwords, and private keys');
 });
 
 test('every preset is a valid, addable API prefill', () => {

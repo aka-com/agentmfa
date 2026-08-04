@@ -130,6 +130,11 @@ test('the 1Password sheet links a field through all three steps', { timeout: 8_0
   assert.ok(dialog.querySelector('.onepassword-sheet-logo svg'));
   assert.equal(dialog.querySelectorAll('.onepassword-method-icon svg').length, 3);
   assert.equal(dialog.textContent?.includes('Link vault fields to this Mac'), false);
+  assert.ok(dialog.textContent?.includes(
+    'Use the name at the top of the 1Password sidebar, or account UUID.',
+  ));
+  assert.equal(dialog.textContent?.includes('1Password will ask you to authorize Multitool.'), false);
+  assert.equal(dialog.querySelector('.onepassword-account-preview-nav')?.textContent, 'Profile');
 
   testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#op-account')!, {
     target: { value: 'Work' },
@@ -142,6 +147,8 @@ test('the 1Password sheet links a field through all three steps', { timeout: 8_0
       'button[data-act="onepassword-vault"][data-id="vault-work"]',
     );
     assert.ok(button);
+    assert.equal(button.querySelector('.onepassword-vault-count')?.textContent, '(2)');
+    assert.equal(button.querySelector('small'), null);
     return button;
   });
   testingLibrary.fireEvent.click(vault);
@@ -150,9 +157,16 @@ test('the 1Password sheet links a field through all three steps', { timeout: 8_0
       'button[data-act="onepassword-item"][data-id="item-stripe"]',
     );
     assert.ok(button);
+    const back = dialog.querySelector('.onepassword-browser-list')?.lastElementChild;
+    assert.equal(back?.textContent?.trim(), 'Back');
+    assert.ok(back?.querySelector('svg'));
     return button;
   });
   testingLibrary.fireEvent.click(item);
+  assert.ok(dialog.querySelector(
+    'button[data-act="onepassword-item"][data-id="item-stripe"]',
+  ));
+  assert.equal(dialog.querySelector('.onepassword-browser-list .onepassword-loading'), null);
   const checkbox = await testingLibrary.waitFor(() => {
     const input = dialog.querySelector<HTMLInputElement>('.onepassword-field input[type="checkbox"]');
     assert.ok(input);
@@ -226,6 +240,46 @@ test('1Password credentials can recover and connections can be removed', { timeo
   );
   await testingLibrary.waitFor(() => {
     assert.ok(dialog.querySelector('button[data-act="onepassword-vault"]'));
+    const placeholder = dialog.querySelector('.onepassword-breadcrumb-placeholder');
+    assert.equal(placeholder?.textContent, 'Select a vault…');
+  });
+  const allVaults = dialog.querySelector<HTMLButtonElement>(
+    'button[data-act="onepassword-vault"][data-id="__all_vaults__"]',
+  );
+  assert.equal(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="onepassword-vault"]'),
+    allVaults,
+  );
+  assert.equal(allVaults?.querySelector('.onepassword-vault-count')?.textContent, '(4)');
+  testingLibrary.fireEvent.click(allVaults!);
+  const aggregatedItem = await testingLibrary.waitFor(() => {
+    const item = dialog.querySelector<HTMLButtonElement>(
+      'button[data-act="onepassword-item"][data-id="item-cloudflare"]',
+    );
+    assert.ok(item);
+    return item;
+  });
+  assert.equal(aggregatedItem.dataset.vaultId, 'vault-shared');
+  assert.equal(aggregatedItem.querySelector('small')?.textContent, 'Shared Services · API Credential');
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button.onepassword-list-back')!,
+  );
+  await testingLibrary.waitFor(() => {
+    assert.ok(dialog.querySelector('button[data-act="onepassword-vault"][data-id="vault-empty"]'));
+  });
+  const emptyVault = dialog.querySelector<HTMLButtonElement>(
+    'button[data-act="onepassword-vault"][data-id="vault-empty"]',
+  );
+  assert.equal(emptyVault?.querySelector('.onepassword-vault-count')?.textContent, '(0)');
+  testingLibrary.fireEvent.click(emptyVault!);
+  await testingLibrary.waitFor(() => {
+    assert.equal(dialog.querySelector('.onepassword-list-empty')?.textContent, 'No items');
+  });
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button.onepassword-list-back')!,
+  );
+  await testingLibrary.waitFor(() => {
+    assert.ok(dialog.querySelector('button[data-act="onepassword-vault"][data-id="vault-empty"]'));
   });
   testingLibrary.fireEvent.click(
     dialog.querySelector<HTMLButtonElement>('button[data-act="sheet-cancel"]')!,
@@ -235,6 +289,11 @@ test('1Password credentials can recover and connections can be removed', { timeo
     const candidate = [...document.querySelectorAll<HTMLElement>('.onepassword-integration-row')]
       .find((element) => element.querySelector('b')?.textContent === 'Recovery Account');
     assert.ok(candidate);
+    assert.equal(candidate.querySelector('.onepassword-integration-icon'), null);
+    assert.equal(
+      candidate.querySelector<HTMLButtonElement>('button[data-act="onepassword-update"]')?.textContent,
+      'Update connection',
+    );
     return candidate;
   });
   testingLibrary.fireEvent.click(
@@ -264,6 +323,9 @@ test('1Password credentials can recover and connections can be removed', { timeo
   const confirm = await testingLibrary.findByRole(document.body, 'dialog', {
     name: 'Remove Recovery Account?',
   });
+  assert.ok(confirm.textContent?.includes(
+    'Multitool will remove the connected vault and credentials. No 1Password items will be changed.',
+  ));
   testingLibrary.fireEvent.click(
     confirm.querySelector<HTMLButtonElement>('button[data-act="onepassword-delete-confirm"]')!,
   );

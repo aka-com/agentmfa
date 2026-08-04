@@ -263,9 +263,10 @@ interface MockArgs {
 }
 
 const mockOnePasswordVaults: OnePasswordVault[] = [
-  { id: 'vault-work', title: 'Work' },
-  { id: 'vault-engineering', title: 'Engineering' },
-  { id: 'vault-shared', title: 'Shared Services' },
+  { id: 'vault-work', title: 'Work', item_count: 2 },
+  { id: 'vault-engineering', title: 'Engineering', item_count: 1 },
+  { id: 'vault-shared', title: 'Shared Services', item_count: 1 },
+  { id: 'vault-empty', title: 'Empty', item_count: 0 },
 ];
 const mockOnePasswordItems: Record<string, OnePasswordItem[]> = {
   'vault-work': [
@@ -278,6 +279,7 @@ const mockOnePasswordItems: Record<string, OnePasswordItem[]> = {
   'vault-shared': [
     { id: 'item-cloudflare', title: 'Cloudflare', category: 'API Credential' },
   ],
+  'vault-empty': [],
 };
 const mockOnePasswordFields: Record<string, OnePasswordField[]> = {
   'item-stripe': [
