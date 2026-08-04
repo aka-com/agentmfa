@@ -24,6 +24,15 @@ export function onePasswordFieldIsUnsupported(field: OnePasswordField): boolean 
   return fieldType === 'unsupported' || fieldType === 'unknown';
 }
 
+/** Human-readable field type for the browse list (SDK spellings vary). */
+export function onePasswordFieldTypeLabel(fieldType: string): string {
+  const trimmed = fieldType.trim();
+  if (!trimmed) return trimmed;
+  const lower = trimmed.toLowerCase();
+  if (lower === 'totp' || lower === 'otp') return 'TOTP';
+  return trimmed;
+}
+
 export function onePasswordSelectionKey(
   vault: OnePasswordVault,
   item: OnePasswordItem,

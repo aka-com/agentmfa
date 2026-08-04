@@ -5,6 +5,7 @@ import {
   onePasswordAllVaultsOption,
   onePasswordFieldKey,
   onePasswordFieldIsUnsupported,
+  onePasswordFieldTypeLabel,
   onePasswordSelectionKey,
   suggestedOnePasswordAlias,
 } from '../src/onepassword';
@@ -31,6 +32,14 @@ test('1Password unsupported fields are recognized across provider spellings', ()
   assert.equal(onePasswordFieldIsUnsupported({ ...field, field_type: 'Unsupported' }), true);
   assert.equal(onePasswordFieldIsUnsupported({ ...field, field_type: 'UNKNOWN' }), true);
   assert.equal(onePasswordFieldIsUnsupported({ ...field, field_type: 'Totp' }), false);
+});
+
+test('1Password field type labels use TOTP for OTP spellings', () => {
+  assert.equal(onePasswordFieldTypeLabel('Totp'), 'TOTP');
+  assert.equal(onePasswordFieldTypeLabel('totp'), 'TOTP');
+  assert.equal(onePasswordFieldTypeLabel('OTP'), 'TOTP');
+  assert.equal(onePasswordFieldTypeLabel('Concealed'), 'Concealed');
+  assert.equal(onePasswordFieldTypeLabel('Text'), 'Text');
 });
 
 test('1Password offers aggregate browsing only for one to ten vaults', () => {

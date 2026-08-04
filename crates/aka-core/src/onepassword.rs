@@ -175,6 +175,25 @@ pub fn validate_integration(label: &str, auth: &OnePasswordAuth) -> Result<()> {
     Ok(())
 }
 
+/// Drop blank optional display/metadata fields. 1Password sections often
+/// have an empty title; that is not an error, just "no label".
+pub(crate) fn normalize_reference(mut reference: OnePasswordSecretRef) -> OnePasswordSecretRef {
+    if reference.section_id.as_ref().is_some_and(|value| value.is_empty()) {
+        reference.section_id = None;
+    }
+    if reference
+        .section_label
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        reference.section_label = None;
+    }
+    if reference.field_type.as_ref().is_some_and(|value| value.is_empty()) {
+        reference.field_type = None;
+    }
+    reference
+}
+
 pub(crate) fn validate_reference(reference: &OnePasswordSecretRef) -> Result<()> {
     for (name, value) in [
         ("vault", reference.vault_id.as_str()),
@@ -212,8 +231,10 @@ pub(crate) fn validate_reference(reference: &OnePasswordSecretRef) -> Result<()>
             )));
         }
     }
+    // Blank labels are normalized away; only reject non-empty junk.
     if reference.section_label.as_ref().is_some_and(|value| {
-        value.is_empty() || value.chars().count() > 256 || value.chars().any(char::is_control)
+        !value.is_empty()
+            && (value.chars().count() > 256 || value.chars().any(char::is_control))
     }) {
         return Err(CoreError::InvalidOnePasswordIntegration(
             "invalid 1Password section label".into(),
@@ -1003,7 +1024,12 @@ impl ConnectClient {
                 OnePasswordFieldDto {
                     id: field.id,
                     title: field.label,
-                    section_title: section_id.as_ref().and_then(|id| sections.get(id).cloned()),
+                    section_title: section_id.as_ref().and_then(|id| {
+                        sections
+                            .get(id)
+                            .cloned()
+                            .filter(|title| !title.trim().is_empty())
+                    }),
                     section_id,
                     field_type: field.field_type,
                 }
@@ -1207,6 +1233,21 @@ mod tests {
 
         invalid.section_label = Some("Authentication".into());
         assert!(validate_reference(&invalid).is_ok());
+    }
+
+    #[test]
+    fn normalize_reference_drops_blank_section_labels() {
+        let id = Uuid::new_v4();
+        let mut blank = reference(id);
+        blank.section_label = Some(String::new());
+        let cleaned = normalize_reference(blank.clone());
+        assert_eq!(cleaned.section_label, None);
+        assert!(validate_reference(&cleaned).is_ok());
+
+        blank.section_label = Some("   ".into());
+        let cleaned = normalize_reference(blank);
+        assert_eq!(cleaned.section_label, None);
+        assert!(validate_reference(&cleaned).is_ok());
     }
 
     #[test]

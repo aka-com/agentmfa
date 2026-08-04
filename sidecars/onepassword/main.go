@@ -199,8 +199,9 @@ func handle(client *onepassword.Client, req request) (any, error) {
 		result := make([]fieldResult, 0, len(item.Fields))
 		for _, field := range item.Fields {
 			var sectionTitle *string
+			// Unnamed sections have an empty title; omit rather than send "".
 			if field.SectionID != nil {
-				if title, ok := sections[*field.SectionID]; ok {
+				if title, ok := sections[*field.SectionID]; ok && title != "" {
 					copy := title
 					sectionTitle = &copy
 				}

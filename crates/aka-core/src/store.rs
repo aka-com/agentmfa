@@ -24,8 +24,8 @@ use crate::error::{ConnectionField, CoreError};
 use crate::events::NoopEvents;
 use crate::integrity::StateIntegrity;
 use crate::onepassword::{
-    validate_integration, validate_reference, OnePasswordAuth, OnePasswordIntegration,
-    OnePasswordResolver, OnePasswordSecretRef,
+    normalize_reference, validate_integration, validate_reference, OnePasswordAuth,
+    OnePasswordIntegration, OnePasswordResolver, OnePasswordSecretRef,
 };
 use crate::paths::Paths;
 use crate::template::{is_valid_secret_name, Template};
@@ -762,6 +762,8 @@ impl Store {
         if !is_valid_secret_name(name) {
             return Err(CoreError::InvalidSecretName(name.to_string()));
         }
+        // Unnamed 1Password sections arrive as empty labels; treat as absent.
+        let reference = normalize_reference(reference);
         validate_reference(&reference)?;
         let mut state = self.state.lock().unwrap();
         if state.secrets.iter().any(|secret| secret.name == name) {

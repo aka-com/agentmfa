@@ -70,6 +70,7 @@ import {
   onePasswordAliasError,
   onePasswordAllVaultsOption,
   onePasswordFieldIsUnsupported,
+  onePasswordFieldTypeLabel,
   ONEPASSWORD_ALL_VAULTS_ID,
   onePasswordSelectionKey,
   suggestedOnePasswordAlias,
@@ -1700,7 +1701,8 @@ async function saveOnePasswordSelections(): Promise<void> {
         itemId: selection.item.id,
         itemLabel: selection.item.title,
         sectionId: selection.field.section_id ?? null,
-        sectionLabel: selection.field.section_title ?? null,
+        // Unnamed 1Password sections use an empty title; send null, not "".
+        sectionLabel: selection.field.section_title?.trim() || null,
         fieldId: selection.field.id,
         fieldLabel: selection.field.title,
         fieldType: selection.field.field_type,
@@ -1923,7 +1925,9 @@ function OnePasswordChooseStep(): ReactNode {
                     disabled={unsupported}
                     onChange={() => toggleOnePasswordField(field.id)} />
                   <span><b>{field.title}</b>
-                    <small>{unsupported ? 'Unsupported' : field.section_title || field.field_type}</small></span>
+                    <small>{unsupported
+                      ? 'Unsupported'
+                      : field.section_title || onePasswordFieldTypeLabel(field.field_type)}</small></span>
                 </label>
                 <div className="onepassword-alias">
                   {selection ? <>
