@@ -1,7 +1,7 @@
 // An MCP client for the broker's own MCP host (in-process, reverse-proxied
 // at /mcp on the control socket).
 //
-// This is the surface `claude mcp add agentmfa -- mfa mcp` ends up talking
+// This is the surface `claude mcp add multitool -- multitool mcp` ends up talking
 // to, so the suite exercises it the way a client does: streamable HTTP,
 // `initialize` then a session id on every later request, responses that may
 // arrive as JSON or as a one-frame event stream.
@@ -82,7 +82,7 @@ export class McpClient {
     return message.result as T;
   }
 
-  async initialize(clientName = 'agentmfa-sandbox-tests'): Promise<Record<string, unknown>> {
+  async initialize(clientName = 'multitool-sandbox-tests'): Promise<Record<string, unknown>> {
     const response = await this.send('initialize', {
       protocolVersion: '2025-06-18',
       capabilities: {},

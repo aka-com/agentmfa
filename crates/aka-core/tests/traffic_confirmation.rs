@@ -1090,7 +1090,7 @@ async fn the_queue_carries_what_the_app_renders() {
             "/v1/http",
             &[
                 ("authorization", &format!("Bearer {token}")),
-                ("x-agentmfa-client", "codex"),
+                ("x-multitool-client", "codex"),
             ],
             Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
         )

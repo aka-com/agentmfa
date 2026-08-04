@@ -192,7 +192,7 @@ async fn credential_sink() -> Response {
         .into_response()
 }
 
-/// A minimal streamable-HTTP MCP server, so the sandbox covers AKA's fifth
+/// A minimal streamable-HTTP MCP server, so the sandbox covers Multitool's fifth
 /// connection type. An MCP connection is an API connection carrying an
 /// `mcp_path`, so this endpoint lives on the same host/port as the HTTP API
 /// and is guarded by its own fake bearer token. It answers the handshake the

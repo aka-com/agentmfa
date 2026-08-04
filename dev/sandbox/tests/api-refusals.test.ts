@@ -167,7 +167,7 @@ test('a connection with agent access off is refused, and says who can fix it', a
     });
     assert.equal(response.status, 403);
     assert.equal(response.reason, 'denied_by_policy');
-    assert.match(response.json<{ detail: string }>().detail, /enable it in AgentMFA/);
+    assert.match(response.json<{ detail: string }>().detail, /enable it in Multitool/);
 
     // A disabled connection is still *visible*: an agent has to be able to
     // see that the tool exists and is switched off.

@@ -604,12 +604,12 @@ fn initialize(state: &HostState, client_id: uuid::Uuid, request: Value) -> Respo
                     "completions": {},
                 },
                 "serverInfo": {
-                    "name": "agentmfa",
+                    "name": "multitool",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "instructions": "AgentMFA brokers API, database, SSH, and MCP access. \
+                "instructions": "Multitool brokers API, database, SSH, and MCP access. \
                     Credentials are injected by the broker and never exposed to the agent. \
-                    Use agentmfa_status when an expected tool is missing.",
+                    Use multitool_status when an expected tool is missing.",
             },
         }),
     );
@@ -1024,7 +1024,7 @@ fn tool_name_candidate(connection: &BrokerConnection) -> String {
     } else {
         "open"
     };
-    format!("agentmfa_{slug}_{suffix}")
+    format!("multitool_{slug}_{suffix}")
 }
 
 fn short_hash(identity: &str) -> String {
@@ -1060,10 +1060,10 @@ fn native_tools<'a>(
     reserved: impl IntoIterator<Item = &'a str>,
 ) -> Vec<(String, BrokerConnection)> {
     let mut taken = std::collections::HashSet::from([
-        "agentmfa_status".to_string(),
-        "agentmfa_connect".to_string(),
-        "agentmfa_search_tools".to_string(),
-        "agentmfa_call_tool".to_string(),
+        "multitool_status".to_string(),
+        "multitool_connect".to_string(),
+        "multitool_search_tools".to_string(),
+        "multitool_call_tool".to_string(),
     ]);
     // A session's discovered upstream tool names are already on the surface;
     // a native connection wired afterwards must not collide with them.
@@ -1137,7 +1137,7 @@ fn tool_schema(connection: &BrokerConnection) -> Value {
 fn describe(connection: &BrokerConnection) -> String {
     match connection.kind.as_str() {
         "api" => format!(
-            "Make an HTTP request to {} through AgentMFA. The API credential is \
+            "Make an HTTP request to {} through Multitool. The API credential is \
              injected by the broker and never exposed here. The result is \
              {{status, headers, body, body_encoding}}.",
             connection.target
@@ -1152,7 +1152,7 @@ fn describe(connection: &BrokerConnection) -> String {
              private key stays in the broker.",
             connection.target
         ),
-        _ => format!("Use the AgentMFA connection \"{}\".", connection.name),
+        _ => format!("Use the Multitool connection \"{}\".", connection.name),
     }
 }
 
@@ -1209,9 +1209,9 @@ fn native_tool_definition(name: &str, connection: &BrokerConnection) -> Value {
 
 fn status_tool_definition() -> Value {
     json!({
-        "name": "agentmfa_status",
-        "title": "AgentMFA status",
-        "description": "Report which AgentMFA tools this agent can use and what to do when there are none.",
+        "name": "multitool_status",
+        "title": "Multitool status",
+        "description": "Report which Multitool tools this agent can use and what to do when there are none.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
         "annotations": {
             "readOnlyHint": true,
@@ -1223,9 +1223,9 @@ fn status_tool_definition() -> Value {
 
 fn connect_tool_definition() -> Value {
     json!({
-        "name": "agentmfa_connect",
+        "name": "multitool_connect",
         "title": "Request a new tool",
-        "description": "Ask the user to connect a service that is not configured. This files a request in AgentMFA; it grants nothing.",
+        "description": "Ask the user to connect a service that is not configured. This files a request in Multitool; it grants nothing.",
         "inputSchema": {
             "type": "object",
             "properties": {"service": {"type": "string", "minLength": 1, "maxLength": 120}},
@@ -1242,7 +1242,7 @@ fn connect_tool_definition() -> Value {
 
 fn search_tools_definition(count: usize) -> Value {
     json!({
-        "name": "agentmfa_search_tools",
+        "name": "multitool_search_tools",
         "title": "Search available tools",
         "description": format!(
             "{count} upstream tools are search-only because this session exceeded its tool budget."
@@ -1263,9 +1263,9 @@ fn search_tools_definition(count: usize) -> Value {
 
 fn call_search_tool_definition() -> Value {
     json!({
-        "name": "agentmfa_call_tool",
+        "name": "multitool_call_tool",
         "title": "Call a searchable tool",
-        "description": "Call an upstream tool found with agentmfa_search_tools.",
+        "description": "Call an upstream tool found with multitool_search_tools.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1284,14 +1284,14 @@ fn tool_catalog_names(
     protocol: &ProtocolCatalog,
 ) -> HashSet<String> {
     let mut names = HashSet::from([
-        "agentmfa_status".to_string(),
-        "agentmfa_connect".to_string(),
+        "multitool_status".to_string(),
+        "multitool_connect".to_string(),
     ]);
     names.extend(native.iter().map(|(name, _)| name.clone()));
     names.extend(protocol.tools.keys().cloned());
     if !protocol.search_only.is_empty() {
-        names.insert("agentmfa_search_tools".into());
-        names.insert("agentmfa_call_tool".into());
+        names.insert("multitool_search_tools".into());
+        names.insert("multitool_call_tool".into());
     }
     names
 }
@@ -1423,21 +1423,25 @@ async fn call_tool(
     label: &str,
     request: &Value,
 ) -> Response {
-    let name = request.pointer("/params/name").and_then(Value::as_str);
+    let requested_name = request.pointer("/params/name").and_then(Value::as_str);
+    let legacy_name = requested_name
+        .and_then(|name| name.strip_prefix("agentmfa_"))
+        .map(|suffix| format!("multitool_{suffix}"));
+    let name = legacy_name.as_deref().or(requested_name);
     let arguments = request
         .pointer("/params/arguments")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
     let result = match name {
-        Some("agentmfa_status") => {
+        Some("multitool_status") => {
             status_result(state, session_id, client_id, session, token, label).await
         }
-        Some("agentmfa_connect") => connect_result(state, token, label, &arguments).await,
-        Some("agentmfa_search_tools") if session.protocol_catalog.discovered => {
+        Some("multitool_connect") => connect_result(state, token, label, &arguments).await,
+        Some("multitool_search_tools") if session.protocol_catalog.discovered => {
             search_upstream_tools(&session.protocol_catalog, &arguments)
         }
-        Some("agentmfa_call_tool") if session.protocol_catalog.discovered => {
+        Some("multitool_call_tool") if session.protocol_catalog.discovered => {
             call_search_only_tool(state, token, label, &session.protocol_catalog, &arguments).await
         }
         Some(name) if session.protocol_catalog.tools.contains_key(name) => {
@@ -1470,8 +1474,8 @@ async fn call_tool(
             let (native, catalog) =
                 refreshed_surfaces(state, session_id, client_id, session, token, label).await;
             match name {
-                "agentmfa_search_tools" => search_upstream_tools(&catalog, &arguments),
-                "agentmfa_call_tool" => {
+                "multitool_search_tools" => search_upstream_tools(&catalog, &arguments),
+                "multitool_call_tool" => {
                     call_search_only_tool(state, token, label, &catalog, &arguments).await
                 }
                 name if catalog.tools.contains_key(name) => {
@@ -1615,7 +1619,7 @@ async fn status_result(
                 status.insert(
                     "hint".into(),
                     Value::String(
-                        "No tools are enabled for agents. Ask the user to open AgentMFA and enable or add the needed tool under Tools.".into(),
+                        "No tools are enabled for agents. Ask the user to open Multitool and enable or add the needed tool under Tools.".into(),
                     ),
                 );
             }
@@ -1646,7 +1650,7 @@ async fn status_result(
                 );
                 status.insert(
                     "search_hint".into(),
-                    Value::String("More tools are available via agentmfa_search_tools".into()),
+                    Value::String("More tools are available via multitool_search_tools".into()),
                 );
             }
             note_protocol_catalogs(state, session_id, client_id, &registered, &protocol);
@@ -1656,7 +1660,7 @@ async fn status_result(
             "agent": label,
             "tools": [],
             "errors": [{"scope": "broker", "error": error}],
-            "hint": "AgentMFA could not list connections. Reconnect after the broker is reachable.",
+            "hint": "Multitool could not list connections. Reconnect after the broker is reachable.",
         })),
     }
 }
@@ -1683,10 +1687,10 @@ async fn connect_result(
         Ok(response) if response.status.is_success() => {
             let already = response.body["status"] == "already_requested";
             tool_text(Value::String(if already {
-                format!("Already requested. Ask the user to approve \"{service}\" in AgentMFA.")
+                format!("Already requested. Ask the user to approve \"{service}\" in Multitool.")
             } else {
                 format!(
-                    "Requested. Ask the user to add \"{service}\" in AgentMFA and enable it for agents."
+                    "Requested. Ask the user to add \"{service}\" in Multitool and enable it for agents."
                 )
             }))
         }
@@ -1763,7 +1767,7 @@ fn search_upstream_tools(catalog: &ProtocolCatalog, arguments: &Map<String, Valu
                 "call": match registered_as {
                     Some(exposed) => json!({"tool": exposed}),
                     None => json!({
-                        "tool": "agentmfa_call_tool",
+                        "tool": "multitool_call_tool",
                         "arguments": {
                             "connection": binding.connection.name,
                             "tool": binding.upstream_name,
@@ -1830,7 +1834,7 @@ async fn native_result(
             tool_text(project_for_mcp(&connection, response.body))
         }
         Ok(response) => broker_tool_refusal(&connection, &response),
-        Err(error) => tool_error(&format!("AgentMFA call failed: {error}")),
+        Err(error) => tool_error(&format!("Multitool call failed: {error}")),
     }
 }
 
@@ -1848,15 +1852,15 @@ fn broker_tool_refusal(connection: &BrokerConnection, response: &BrokerResponse)
                 connection.name
             )),
             "approval_unavailable" => tool_error(&format!(
-                "Confirmation is enabled for \"{}\", but no AgentMFA approval \
-                 window is attached. Ask the user to open AgentMFA.",
+                "Confirmation is enabled for \"{}\", but no Multitool approval \
+                 window is attached. Ask the user to open Multitool.",
                 connection.name
             )),
             _ => tool_error(&format!(
-                "AgentMFA policy refused \"{}\". {}",
+                "Multitool policy refused \"{}\". {}",
                 connection.name,
                 detail.map(str::to_string).unwrap_or_else(|| format!(
-                    "Ask the user to enable \"{}\" for agents in AgentMFA.",
+                    "Ask the user to enable \"{}\" for agents in Multitool.",
                     connection.name
                 )),
             )),
@@ -1877,7 +1881,7 @@ fn broker_tool_refusal(connection: &BrokerConnection, response: &BrokerResponse)
             .map(|seconds| seconds.to_string())
             .or_else(|| response.retry_after.clone());
         return tool_error(&format!(
-            "AgentMFA rate limited this call: {}.{}",
+            "Multitool rate limited this call: {}.{}",
             detail.unwrap_or(reason),
             retry
                 .map(|seconds| format!(" Retry after {seconds} seconds."))
@@ -1898,7 +1902,7 @@ fn project_for_mcp(connection: &BrokerConnection, value: Value) -> Value {
     if let Some(Value::Object(headers)) = object.get_mut("headers") {
         for (name, value) in headers {
             if name.eq_ignore_ascii_case("cookie") || name.eq_ignore_ascii_case("set-cookie") {
-                *value = Value::String("[OMITTED BY AGENTMFA]".into());
+                *value = Value::String("[OMITTED BY MULTITOOL]".into());
             }
         }
     }
@@ -2114,7 +2118,7 @@ impl<'a> UpstreamClient<'a> {
                     "protocolVersion": PROTOCOL_VERSION,
                     "capabilities": {},
                     "clientInfo": {
-                        "name": "agentmfa",
+                        "name": "multitool",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
                 }),
@@ -2365,7 +2369,8 @@ async fn discover_connection_bounded(
     label: &str,
     connection: &BrokerConnection,
 ) -> Result<RawDiscovery, String> {
-    let deadline = std::env::var("AGENTMFA_DISCOVERY_DEADLINE_MS")
+    let deadline = std::env::var("MULTITOOL_DISCOVERY_DEADLINE_MS")
+        .or_else(|_| std::env::var("AGENTMFA_DISCOVERY_DEADLINE_MS"))
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
@@ -2410,11 +2415,13 @@ fn namespace(connection: &BrokerConnection) -> String {
 /// The original URI is kept verbatim after the prefix and restored by
 /// [`strip_resource_uri`] before anything is forwarded upstream.
 fn expose_resource_uri(connection: &BrokerConnection, uri: &str) -> String {
-    format!("agentmfa://{}/{uri}", namespace(connection))
+    format!("multitool://{}/{uri}", namespace(connection))
 }
 
 fn strip_resource_uri<'a>(connection: &BrokerConnection, exposed: &'a str) -> Option<&'a str> {
-    exposed.strip_prefix(&format!("agentmfa://{}/", namespace(connection)))
+    exposed
+        .strip_prefix(&format!("multitool://{}/", namespace(connection)))
+        .or_else(|| exposed.strip_prefix(&format!("agentmfa://{}/", namespace(connection))))
 }
 
 fn upstream_tool_candidate(connection: &BrokerConnection, tool: &str) -> String {
@@ -2428,7 +2435,7 @@ fn upstream_tool_candidate(connection: &BrokerConnection, tool: &str) -> String 
             }
         })
         .collect();
-    format!("agentmfa_{}_{}", namespace(connection), tool)
+    format!("multitool_{}_{}", namespace(connection), tool)
 }
 
 fn bounded_catalog_text(value: Option<&str>, max: usize) -> Option<String> {
@@ -2574,7 +2581,7 @@ async fn ensure_protocol_catalog(
     let Some(connections) = listed else {
         catalog.errors.push((
             "broker".into(),
-            "could not list AgentMFA connections".into(),
+            "could not list Multitool connections".into(),
         ));
         state
             .sessions
@@ -2583,15 +2590,16 @@ async fn ensure_protocol_catalog(
     };
     let mut taken: std::collections::HashSet<String> = native_names.map(str::to_string).collect();
     taken.extend([
-        "agentmfa_status".into(),
-        "agentmfa_connect".into(),
-        "agentmfa_search_tools".into(),
-        "agentmfa_call_tool".into(),
+        "multitool_status".into(),
+        "multitool_connect".into(),
+        "multitool_search_tools".into(),
+        "multitool_call_tool".into(),
     ]);
     let mut taken_resources = std::collections::HashSet::new();
     let mut taken_templates = std::collections::HashSet::new();
     let mut taken_prompts = std::collections::HashSet::new();
-    let tool_budget = std::env::var("AGENTMFA_TOOL_BUDGET")
+    let tool_budget = std::env::var("MULTITOOL_TOOL_BUDGET")
+        .or_else(|_| std::env::var("AGENTMFA_TOOL_BUDGET"))
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(40);
@@ -2883,7 +2891,7 @@ fn framed_upstream_text(text: &str, budget: usize) -> (String, bool) {
 /// exposed, connection-namespaced form, so an agent that passes it back to
 /// `resources/read` routes to the connection that produced it. Only a URI
 /// already carrying *this* connection's namespace is left alone: a foreign
-/// `agentmfa://` prefix is wrapped like any other upstream URI, so an
+/// `multitool://` prefix is wrapped like any other upstream URI, so an
 /// upstream cannot spoof a link that routes through another connection.
 fn expose_result_uri(object: &mut Map<String, Value>, connection: &BrokerConnection) {
     if let Some(Value::String(uri)) = object.get("uri") {
@@ -3020,7 +3028,7 @@ fn sanitize_upstream_result(
         if bytes > remaining.min(32 * 1024) {
             result.insert(
                 "structuredContent".into(),
-                json!({"agentmfa_notice": "Upstream structured content was truncated"}),
+                json!({"multitool_notice": "Upstream structured content was truncated"}),
             );
             truncated = true;
         } else {
@@ -3033,7 +3041,7 @@ fn sanitize_upstream_result(
         .as_object_mut();
     if let Some(metadata) = metadata {
         metadata.insert(
-            "agentmfa".into(),
+            "multitool".into(),
             json!({
                 "provenance": "untrusted upstream MCP content",
                 "text_truncated": truncated,
@@ -3526,7 +3534,7 @@ fn unauthorized_with_reason(id: Value, _reason: TokenError) -> Response {
     let mut response = rpc_error(
         StatusCode::UNAUTHORIZED,
         -32001,
-        "Unauthorized: pair this agent with AgentMFA first",
+        "Unauthorized: pair this agent with Multitool first",
         id,
     );
     response
@@ -3567,13 +3575,13 @@ mod tests {
             recent_ssh_refusal: None,
         };
         let unreserved = native_tools(std::slice::from_ref(&connection), std::iter::empty());
-        assert_eq!(unreserved[0].0, "agentmfa_notes_request");
+        assert_eq!(unreserved[0].0, "multitool_notes_request");
         let reserved = native_tools(
             std::slice::from_ref(&connection),
-            ["agentmfa_notes_request"],
+            ["multitool_notes_request"],
         );
         assert_eq!(reserved.len(), 1);
-        assert_ne!(reserved[0].0, "agentmfa_notes_request");
+        assert_ne!(reserved[0].0, "multitool_notes_request");
         assert!(reserved[0].0.len() <= 64);
     }
 
@@ -3603,8 +3611,12 @@ mod tests {
     fn resource_uris_round_trip_through_the_connection_namespace() {
         let docs = test_connection("docs");
         let exposed = expose_resource_uri(&docs, "docs://page/42");
-        assert_eq!(exposed, "agentmfa://docs/docs://page/42");
+        assert_eq!(exposed, "multitool://docs/docs://page/42");
         assert_eq!(strip_resource_uri(&docs, &exposed), Some("docs://page/42"));
+        assert_eq!(
+            strip_resource_uri(&docs, "agentmfa://docs/docs://page/42"),
+            Some("docs://page/42")
+        );
         // A different connection's prefix does not strip.
         assert_eq!(strip_resource_uri(&test_connection("wiki"), &exposed), None);
         // Non-identifier characters in the connection name are sanitized the
@@ -3612,10 +3624,10 @@ mod tests {
         let spaced = test_connection("internal docs");
         assert_eq!(
             expose_resource_uri(&spaced, "x"),
-            "agentmfa://internal_docs/x"
+            "multitool://internal_docs/x"
         );
         assert_eq!(
-            strip_resource_uri(&spaced, "agentmfa://internal_docs/x"),
+            strip_resource_uri(&spaced, "multitool://internal_docs/x"),
             Some("x")
         );
     }
@@ -3647,32 +3659,32 @@ mod tests {
                 ],
                 "contents": [
                     {"uri": "docs://page/2", "mimeType": "text/plain", "text": "body"},
-                    {"uri": "agentmfa://docs/docs://page/3", "text": "already exposed"},
-                    {"uri": "agentmfa://wiki/secret://x", "text": "spoofed foreign namespace"},
+                    {"uri": "multitool://docs/docs://page/3", "text": "already exposed"},
+                    {"uri": "multitool://wiki/secret://x", "text": "spoofed foreign namespace"},
                 ],
             }),
             128 * 1024,
             Some(&docs),
         );
-        assert_eq!(result["content"][0]["uri"], "agentmfa://docs/docs://home");
+        assert_eq!(result["content"][0]["uri"], "multitool://docs/docs://home");
         assert_eq!(
             result["content"][1]["resource"]["uri"],
-            "agentmfa://docs/docs://page/1"
+            "multitool://docs/docs://page/1"
         );
         assert_eq!(
             result["contents"][0]["uri"],
-            "agentmfa://docs/docs://page/2"
+            "multitool://docs/docs://page/2"
         );
         // This connection's own namespace is not double-wrapped…
         assert_eq!(
             result["contents"][1]["uri"],
-            "agentmfa://docs/docs://page/3"
+            "multitool://docs/docs://page/3"
         );
         // …but a spoofed foreign namespace is wrapped like any other URI, so
         // it can only route back through the connection that produced it.
         assert_eq!(
             result["contents"][2]["uri"],
-            "agentmfa://docs/agentmfa://wiki/secret://x"
+            "multitool://docs/multitool://wiki/secret://x"
         );
     }
 
@@ -3694,7 +3706,7 @@ mod tests {
         assert_eq!(text.matches(UNTRUSTED_END).count(), 1);
         assert!(text.contains("elided upstream boundary marker"));
         assert!(result.get("unknown_large_field").is_none());
-        assert_eq!(result["_meta"]["agentmfa"]["text_truncated"], true);
+        assert_eq!(result["_meta"]["multitool"]["text_truncated"], true);
         assert!(result.to_string().len() < 5_000);
     }
 }

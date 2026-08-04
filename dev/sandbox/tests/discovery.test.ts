@@ -61,7 +61,7 @@ test('the manifest never carries the key itself', async () => {
 test('instructions are served as markdown to an unauthenticated caller', async () => {
   const response = await broker.agentRaw('GET', '/instructions', { token: null });
   assert.equal(response.status, 200);
-  assert.match(response.text, /^# AKA: broker instructions/);
+  assert.match(response.text, /^# Multitool: broker instructions/);
   assert.ok(response.text.includes(broker.socketPath));
   assert.ok(response.text.includes('403 denied_by_policy'));
   assert.ok(!response.text.includes(broker.agentToken));

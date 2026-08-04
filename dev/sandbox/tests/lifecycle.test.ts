@@ -2,14 +2,14 @@
 //
 // Matrix row: things that happen to the broker rather than to one
 // connection — a restart, a key rotation, state that must survive both, and
-// the `mfa` commands the sandbox walkthrough tells people to run.
+// the `multitool` commands the sandbox walkthrough tells people to run.
 
 import assert from 'node:assert/strict';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import test, { after, before } from 'node:test';
 
-import { Broker, connectionNames, mfaBinary } from './lib/broker';
+import { Broker, connectionNames, multitoolBinary } from './lib/broker';
 import { waitFor } from './lib/http';
 import { parseDsn, PgConnection } from './lib/pgwire';
 import { run } from './lib/proc';
@@ -35,28 +35,28 @@ test('the control socket is private to its owner', async () => {
 });
 
 test('a second broker refuses to serve the same state', async () => {
-  const result = await run(mfaBinary(), ['serve', '--root', broker.root, '--no-mcp'], {
+  const result = await run(multitoolBinary(), ['serve', '--root', broker.root, '--no-mcp'], {
     timeoutMs: 30_000,
   });
   assert.notEqual(result.code, 0, 'the lease is held by the running broker');
   assert.match(result.stderr, /already listening|already running|lease|lock/i);
 });
 
-test('`mfa status` reports a running broker, and a stopped one', async () => {
-  const running = await run(mfaBinary(), ['status', '--root', broker.root], { timeoutMs: 30_000 });
+test('`multitool status` reports a running broker, and a stopped one', async () => {
+  const running = await run(multitoolBinary(), ['status', '--root', broker.root], { timeoutMs: 30_000 });
   assert.equal(running.code, 0, running.stderr);
   assert.match(`${running.stdout}${running.stderr}`, /broker/i);
 
   const elsewhere = join(broker.root, 'not-a-broker');
-  const stopped = await run(mfaBinary(), ['status', '--root', elsewhere], { timeoutMs: 30_000 });
+  const stopped = await run(multitoolBinary(), ['status', '--root', elsewhere], { timeoutMs: 30_000 });
   assert.notEqual(stopped.code, 0, 'no broker there is a nonzero exit, not a crash');
   await rm(elsewhere, { recursive: true, force: true });
 });
 
-test('`mfa activity` reads the audit trail while the broker runs', async () => {
+test('`multitool activity` reads the audit trail while the broker runs', async () => {
   await broker.call({ connection: connectionNames.http, method: 'GET', path: '/authenticated' });
   const result = await run(
-    mfaBinary(),
+    multitoolBinary(),
     ['activity', '--root', broker.root, '--json', '--limit', '50'],
     { timeoutMs: 30_000 },
   );
@@ -67,18 +67,18 @@ test('`mfa activity` reads the audit trail while the broker runs', async () => {
   assert.ok(!result.stdout.includes(sandbox.httpToken));
 });
 
-test('default `mfa dsn` exports eval into a working psql session', async () => {
+test('default `multitool dsn` exports eval into a working psql session', async () => {
   const result = await run(
     'sh',
     [
       '-c',
-      'eval "$("$AKA_TEST_MFA" dsn "$AKA_TEST_CONNECTION" --root "$AKA_TEST_ROOT" ' +
+      'eval "$("$AKA_TEST_MULTITOOL" dsn "$AKA_TEST_CONNECTION" --root "$AKA_TEST_ROOT" ' +
         '--client cli-tests)" && psql -X -A -t -c "SELECT 1"',
     ],
     {
       env: {
         ...process.env,
-        AKA_TEST_MFA: mfaBinary(),
+        AKA_TEST_MULTITOOL: multitoolBinary(),
         AKA_TEST_CONNECTION: connectionNames.pg,
         AKA_TEST_ROOT: broker.root,
       },
@@ -92,17 +92,17 @@ test('default `mfa dsn` exports eval into a working psql session', async () => {
   assert.ok(session, 'the CLI labels its own activity');
 });
 
-test('`mfa instructions` matches what the broker serves agents', async () => {
+test('`multitool instructions` matches what the broker serves agents', async () => {
   const served = await broker.agentRaw('GET', '/instructions', { token: null });
-  const printed = await run(mfaBinary(), ['instructions', '--root', broker.root], {
+  const printed = await run(multitoolBinary(), ['instructions', '--root', broker.root], {
     timeoutMs: 30_000,
   });
   assert.equal(printed.code, 0, printed.stderr);
   assert.equal(printed.stdout.trim(), served.text.trim());
 });
 
-test('`mfa skill` emits the same document as a skill file', async () => {
-  const printed = await run(mfaBinary(), ['skill', '--root', broker.root], { timeoutMs: 30_000 });
+test('`multitool skill` emits the same document as a skill file', async () => {
+  const printed = await run(multitoolBinary(), ['skill', '--root', broker.root], { timeoutMs: 30_000 });
   assert.equal(printed.code, 0, printed.stderr);
   assert.ok(printed.stdout.includes(broker.socketPath));
 });

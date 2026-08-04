@@ -1,7 +1,7 @@
 //! Shared client for talking to a running broker over its Unix control
 //! socket: minimal HTTP, shared-key loading, and authenticated capability
-//! opens. `mfa mcp` builds its discovery loop on the low-level pieces;
-//! `mfa dsn` and `mfa ssh` drive [`open_session`] directly.
+//! opens. `multitool mcp` builds its discovery loop on the low-level pieces;
+//! `multitool dsn` and `multitool ssh` drive [`open_session`] directly.
 
 use std::path::Path;
 
@@ -30,7 +30,7 @@ impl std::fmt::Display for OpenSessionError {
         match self {
             Self::NoBroker { socket } => write!(
                 f,
-                "no broker is running at {} — start the AgentMFA app or `mfa serve`",
+                "no broker is running at {} — start the Multitool app or `multitool serve`",
                 socket.display()
             ),
             Self::Refused { status, detail, .. } => {
@@ -81,7 +81,7 @@ pub async fn unix_http(
         request.push_str(&format!("Authorization: Bearer {bearer}\r\n"));
     }
     if let Some(label) = client_label {
-        request.push_str(&format!("X-AgentMFA-Client: {label}\r\n"));
+        request.push_str(&format!("X-Multitool-Client: {label}\r\n"));
     }
     if let Some(body) = body {
         request.push_str(&format!(
@@ -276,7 +276,7 @@ mod tests {
             body: String,
         ) -> ([(&'static str, &'static str); 1], String) {
             assert_eq!(headers.get("authorization").unwrap(), "Bearer aka_testkey");
-            assert_eq!(headers.get("x-agentmfa-client").unwrap(), "test-cli");
+            assert_eq!(headers.get("x-multitool-client").unwrap(), "test-cli");
             let request: serde_json::Value = serde_json::from_str(&body).unwrap();
             assert_eq!(request["connection"], "analytics");
             (

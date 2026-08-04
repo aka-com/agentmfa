@@ -473,7 +473,7 @@ fn issued_endpoint_dto(info: IssuedEndpointInfo) -> IssuedEndpointDto {
 pub fn agent_setup_instructions(socket: &str, token_path: &str) -> String {
     format!(
         concat!(
-            "Connect to the local AgentMFA broker. Read its current instructions, ",
+            "Connect to the local Multitool broker. Read its current instructions, ",
             "then list the available connections:\n\n",
             "curl -fsS --unix-socket {socket} \\\n",
             "  -H \"Authorization: Bearer $(cat {token_path})\" \\\n",
@@ -489,7 +489,7 @@ pub fn agent_setup_instructions(socket: &str, token_path: &str) -> String {
 pub fn agent_setup_instructions_remote(base: &str) -> String {
     let base = base.trim_end_matches('/');
     format!(
-        "Connect to the AgentMFA broker at {base}. Read its current instructions, then list the available connections:\n\ncurl -fsS -H \"Authorization: Bearer <key>\" {base}/instructions\n\nAuthenticate with the broker's shared key — ask the broker's operator for it (on the broker host it lives in ~/.aka/token). MCP clients connect straight to {base}/mcp with the same Authorization header."
+        "Connect to the Multitool broker at {base}. Read its current instructions, then list the available connections:\n\ncurl -fsS -H \"Authorization: Bearer <key>\" {base}/instructions\n\nAuthenticate with the broker's shared key — ask the broker's operator for it (on the broker host it lives in ~/.aka/token). MCP clients connect straight to {base}/mcp with the same Authorization header."
     )
 }
 
@@ -1392,7 +1392,7 @@ pub trait ManagementBackend: Send + Sync {
         connection_id: Uuid,
         audit_statements: Option<bool>,
     ) -> ManageResult<bool>;
-    /// Require the `authenticate@agentmfa.dev` extension on this connection's
+    /// Require the `authenticate@multitool.dev` extension on this connection's
     /// SSH endpoint socket, or stop requiring it.
     async fn set_endpoint_require_auth(
         &self,

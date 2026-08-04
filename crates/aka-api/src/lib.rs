@@ -214,7 +214,7 @@ impl std::fmt::Display for ManageError {
             Self::InvalidManageToken { detail: Some(detail) } => f.write_str(detail),
             Self::InvalidManageToken { detail: None } => write!(
                 f,
-                "the broker rejected the management token; re-issue it with `mfa manage token` and enter the new one"
+                "the broker rejected the management token; re-issue it with `multitool manage token` and enter the new one"
             ),
             Self::Unreachable { message } => {
                 write!(f, "the remote broker could not be reached: {message}")
@@ -317,7 +317,7 @@ pub struct EndpointChip {
     /// SSH only: whether the agent socket makes a caller present the endpoint
     /// secret before it will list or sign. Carried on the chip because it
     /// changes what the row must say — an authenticated socket is reached
-    /// through `mfa ssh-agent`, not by pointing `IdentityAgent` at the path.
+    /// through `multitool ssh-agent`, not by pointing `IdentityAgent` at the path.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_auth: bool,
     /// Restart-safe endpoint deadline, plus broker-clock remaining seconds for

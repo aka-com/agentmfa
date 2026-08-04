@@ -244,14 +244,15 @@ fn err_unknown_connection(broker: &Arc<Broker>) -> Response {
 
 /// The header a client may set to label itself in the activity log and the
 /// sessions band. Self-reported and cosmetic — never authorization.
-pub const CLIENT_LABEL_HEADER: &str = "x-agentmfa-client";
+pub const CLIENT_LABEL_HEADER: &str = "x-multitool-client";
+const LEGACY_CLIENT_LABEL_HEADER: &str = "x-agentmfa-client";
 
 /// The label used when a client does not name itself.
 pub const DEFAULT_CLIENT_LABEL: &str = "agent";
 
 /// Bearer-token authentication against the shared broker key.
 pub struct Authed {
-    /// Self-reported client label (`X-AgentMFA-Client`), for attribution
+    /// Self-reported client label (`X-Multitool-Client`), for attribution
     /// only.
     pub client: String,
     /// The identity's stable principal id.
@@ -274,6 +275,7 @@ impl FromRequestParts<AppState> for Authed {
                 let client = parts
                     .headers
                     .get(CLIENT_LABEL_HEADER)
+                    .or_else(|| parts.headers.get(LEGACY_CLIENT_LABEL_HEADER))
                     .and_then(|v| v.to_str().ok())
                     .map(str::trim)
                     .filter(|v| validate_agent_name(v))
@@ -1246,7 +1248,7 @@ async fn post_http(
                         StatusCode::FORBIDDEN,
                         ErrorReason::DeniedByPolicy,
                         format!(
-                            "the tool {tool:?} is not enabled on {}; the user can enable it in AgentMFA",
+                            "the tool {tool:?} is not enabled on {}; the user can enable it in Multitool",
                             conn.name
                         ),
                     );
@@ -1412,7 +1414,7 @@ async fn post_elicit(
             StatusCode::FORBIDDEN,
             ErrorReason::DeniedByPolicy,
             format!(
-                "{} is not enabled for agents; the user can enable it in AgentMFA",
+                "{} is not enabled for agents; the user can enable it in Multitool",
                 conn.name
             ),
         );
@@ -1519,7 +1521,7 @@ async fn post_connect_request(
             StatusCode::ACCEPTED,
             Json(serde_json::json!({
                 "status": if fresh { "requested" } else { "already_requested" },
-                "detail": "Ask the user to add and wire this tool in AgentMFA; \
+                "detail": "Ask the user to add and wire this tool in Multitool; \
                            its tools appear once they do.",
             })),
         )
@@ -2100,7 +2102,7 @@ async fn run_allowed(
             StatusCode::FORBIDDEN,
             ErrorReason::DeniedByPolicy,
             format!(
-                "{} is not enabled for agents; the user can enable it in AgentMFA",
+                "{} is not enabled for agents; the user can enable it in Multitool",
                 conn.name
             ),
         );

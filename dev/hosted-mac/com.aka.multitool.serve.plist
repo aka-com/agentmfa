@@ -2,15 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- LaunchAgent (NOT a LaunchDaemon: the broker needs the login Keychain)
-     that keeps a hosted AKA broker running. Install at
-     ~/Library/LaunchAgents/com.aka.serve.plist and edit the paths/URL. -->
+     that keeps a hosted Multitool broker running. Install at
+     ~/Library/LaunchAgents/com.aka.multitool.serve.plist and edit the paths/URL. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.aka.serve</string>
+  <string>com.aka.multitool.serve</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/mfa</string>
+    <string>/usr/local/bin/multitool</string>
     <string>serve</string>
     <string>--listen</string>
     <string>127.0.0.1:4780</string>
@@ -22,8 +22,8 @@
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/tmp/aka-serve.log</string>
+  <string>/tmp/multitool-serve.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/aka-serve.log</string>
+  <string>/tmp/multitool-serve.log</string>
 </dict>
 </plist>

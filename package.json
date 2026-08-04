@@ -1,5 +1,5 @@
 {
-  "name": "aka-desktop",
+  "name": "multitool-desktop",
   "private": true,
   "scripts": {
     "build": "bash scripts/build.sh",

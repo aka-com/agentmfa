@@ -86,8 +86,8 @@ if [[ "$(uname)" == "Darwin" ]]; then
 
   profile=""
   if [[ -n "${APPLE_PROVISIONING_PROFILE:-}" ]]; then
-    if [[ -n "${AGENTMFA_NO_KEYCHAIN_ENTITLEMENT:-}" ]]; then
-      echo "APPLE_PROVISIONING_PROFILE and AGENTMFA_NO_KEYCHAIN_ENTITLEMENT ask for" >&2
+    if [[ -n "${MULTITOOL_NO_KEYCHAIN_ENTITLEMENT:-${AGENTMFA_NO_KEYCHAIN_ENTITLEMENT:-}}" ]]; then
+      echo "APPLE_PROVISIONING_PROFILE and MULTITOOL_NO_KEYCHAIN_ENTITLEMENT ask for" >&2
       echo "opposite things. Unset one." >&2
       exit 1
     fi
@@ -110,7 +110,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
       -c "Add :keychain-access-groups:0 string ${team_id}.${bundle_id}" \
       "$entitlements" >/dev/null
     echo "Keychain access group: ${team_id}.${bundle_id}"
-  elif [[ -n "${AGENTMFA_NO_KEYCHAIN_ENTITLEMENT:-}" ]]; then
+  elif [[ -n "${MULTITOOL_NO_KEYCHAIN_ENTITLEMENT:-${AGENTMFA_NO_KEYCHAIN_ENTITLEMENT:-}}" ]]; then
     # Deliberate opt-out, for signing setups with no usable team ID. The app
     # still runs; it falls back to the login keychain, which means an OS
     # approval dialog per secret per build.
@@ -118,7 +118,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
     echo "         prompt for Keychain access on every secret it reads." >&2
   else
     echo "Could not determine the signing team ID from APPLE_SIGNING_IDENTITY." >&2
-    echo "Set APPLE_TEAM_ID, or set AGENTMFA_NO_KEYCHAIN_ENTITLEMENT=1 to build" >&2
+    echo "Set APPLE_TEAM_ID, or set MULTITOOL_NO_KEYCHAIN_ENTITLEMENT=1 to build" >&2
     echo "without the entitlement and accept a Keychain prompt per secret." >&2
     exit 1
   fi

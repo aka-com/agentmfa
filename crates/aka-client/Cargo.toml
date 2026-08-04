@@ -3,7 +3,7 @@ name = "aka-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AKA manage-plane client: the remote ManagementBackend the desktop shell uses against a hosted broker"
+description = "Multitool manage-plane client: the remote ManagementBackend the desktop shell uses against a hosted broker"
 
 [dependencies]
 aka-api = { workspace = true }

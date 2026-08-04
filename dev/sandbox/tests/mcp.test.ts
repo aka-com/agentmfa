@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
 
-import { Broker, connectionNames, mfaBinary } from './lib/broker';
+import { Broker, connectionNames, multitoolBinary } from './lib/broker';
 import { waitFor } from './lib/http';
 import { McpClient } from './lib/mcpclient';
 import { run } from './lib/proc';
@@ -331,21 +331,21 @@ test('an input request on a disabled connection is refused before the user sees 
 
 test('the MCP host exposes every wired connection as a tool', async () => {
   const initialized = await host.initialize();
-  assert.equal((initialized.serverInfo as { name: string }).name, 'agentmfa');
+  assert.equal((initialized.serverInfo as { name: string }).name, 'multitool');
   assert.match(host.session ?? '', /^[0-9a-f-]{36}$/);
 
   const tools = (await host.tools()).map((tool) => tool.name);
   // An API connection is called; a database is opened; an upstream MCP
   // server's own tools are re-exposed under the connection's name.
-  assert.ok(tools.includes('agentmfa_sandbox-http_request'), tools.join(', '));
-  assert.ok(tools.includes('agentmfa_sandbox-postgres_open'), tools.join(', '));
+  assert.ok(tools.includes('multitool_sandbox-http_request'), tools.join(', '));
+  assert.ok(tools.includes('multitool_sandbox-postgres_open'), tools.join(', '));
   assert.ok(
     tools.some((name) => name.includes('sandbox_echo')),
     tools.join(', '),
   );
 });
 
-test('the `mfa mcp` binary bridges a real stdio initialize', async () => {
+test('the `multitool mcp` binary bridges a real stdio initialize', async () => {
   const initialize = {
     jsonrpc: '2.0',
     id: 41,
@@ -357,7 +357,7 @@ test('the `mfa mcp` binary bridges a real stdio initialize', async () => {
     },
   };
   const result = await run(
-    mfaBinary(),
+    multitoolBinary(),
     ['mcp', '--root', broker.root, '--client', 'cli-spawn'],
     { input: `${JSON.stringify(initialize)}\n`, timeoutMs: 30_000 },
   );
@@ -371,12 +371,12 @@ test('the `mfa mcp` binary bridges a real stdio initialize', async () => {
   assert.ok(response?.result, `initialize response missing from ${result.stdout}`);
   assert.equal(
     ((response.result as Record<string, unknown>).serverInfo as Record<string, unknown>).name,
-    'agentmfa',
+    'multitool',
   );
 });
 
 test('a tool call through the host reaches the upstream', async () => {
-  const result = await host.callTool('agentmfa_sandbox-http_request', {
+  const result = await host.callTool('multitool_sandbox-http_request', {
     method: 'GET',
     path: '/authenticated',
   });
@@ -400,7 +400,7 @@ test('a disabled connection is refused by the broker and gone from a fresh sessi
   try {
     // A client that already listed the tool still holds its name; the
     // refusal comes from the broker, not from the listing being current.
-    const refused = await host.callTool('agentmfa_sandbox-http_request', {
+    const refused = await host.callTool('multitool_sandbox-http_request', {
       method: 'GET',
       path: '/authenticated',
     });
@@ -414,7 +414,7 @@ test('a disabled connection is refused by the broker and gone from a fresh sessi
     const fresh = new McpClient(broker.socketPath, broker.agentToken);
     await fresh.initialize();
     const names = (await fresh.tools()).map((tool) => tool.name);
-    assert.ok(!names.includes('agentmfa_sandbox-http_request'), names.join(', '));
+    assert.ok(!names.includes('multitool_sandbox-http_request'), names.join(', '));
   } finally {
     await broker.setAccess(connection.id, true);
   }

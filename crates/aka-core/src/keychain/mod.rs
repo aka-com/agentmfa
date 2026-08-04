@@ -9,14 +9,14 @@
 //!   "…wants to use your confidential information stored in…" dialog, once per
 //!   item, per process, until someone clicks *Always Allow*. This is what the
 //!   `keyring` crate's apple-native backend targets, and it is the entire
-//!   source of AgentMFA's Keychain prompt fatigue.
+//!   source of Multitool's Keychain prompt fatigue.
 //!
 //! - The **data-protection keychain** (`kSecUseDataProtectionKeychain`) decides
 //!   access with *code identity*: an item belongs to a keychain access group,
 //!   and a process may open the group only if its code signature carries the
 //!   matching `keychain-access-groups` entitlement. There is no per-item ACL,
 //!   so there is no dialog and no "Always Allow" — a correctly signed
-//!   AgentMFA reads its own items silently, forever, and a process without
+//!   Multitool reads its own items silently, forever, and a process without
 //!   the entitlement is not prompted to approve anything; it simply sees a
 //!   keychain with nothing in it.
 //!
@@ -27,7 +27,7 @@
 //! it is storing into. Anything asking "can I use this keychain?" has to ask
 //! with a write — see [`KeychainApi::data_protection_available`].
 //!
-//! AgentMFA uses the data-protection keychain wherever the running binary can
+//! Multitool uses the data-protection keychain wherever the running binary can
 //! (see [`Keychain`] and [`resolve`]), and keeps the login keychain as the
 //! fallback for builds that cannot carry the entitlement — `cargo run`, `tauri
 //! dev`, ad-hoc-signed local builds, and the unsigned `aka` binaries published
@@ -63,7 +63,7 @@ pub const KEYCHAIN_ENV: &str = "AKA_KEYCHAIN";
 /// one item, holding nothing.
 const PROBE_SERVICE: &str = "com.aka.desktop.entitlement-probe";
 const PROBE_ACCOUNT: &str = "probe";
-const PROBE_LABEL: &str = "AgentMFA (keychain probe)";
+const PROBE_LABEL: &str = "Multitool (keychain probe)";
 const PROBE_VALUE: &[u8] = b"entitlement probe";
 
 /// Which of the two macOS keychains an item lives in.
@@ -179,7 +179,7 @@ impl From<KeychainError> for CoreError {
     }
 }
 
-/// The Security.framework surface AgentMFA needs, as a trait so the policy
+/// The Security.framework surface Multitool needs, as a trait so the policy
 /// above it — keychain selection, lazy migration, labelling — is exercised by
 /// tests on every platform rather than only on a signed Mac.
 ///
@@ -311,15 +311,15 @@ fn resolve_for_store(
             Err(error) if recorded == Some(Keychain::DataProtection) => {
                 Err(CoreError::Vault(format!(
                     "this store's secret values are in the macOS data-protection keychain, \
-                     but {error}. Use the signed AgentMFA app for this store, or set \
+                     but {error}. Use the signed Multitool app for this store, or set \
                      {KEYCHAIN_ENV}=login to fall back to the login keychain (which will \
                      not see those values)."
                 )))
             }
             Err(error) if store_exists && recorded.is_none() => Err(CoreError::Vault(format!(
                 "this store already has state but its macOS keychain marker is missing or \
-                 unreadable, so AKA will not silently fall back to an empty login keychain \
-                 ({error}). Restore keychain.json, use the signed AgentMFA app, or set \
+                 unreadable, so Multitool will not silently fall back to an empty login keychain \
+                 ({error}). Restore keychain.json, use the signed Multitool app, or set \
                  {KEYCHAIN_ENV}=login explicitly if the fallback is intentional."
             ))),
             Err(error) => {
@@ -337,7 +337,7 @@ fn resolve_for_store(
 ///
 /// There is no store marker to consult and nothing to fail loudly over: a
 /// binary that cannot reach the data-protection keychain falls back, finds
-/// nothing there, and costs the user one `mfa manage login`. Losing a secret
+/// nothing there, and costs the user one `multitool manage login`. Losing a secret
 /// value that way would be unrecoverable, which is why [`resolve`] refuses
 /// instead.
 pub fn best_effort<A: KeychainApi + ?Sized>(api: &A) -> Keychain {
@@ -425,13 +425,13 @@ pub fn write_record(path: &Path, keychain: Keychain) {
 /// The label migrated items get. Items the `keyring` backend wrote are all
 /// labelled with the bare service name, so there is no per-secret title to
 /// carry over; the next rename or value replacement writes the real one.
-const MIGRATED_LABEL: &str = "AgentMFA";
+const MIGRATED_LABEL: &str = "Multitool";
 
 fn label_for(name: &str) -> String {
     if name.is_empty() {
         MIGRATED_LABEL.to_string()
     } else {
-        format!("AgentMFA ({name})")
+        format!("Multitool ({name})")
     }
 }
 
@@ -659,7 +659,7 @@ pub(crate) mod tests {
         fn seed(&self, keychain: Keychain, service: &str, account: &str, value: &str) {
             self.items.lock().unwrap().insert(
                 (keychain, service.into(), account.into()),
-                ("AgentMFA".into(), value.as_bytes().to_vec()),
+                ("Multitool".into(), value.as_bytes().to_vec()),
             );
         }
 
@@ -996,7 +996,7 @@ pub(crate) mod tests {
         let account = id.to_string();
         assert_eq!(
             api.peek(Keychain::DataProtection, SERVICE, &account),
-            Some(("AgentMFA (API_KEY)".into(), "s3cr3t".into()))
+            Some(("Multitool (API_KEY)".into(), "s3cr3t".into()))
         );
         assert_eq!(api.peek(Keychain::Login, SERVICE, &account), None);
         assert_eq!(&*vault.get(&id).await.unwrap(), "s3cr3t");
@@ -1107,7 +1107,7 @@ pub(crate) mod tests {
         assert_eq!(
             api.peek(Keychain::DataProtection, SERVICE, &id.to_string())
                 .map(|(label, _)| label),
-            Some("AgentMFA (RENAMED)".into())
+            Some("Multitool (RENAMED)".into())
         );
 
         // The index owns the name; a vault item that is not there must not

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AgentMFA",
+  "productName": "Multitool",
   "version": "0.1.0",
   "identifier": "com.aka.desktop",
   "build": {
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "AgentMFA",
+        "title": "Multitool",
         "width": 860,
         "height": 700,
         "minWidth": 720,
@@ -29,7 +29,7 @@
       },
       {
         "label": "dropdown",
-        "title": "AgentMFA",
+        "title": "Multitool",
         "width": 430,
         "height": 600,
         "resizable": false,
@@ -48,7 +48,7 @@
       "iconPath": "icons/tray.png",
       "iconAsTemplate": true,
       "showMenuOnLeftClick": false,
-      "tooltip": "AgentMFA"
+      "tooltip": "Multitool"
     },
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'"

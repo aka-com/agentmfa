@@ -1,9 +1,9 @@
-// The matrix's empty cells: broker behaviour AKA does not implement.
+// The matrix's empty cells: broker behaviour Multitool does not implement.
 //
 // Everything here is a passing stub (see lib/pending.ts). They are in the
 // suite on purpose: the matrix is written from what an operator would
 // expect of something sitting between an agent and a database, a shell, or
-// an API, and the cells AKA does not fill are as much a part of that
+// an API, and the cells Multitool does not fill are as much a part of that
 // picture as the ones it does. Each stub names the behaviour, what happens
 // instead, and where in the tree that decision is made — so implementing
 // one starts from a test that already exists.
@@ -27,7 +27,7 @@ import { pending } from './lib/pending';
 test('agents are not authorized separately from one another', (t) => {
   // One shared key covers every local agent (crates/aka-core/src/policy.rs:
   // "authorization is a property of the connection, not of an (agent,
-  // connection) pair"), and `X-AgentMFA-Client` is a self-reported label
+  // connection) pair"), and `X-Multitool-Client` is a self-reported label
   // used for attribution. Approval *windows* are scoped per label, but a
   // second agent that claims the first one's label rides its window, and
   // nothing stops it: same-user processes were never securely

@@ -60,7 +60,7 @@ export async function fixtureUp(): Promise<boolean> {
   }
 }
 
-/** The sandbox SSH key AKA is given as the connection's credential. */
+/** The sandbox SSH key Multitool is given as the connection's credential. */
 export async function sshPrivateKey(): Promise<string> {
   return readFile(sandbox.sshKeyPath, 'utf8');
 }

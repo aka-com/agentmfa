@@ -310,7 +310,7 @@ impl FormError {
             ManageError::InvalidManageToken { detail } => Self::global(
                 "system",
                 "invalid_manage_token",
-                "The broker rejected the management token — re-enter it from `mfa manage token`",
+                "The broker rejected the management token — re-enter it from `multitool manage token`",
                 detail,
             ),
             ManageError::Unreachable { message } => Self::global(
@@ -1359,7 +1359,7 @@ pub async fn set_audit_statements(
         .map_err(|e| e.to_string())
 }
 
-/// Require (or stop requiring) the `authenticate@agentmfa.dev` extension on an
+/// Require (or stop requiring) the `authenticate@multitool.dev` extension on an
 /// SSH endpoint's agent socket.
 ///
 /// Gating is asymmetric and lives in the broker: turning it on only narrows,
@@ -1623,7 +1623,7 @@ fn ssh_scp_command(connection: &aka_api::ConnectionDto, socket: &str) -> String 
         .unwrap_or_default();
     if endpoint_requires_auth(connection) {
         return format!(
-            "mfa ssh-agent {} -- scp{port} {} <file> {destination}:",
+            "multitool ssh-agent {} -- scp{port} {} <file> {destination}:",
             shell_quoted(&connection.name),
             ssh_flags()
         );
@@ -1664,11 +1664,11 @@ fn ssh_config_block(connection: &aka_api::ConnectionDto, socket: &str) -> Option
     // comment is the missing half of the block: without it the config is
     // syntactically fine and silently signs nothing.
     if endpoint_requires_auth(connection) {
-        let forwarder = format!("~/.ssh/agentmfa-{alias}.sock");
+        let forwarder = format!("~/.ssh/multitool-{alias}.sock");
         lines.insert(
             0,
             format!(
-                "# Needs a forwarder running: mfa ssh-agent {} --socket {forwarder}",
+                "# Needs a forwarder running: multitool ssh-agent {} --socket {forwarder}",
                 shell_quoted(&connection.name)
             ),
         );
@@ -2262,11 +2262,11 @@ mod tests {
     #[test]
     fn endpoint_copy_renderers_preserve_credentials_and_shell_quoting() {
         let dsn =
-            "postgresql://deploy:end_test@/app?host=/tmp/AKA Endpoints&port=5432&sslmode=disable";
+            "postgresql://deploy:end_test@/app?host=/tmp/Multitool Endpoints&port=5432&sslmode=disable";
         assert_eq!(
             pg_libpq_keywords(dsn).as_deref(),
             Some(
-                "host='/tmp/AKA Endpoints' port=5432 dbname=app user=deploy \
+                "host='/tmp/Multitool Endpoints' port=5432 dbname=app user=deploy \
                  password=end_test sslmode=disable"
             )
         );

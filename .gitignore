@@ -23,4 +23,4 @@ src-tauri/tauri.build.conf.json
 /dev/sandbox/state/
 
 # Staged CLI binaries for the npm distribution (scripts/npm-dist.sh)
-/npm/agentmfa-*/bin/
+/npm/multitool-*/bin/

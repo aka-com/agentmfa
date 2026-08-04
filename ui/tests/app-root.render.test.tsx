@@ -109,7 +109,7 @@ test.after(async () => {
 });
 
 test('the application root boots against the mock bridge', () => {
-  assert.ok(testingLibrary.getAllByText(document.body, 'AgentMFA').length >= 1);
+  assert.ok(testingLibrary.getAllByText(document.body, 'Multitool').length >= 1);
   assert.ok(testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }));
 });
 

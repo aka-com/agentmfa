@@ -1,32 +1,32 @@
-//! `mfa` CLI.
+//! `multitool` CLI.
 //!
-//! - `mfa skill` emits the `/instructions` content as a checked-in
+//! - `multitool skill` emits the `/instructions` content as a checked-in
 //!   skill file, the same content the daemon serves, so the convention
 //!   layer can't drift from the daemon.
-//! - `mfa serve` runs the broker headless, so the whole control plane +
+//! - `multitool serve` runs the broker headless, so the whole control plane +
 //!   the PG data plane can be exercised without the desktop UI (useful for
 //!   agent integration and CI).
-//! - `mfa secret add|list|rename|replace|rm` and
-//!   `mfa conn add|list|show|update|rename|rm|enable|disable|test` manage the
+//! - `multitool secret add|list|rename|replace|rm` and
+//!   `multitool conn add|list|show|update|rename|rm|enable|disable|test` manage the
 //!   store from the terminal — the dev/headless counterpart of the app's
 //!   Secrets and Tools tabs — with the same validation, so a `serve --root`
 //!   harness never hand-writes (sealed) store files. Mutations beyond
 //!   seeding run through the broker's own `ui_*` layer, so audit entries
 //!   and access/endpoint side effects cannot drift from the app.
-//! - `mfa sessions`, `mfa requests`, and `mfa settings` expose the remaining
+//! - `multitool sessions`, `multitool requests`, and `multitool settings` expose the remaining
 //!   day-to-day broker visibility and lifecycle controls without requiring
 //!   the desktop UI. The request command can hold a leased headless inbox and
 //!   answer approvals or elicitations.
-//! - `mfa dsn` / `mfa ssh` open data-plane sessions on a running broker.
+//! - `multitool dsn` / `multitool ssh` open data-plane sessions on a running broker.
 //!   Postgres prints shell-safe `PG*` exports by default so the ticket stays
 //!   out of argv; SSH prints the `SSH_AUTH_SOCK` path.
-//! - `mfa key` / `mfa status` / `mfa activity` are the operator's view:
+//! - `multitool key` / `multitool status` / `multitool activity` are the operator's view:
 //!   the shared agent key (and its rotation), whether a broker is up and
 //!   what it serves, and the audit trail.
 //! - Management commands work online too: against the running local
 //!   broker over its socket, or a hosted broker via `--broker <url>` —
 //!   both through the manage API, authorized by the management token
-//!   (`mfa manage login` stores it). With no broker running they fall
+//!   (`multitool manage login` stores it). With no broker running they fall
 //!   back to the offline construction above.
 
 use std::os::unix::fs::FileTypeExt as _;
@@ -113,9 +113,9 @@ fn parse_field_value(value: &str) -> Result<String, String> {
 
 #[derive(Parser)]
 #[command(
-    name = "mfa",
+    name = "multitool",
     version,
-    about = "AgentMFA broker CLI",
+    about = "Multitool broker CLI",
     after_help = "EXIT CODES:\n  1  generic/internal failure\n  2  invalid command usage or input\n  3  broker is not running\n  4  authentication or confirmation failed\n  5  requested object was not found\n  6  state conflict\n  7  remote broker is unreachable\n  8  connection test failed"
 )]
 struct Cli {
@@ -131,9 +131,9 @@ struct Cli {
 enum Command {
     /// Emit broker instructions as a skill file. With --broker, fetches that
     /// broker's authoritative setup. Prints to stdout by default; `--write`
-    /// writes .claude/skills/mfa/SKILL.md.
+    /// writes .claude/skills/multitool/SKILL.md.
     Skill {
-        /// Write the file to `path` (default .claude/skills/mfa/SKILL.md)
+        /// Write the file to `path` (default .claude/skills/multitool/SKILL.md)
         /// instead of printing to stdout.
         #[arg(long)]
         write: bool,
@@ -141,11 +141,11 @@ enum Command {
         #[arg(long, conflicts_with = "user", requires = "write")]
         path: Option<PathBuf>,
         /// With --write, target the user-level skills directory
-        /// (~/.claude/skills/mfa/SKILL.md) instead of the repo-local
+        /// (~/.claude/skills/multitool/SKILL.md) instead of the repo-local
         /// default, so every project's agents see it.
         #[arg(long, requires = "write")]
         user: bool,
-        /// Overwrite a non-AgentMFA skill file. Generated AgentMFA skill
+        /// Overwrite a non-Multitool skill file. Generated Multitool skill
         /// files can be refreshed without this flag.
         #[arg(long, requires = "write")]
         force: bool,
@@ -161,7 +161,7 @@ enum Command {
     },
     /// Print a shell completion script to stdout.
     ///
-    /// `mfa completions zsh > "${fpath[1]}/_mfa"`, or source it from your
+    /// `multitool completions zsh > "${fpath[1]}/_multitool"`, or source it from your
     /// shell's rc file. The script is generated from this CLI's own command
     /// tree, so it cannot drift from the commands it completes.
     Completions {
@@ -181,7 +181,7 @@ enum Command {
     },
     /// Run the broker headless (no desktop UI). Every local agent shares
     /// one key (~/.aka/token under the root); tools are enabled for agents
-    /// by default and managed remotely via the manage API (`mfa manage
+    /// by default and managed remotely via the manage API (`multitool manage
     /// token`) or locally from the desktop app.
     Serve {
         /// Use an isolated root dir (data + socket under it) instead of the
@@ -234,8 +234,8 @@ enum Command {
         #[arg(long, alias = "no-sidecar")]
         no_mcp: bool,
     },
-    /// Bridge stdio MCP to the local AgentMFA broker's MCP host. Point any
-    /// MCP client at `mfa mcp` — it reads this computer's shared key and
+    /// Bridge stdio MCP to the local Multitool broker's MCP host. Point any
+    /// MCP client at `multitool mcp` — it reads this computer's shared key and
     /// discovers the MCP endpoint itself, so configs stay static.
     Mcp {
         /// Bridge to a broker rooted here instead of the default layout.
@@ -248,7 +248,7 @@ enum Command {
     },
     /// Open a Postgres session on a running broker. By default this prints
     /// shell-safe PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD/PGSSLMODE exports:
-    /// `eval "$(mfa dsn analytics)" && psql`. The ticket stays out of argv.
+    /// `eval "$(multitool dsn analytics)" && psql`. The ticket stays out of argv.
     Dsn {
         /// The pg connection's name.
         connection: String,
@@ -269,7 +269,7 @@ enum Command {
         password_only: bool,
     },
     /// Open an SSH session on a running broker and print the agent socket
-    /// path: `export SSH_AUTH_SOCK="$(mfa ssh production)"` — then stock
+    /// path: `export SSH_AUTH_SOCK="$(multitool ssh production)"` — then stock
     /// `ssh`/`git`/`scp`/`rsync` work while the broker signs only for the
     /// connection's pinned user and server host key. The command prints the
     /// destination, the pinned fingerprint, the absolute deadline, and the
@@ -666,7 +666,7 @@ enum ConnCommand {
     /// Ask the user to confirm this connection's traffic before it goes
     /// anywhere, or stop asking. What gets confirmed depends on the kind:
     /// one request for an API tool, one `tools/call` for an MCP tool, one
-    /// session for Postgres. An attached AgentMFA app answers prompts; a
+    /// session for Postgres. An attached Multitool app answers prompts; a
     /// broker with no attached approval surface refuses the traffic.
     Confirm {
         /// The connection to change.
@@ -773,7 +773,7 @@ enum ConnCommand {
         /// ssh: make the agent socket refuse to list or sign until the caller
         /// presents the endpoint secret, so finding the socket is no longer
         /// enough to use it. Stock `ssh` cannot send the extension that does
-        /// this — reach an authenticated endpoint through `mfa ssh-agent`.
+        /// this — reach an authenticated endpoint through `multitool ssh-agent`.
         #[arg(long, conflicts_with_all = ["revoke", "no_require_auth"])]
         require_auth: bool,
         /// ssh: stop requiring authentication on the agent socket, returning
@@ -781,7 +781,7 @@ enum ConnCommand {
         #[arg(long, conflicts_with = "revoke")]
         no_require_auth: bool,
         /// Print only the pasteable address (the base URL / DSN / agent
-        /// socket), for `$(mfa conn endpoint <name> --url)`.
+        /// socket), for `$(multitool conn endpoint <name> --url)`.
         #[arg(long, conflicts_with = "secret")]
         url: bool,
         /// Print only the endpoint secret (empty for SSH, whose socket path
@@ -941,7 +941,7 @@ fn endpoint_action_supported(action: EndpointAction, online: bool) -> Result<(),
     if matches!(action, EndpointAction::Issue | EndpointAction::Renew) && !online {
         Err(
             "direct endpoint issuance and renewal require a running broker to own the listener; \
-             start AgentMFA or `mfa serve`, then retry",
+             start Multitool or `multitool serve`, then retry",
         )
     } else {
         Ok(())
@@ -1531,7 +1531,7 @@ fn cmd_secret_list(root: Option<PathBuf>, url: Option<String>, json: bool) {
         return;
     }
     if secrets.is_empty() {
-        eprintln!("no secrets configured (add one with `mfa secret add <name>`)");
+        eprintln!("no secrets configured (add one with `multitool secret add <name>`)");
         return;
     }
     for dto in secrets {
@@ -1567,7 +1567,7 @@ impl Managed {
     /// this terminal. Make that wait visible before the request blocks.
     fn run_gated<T>(&self, call: impl std::future::Future<Output = ManageResult<T>>) -> T {
         if self.approval_surface_attached() {
-            eprintln!("  waiting for confirmation in the AgentMFA app…");
+            eprintln!("  waiting for confirmation in the Multitool app…");
         }
         self.run(call)
     }
@@ -1589,7 +1589,7 @@ impl Managed {
         if !self.approval_surface_attached() {
             die(
                 "cannot enable traffic confirmation: no approval surface is attached; open the \
-                 AgentMFA app and keep its request inbox connected, then retry",
+                 Multitool app and keep its request inbox connected, then retry",
             );
         }
     }
@@ -1602,7 +1602,7 @@ fn warn_version_skew(profile: &serde_json::Value) {
     let cli_version = env!("CARGO_PKG_VERSION");
     if broker_version != cli_version {
         eprintln!(
-            "warning: broker version {broker_version} differs from mfa CLI version {cli_version}; \
+            "warning: broker version {broker_version} differs from multitool CLI version {cli_version}; \
              update them together before making changes"
         );
     }
@@ -1614,7 +1614,7 @@ fn manage_token_store(paths: &Paths) -> TokenStore {
 
 /// Resolve the management token for `key` (a manage URL, or the local
 /// socket path): the AKA_MANAGE_TOKEN environment variable wins, then the
-/// token stored by `mfa manage login`.
+/// token stored by `multitool manage login`.
 fn manage_token(paths: &Paths, key: &str) -> Option<Zeroizing<String>> {
     if let Ok(token) = std::env::var("AKA_MANAGE_TOKEN") {
         let token = Zeroizing::new(token);
@@ -1669,7 +1669,7 @@ fn management_backend_with_create(
                 ExitCode::Authentication,
                 format!(
                     "no management token for {url} — set AKA_MANAGE_TOKEN, or store \
-                 one with `mfa manage login --broker {url}` (issued by `mfa \
+                 one with `multitool manage login --broker {url}` (issued by `multitool \
                  manage token` on the broker host)"
                 ),
             );
@@ -1702,9 +1702,9 @@ fn management_backend_with_create(
                 ExitCode::Authentication,
                 format!(
                     "a broker is running on {key}.\n\
-                 To edit it live, run `mfa manage token` to consume its \
+                 To edit it live, run `multitool manage token` to consume its \
                  first-start credential or rotate a saved token, store a token \
-                 with `mfa manage login`, or set AKA_MANAGE_TOKEN."
+                 with `multitool manage login`, or set AKA_MANAGE_TOKEN."
                 ),
             );
         };
@@ -1768,7 +1768,7 @@ fn secret_dto(managed: &Managed, name: &str) -> SecretDto {
         Some(dto) => dto,
         None => die_with(
             ExitCode::NotFound,
-            format!("no secret named {name:?} (see `mfa secret list`)"),
+            format!("no secret named {name:?} (see `multitool secret list`)"),
         ),
     }
 }
@@ -1779,7 +1779,7 @@ fn conn_dto(managed: &Managed, name: &str) -> ConnectionDto {
         Some(dto) => dto,
         None => die_with(
             ExitCode::NotFound,
-            format!("no connection named {name:?} (see `mfa conn list`)"),
+            format!("no connection named {name:?} (see `multitool conn list`)"),
         ),
     }
 }
@@ -1982,7 +1982,7 @@ fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>, json: bool) {
         return;
     }
     if connections.is_empty() {
-        eprintln!("no connections configured (add one with `mfa conn add`)");
+        eprintln!("no connections configured (add one with `multitool conn add`)");
         return;
     }
     for dto in connections {
@@ -2095,7 +2095,7 @@ fn cmd_conn_show(name: String, root: Option<PathBuf>, url: Option<String>, json:
                 endpoint
                     .dsn
                     .as_deref()
-                    .unwrap_or("issued; use `mfa conn endpoint` to copy"),
+                    .unwrap_or("issued; use `multitool conn endpoint` to copy"),
                 endpoint.kind,
                 // Whether the socket is a standing signing oracle for anything
                 // that can open it is the most consequential fact about an SSH
@@ -2284,7 +2284,7 @@ fn watch_requests(managed: &Managed) {
     let surface_id = dto_id(&surface.id);
     eprintln!(
         "request inbox attached; press Ctrl-C to detach\n\
-         answer from another terminal with `mfa requests --approve ID` or `--deny ID`"
+         answer from another terminal with `multitool requests --approve ID` or `--deny ID`"
     );
 
     let backend = managed.backend.clone();
@@ -2399,7 +2399,7 @@ fn cmd_settings_set(
 fn refuse_oauth_managed(dto: &ConnectionDto) {
     if dto.oauth || dto.oauth_spec.is_some() {
         die(format!(
-            "{} is an OAuth-managed connection; edit it in the AgentMFA app",
+            "{} is an OAuth-managed connection; edit it in the Multitool app",
             dto.name
         ));
     }
@@ -2572,7 +2572,7 @@ fn cmd_conn_confirm(name: String, root: Option<PathBuf>, url: Option<String>, on
     if changed {
         eprintln!("traffic confirmation {state} for {name}");
         if on {
-            eprintln!("  prompts are answered in the AgentMFA app; without it, this tool's traffic is refused");
+            eprintln!("  prompts are answered in the Multitool app; without it, this tool's traffic is refused");
         }
     } else {
         eprintln!("traffic confirmation was already {state} for {name}");
@@ -2798,7 +2798,7 @@ fn cmd_conn_endpoint(
                 ExitCode::NotFound,
                 format!(
                     "no direct endpoint issued for {name} — start the broker and retry with \
-                         `mfa conn endpoint {name} --issue`"
+                         `multitool conn endpoint {name} --issue`"
                 ),
             ),
         },
@@ -2822,7 +2822,7 @@ fn cmd_conn_endpoint(
             eprintln!(
                 "the agent socket for {name} {}",
                 if require_auth {
-                    "now requires the endpoint secret — reach it through `mfa ssh-agent`"
+                    "now requires the endpoint secret — reach it through `multitool ssh-agent`"
                 } else {
                     "no longer requires the endpoint secret"
                 }
@@ -2842,14 +2842,14 @@ fn cmd_conn_endpoint(
             ExitCode::Usage,
             format!(
                 "the direct endpoint for {name} has expired — renew it with \
-                 `mfa conn endpoint {name} --renew`"
+                 `multitool conn endpoint {name} --renew`"
             ),
         );
     }
     if expired {
         eprintln!(
             "expired — renew without changing this address with \
-             `mfa conn endpoint {name} --renew`"
+             `multitool conn endpoint {name} --renew`"
         );
     }
     if action == EndpointAction::Issue {
@@ -2900,7 +2900,7 @@ fn doc_paths(root: Option<PathBuf>) -> Paths {
     }
 }
 
-const GENERATED_SKILL_MARKER: &str = "<!-- Generated by `mfa skill`. Do not edit:";
+const GENERATED_SKILL_MARKER: &str = "<!-- Generated by `multitool skill`. Do not edit:";
 
 fn generated_skill_file(content: &str) -> bool {
     content.contains(GENERATED_SKILL_MARKER)
@@ -2946,8 +2946,8 @@ fn cmd_skill(
             .unwrap_or_else(|| {
                 die("could not determine the home directory; set HOME or pass --path")
             })
-            .join(".claude/skills/mfa/SKILL.md"),
-        (None, false) => PathBuf::from(".claude/skills/mfa/SKILL.md"),
+            .join(".claude/skills/multitool/SKILL.md"),
+        (None, false) => PathBuf::from(".claude/skills/multitool/SKILL.md"),
     };
     if path.exists() && !force {
         let existing = std::fs::read_to_string(&path).unwrap_or_else(|error| {
@@ -2958,7 +2958,7 @@ fn cmd_skill(
         });
         if !generated_skill_file(&existing) {
             die(format!(
-                "refusing to overwrite non-AgentMFA skill file {}; pass --force to replace it",
+                "refusing to overwrite non-Multitool skill file {}; pass --force to replace it",
                 path.display()
             ));
         }
@@ -3018,7 +3018,7 @@ fn cmd_manage_login(url: Option<String>, token_env: Option<String>, root: Option
         Err(ManageError::InvalidManageToken { detail }) => die_with(
             ExitCode::Authentication,
             detail.unwrap_or_else(|| {
-                "the broker rejected this management token — issue a fresh one with `mfa manage token`"
+                "the broker rejected this management token — issue a fresh one with `multitool manage token`"
                     .into()
             }),
         ),
@@ -3081,7 +3081,7 @@ fn online_manage_token(
                         ExitCode::Authentication,
                         format!(
                             "AKA_MANAGE_TOKEN is empty; set the current token or run \
-                             `mfa manage login --broker {url}`"
+                             `multitool manage login --broker {url}`"
                         ),
                     );
                 }
@@ -3096,7 +3096,7 @@ fn online_manage_token(
                     ExitCode::Authentication,
                     format!(
                         "no current management token for {url} — set AKA_MANAGE_TOKEN \
-                         or store one with `mfa manage login --broker {url}`; initial \
+                         or store one with `multitool manage login --broker {url}`; initial \
                          bootstrap must be run on the broker host"
                     ),
                 );
@@ -3320,7 +3320,7 @@ fn cmd_manage_token(
             audit.append(entry);
             eprintln!("management token (shown once — only its hash is stored):\n");
             println!("{}", token.as_str());
-            eprintln!("\nEnter it in the AgentMFA app to manage this broker remotely.");
+            eprintln!("\nEnter it in the Multitool app to manage this broker remotely.");
             match ttl_days {
                 Some(days) => eprintln!(
                     "Expires in {days} day{}; re-run to rotate, or --revoke to close the manage API.",
@@ -3445,7 +3445,7 @@ fn cmd_dsn(
             "--json cannot be combined with --format or --password-only",
         );
     }
-    let client = Some(client.unwrap_or_else(|| "mfa-dsn".to_string()));
+    let client = Some(client.unwrap_or_else(|| "multitool-dsn".to_string()));
     let body = open_session("/v1/pg/open", &connection, root, client);
     let (Some(dsn), Some(ticket)) = (body["dsn"].as_str(), body["ticket"].as_str()) else {
         die("the broker's response carried no DSN and ticket");
@@ -3483,7 +3483,7 @@ fn cmd_dsn(
 /// definition for why each is present and why `IdentitiesOnly` is not.
 use aka_core::capability::ssh::SSH_BROKER_OPTIONS;
 
-/// The stderr lines accompanying `mfa ssh`'s socket path.
+/// The stderr lines accompanying `multitool ssh`'s socket path.
 ///
 /// Everything here was already in the broker's response and thrown away: the
 /// destination to actually type (an imported alias is not `user@host`), the
@@ -3580,7 +3580,7 @@ fn ssh_config_block(body: &serde_json::Value, auth_sock: &str, destination: &str
 }
 
 fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>, json: bool) {
-    let client = Some(client.unwrap_or_else(|| "mfa-ssh".to_string()));
+    let client = Some(client.unwrap_or_else(|| "multitool-ssh".to_string()));
     let body = open_session("/v1/ssh/open", &connection, root, client);
     let Some(auth_sock) = body["auth_sock"].as_str() else {
         die("the broker's response carried no agent socket path");
@@ -3624,8 +3624,8 @@ fn cmd_ssh_agent(
     if managed.remote.is_none() {
         die_with(
             ExitCode::NoBroker,
-            "the endpoint socket is served by a running broker; start AgentMFA or \
-             `mfa serve`, then retry",
+            "the endpoint socket is served by a running broker; start Multitool or \
+             `multitool serve`, then retry",
         );
     }
     let connection_id = dto_id(&dto.id);
@@ -3634,7 +3634,7 @@ fn cmd_ssh_agent(
             ExitCode::NotFound,
             format!(
                 "no direct endpoint is issued for {connection} — issue one with \
-                 `mfa conn endpoint {connection} --issue --require-auth`"
+                 `multitool conn endpoint {connection} --issue --require-auth`"
             ),
         );
     };
@@ -3643,7 +3643,7 @@ fn cmd_ssh_agent(
             ExitCode::Usage,
             format!(
                 "the direct endpoint for {connection} has expired — renew it with \
-                 `mfa conn endpoint {connection} --renew`"
+                 `multitool conn endpoint {connection} --renew`"
             ),
         );
     }
@@ -3679,17 +3679,17 @@ fn cmd_ssh_agent(
         .unwrap_or_else(|error| die(format!("could not bind a local agent socket: {error}")));
         let path = socket.path().display().to_string();
         if command.is_empty() {
-            // Same shape as `mfa ssh`: guidance on stderr, the one pasteable
+            // Same shape as `multitool ssh`: guidance on stderr, the one pasteable
             // value on stdout, so `$(…)` captures only the path. Unlike
-            // `mfa ssh` the path dies with this process, so the export is
+            // `multitool ssh` the path dies with this process, so the export is
             // only useful to another terminal while this one is running.
             eprintln!("  serving {connection}'s endpoint until you press Ctrl-C");
             eprintln!("  in another terminal:  export SSH_AUTH_SOCK=\"{path}\"");
-            // Not `$(mfa ssh-agent …)`: this command does not exit, so a
+            // Not `$(multitool ssh-agent …)`: this command does not exit, so a
             // command substitution around it waits forever. The socket dies
             // with this process, which is also why the path is only useful
             // while it is on screen.
-            eprintln!("  or run the client here:  mfa ssh-agent {connection} -- ssh ...");
+            eprintln!("  or run the client here:  multitool ssh-agent {connection} -- ssh ...");
             println!("{path}");
             socket
                 .serve(upstream, secret, async {
@@ -3710,7 +3710,7 @@ fn cmd_ssh_agent(
                 status = child.wait().await.ok();
             })
             .await;
-        // The command's status is this command's status: `mfa ssh-agent x --
+        // The command's status is this command's status: `multitool ssh-agent x --
         // ssh host` must fail when the ssh does, or a script wrapping it
         // cannot tell.
         let Some(status) = status else { return };
@@ -3874,11 +3874,11 @@ fn print_status_report(report: &StatusReport) {
     if let Some(version) = &report.broker_version {
         match report.protocol_version {
             Some(protocol) => println!(
-                "  version: broker {version}, mfa CLI {} (protocol {protocol})",
+                "  version: broker {version}, multitool CLI {} (protocol {protocol})",
                 report.cli_version
             ),
             None => println!(
-                "  version: broker {version}, mfa CLI {}",
+                "  version: broker {version}, multitool CLI {}",
                 report.cli_version
             ),
         }
@@ -4164,7 +4164,7 @@ fn local_status(root: Option<PathBuf>) -> Result<StatusReport, (StatusReport, Ex
                 Vec::new(),
                 Vec::new(),
                 Some(
-                    "no management token configured; run `mfa manage login` to include tools"
+                    "no management token configured; run `multitool manage login` to include tools"
                         .into(),
                 ),
             ),
@@ -4204,7 +4204,7 @@ fn cmd_status(json: bool, root: Option<PathBuf>, url: Option<String>) {
                     .is_some_and(|version| version != report.cli_version)
             {
                 eprintln!(
-                    "warning: broker version {} differs from mfa CLI version {}; update them together before making changes",
+                    "warning: broker version {} differs from multitool CLI version {}; update them together before making changes",
                     report.broker_version.as_deref().unwrap_or("unknown"),
                     report.cli_version
                 );
@@ -4349,7 +4349,7 @@ fn cmd_mcp(root: Option<PathBuf>, client: Option<String>) {
     }
 }
 
-/// Everything `mfa serve` accepts, bundled so the call site stays legible.
+/// Everything `multitool serve` accepts, bundled so the call site stays legible.
 struct ServeArgs {
     root: Option<PathBuf>,
     listen: Option<std::net::SocketAddr>,
@@ -4484,7 +4484,10 @@ fn cmd_serve(args: ServeArgs) {
         }
     };
 
-    eprintln!("AKA broker listening on {}", daemon.socket_path.display());
+    eprintln!(
+        "Multitool broker listening on {}",
+        daemon.socket_path.display()
+    );
     if let Some(path) = first_start_manage_token {
         eprintln!(
             "  first-start management token: {} (0600, expires in {} days)",
@@ -4492,7 +4495,7 @@ fn cmd_serve(args: ServeArgs) {
             DEFAULT_MANAGE_TOKEN_TTL_DAYS,
         );
         eprintln!(
-            "  run `mfa manage token{}` while the broker is live to rotate and store it",
+            "  run `multitool manage token{}` while the broker is live to rotate and store it",
             root.as_ref()
                 .map(|root| format!(" --root {}", shell_quote(&root.display().to_string())))
                 .unwrap_or_default(),
@@ -4516,14 +4519,14 @@ fn cmd_serve(args: ServeArgs) {
             Some(url) => eprintln!("  advertised to remote clients as {url}"),
             None => eprintln!("  no --public-url set: TCP discovery omits absolute URLs"),
         }
-        eprintln!("  remote management: enter this broker's `mfa manage token` in the app");
+        eprintln!("  remote management: enter this broker's `multitool manage token` in the app");
     }
     eprintln!(
         "  discovery: curl --unix-socket {} http://localhost/instructions",
         daemon.socket_path.display()
     );
     eprintln!(
-        "  skill file: `mfa skill --write` in a repo (or --write --user) \
+        "  skill file: `multitool skill --write` in a repo (or --write --user) \
          teaches agents this broker"
     );
     eprintln!("  agents authenticate with the shared key at the root's token file");
@@ -4578,7 +4581,7 @@ mod tests {
         assert_eq!(ExitCode::RemoteUnreachable as i32, 7);
         assert_eq!(ExitCode::TestFailed as i32, 8);
 
-        let help = match Cli::try_parse_from(["mfa", "--help"]) {
+        let help = match Cli::try_parse_from(["multitool", "--help"]) {
             Ok(_) => panic!("--help unexpectedly parsed as a command"),
             Err(error) => error.to_string(),
         };
@@ -4645,7 +4648,7 @@ mod tests {
 
     #[test]
     fn management_tokens_default_to_a_bounded_ttl() {
-        let cli = Cli::try_parse_from(["mfa", "manage", "token"]).unwrap();
+        let cli = Cli::try_parse_from(["multitool", "manage", "token"]).unwrap();
         let Command::Manage {
             command: ManageCommand::Token {
                 ttl_days, revoke, ..
@@ -4659,7 +4662,7 @@ mod tests {
         assert!(parse_manage_ttl_days("0").is_err());
         assert!(parse_manage_ttl_days("3651").is_err());
         assert!(Cli::try_parse_from([
-            "mfa",
+            "multitool",
             "manage",
             "token",
             "--broker",
@@ -4675,35 +4678,39 @@ mod tests {
     fn agent_plane_labels_and_serve_flags_are_validated_by_clap() {
         for command in ["dsn", "ssh"] {
             assert!(Cli::try_parse_from([
-                "mfa",
+                "multitool",
                 command,
                 "production",
                 "--client",
                 "honest\r\nX-Forged: yes",
             ])
             .is_err());
-            assert!(
-                Cli::try_parse_from(["mfa", command, "production", "--client", "ci-runner"])
-                    .is_ok()
-            );
+            assert!(Cli::try_parse_from([
+                "multitool",
+                command,
+                "production",
+                "--client",
+                "ci-runner"
+            ])
+            .is_ok());
         }
 
         assert!(Cli::try_parse_from([
-            "mfa",
+            "multitool",
             "serve",
             "--public-url",
             "https://broker.example.test",
         ])
         .is_err());
-        assert!(Cli::try_parse_from(["mfa", "serve", "--data-plane-insecure"]).is_err());
+        assert!(Cli::try_parse_from(["multitool", "serve", "--data-plane-insecure"]).is_err());
         for flag in ["--session-idle-timeout", "--session-max-ttl"] {
-            assert!(Cli::try_parse_from(["mfa", "serve", flag, "0"]).is_err());
-            assert!(Cli::try_parse_from(["mfa", "serve", flag, "1"]).is_ok());
+            assert!(Cli::try_parse_from(["multitool", "serve", flag, "0"]).is_err());
+            assert!(Cli::try_parse_from(["multitool", "serve", flag, "1"]).is_ok());
         }
-        assert!(Cli::try_parse_from(["mfa", "serve", "--no-mcp"]).is_ok());
-        assert!(Cli::try_parse_from(["mfa", "serve", "--no-sidecar"]).is_ok());
+        assert!(Cli::try_parse_from(["multitool", "serve", "--no-mcp"]).is_ok());
+        assert!(Cli::try_parse_from(["multitool", "serve", "--no-sidecar"]).is_ok());
         assert!(Cli::try_parse_from([
-            "mfa",
+            "multitool",
             "serve",
             "--listen",
             "127.0.0.1:4780",
@@ -4953,7 +4960,7 @@ mod tests {
 
     #[test]
     fn json_is_global_across_read_commands() {
-        let cli = Cli::try_parse_from(["mfa", "status", "--json"]).unwrap();
+        let cli = Cli::try_parse_from(["multitool", "status", "--json"]).unwrap();
         assert!(cli.json);
         assert!(matches!(
             cli.command,
@@ -4962,7 +4969,7 @@ mod tests {
                 broker: None,
             }
         ));
-        let cli = Cli::try_parse_from(["mfa", "--json", "secret", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["multitool", "--json", "secret", "list"]).unwrap();
         assert!(cli.json);
         assert!(matches!(
             cli.command,
@@ -4974,7 +4981,8 @@ mod tests {
 
     #[test]
     fn endpoint_lifecycle_flags_parse_and_conflict() {
-        let cli = Cli::try_parse_from(["mfa", "conn", "endpoint", "database", "--issue"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["multitool", "conn", "endpoint", "database", "--issue"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Conn {
@@ -4986,7 +4994,8 @@ mod tests {
             }
         ));
 
-        let cli = Cli::try_parse_from(["mfa", "conn", "endpoint", "database", "--revoke"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["multitool", "conn", "endpoint", "database", "--revoke"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Conn {
@@ -4999,19 +5008,35 @@ mod tests {
         ));
 
         assert!(Cli::try_parse_from([
-            "mfa", "conn", "endpoint", "database", "--issue", "--revoke",
+            "multitool",
+            "conn",
+            "endpoint",
+            "database",
+            "--issue",
+            "--revoke",
         ])
         .is_err());
         assert!(Cli::try_parse_from([
-            "mfa", "conn", "endpoint", "database", "--revoke", "--secret",
+            "multitool",
+            "conn",
+            "endpoint",
+            "database",
+            "--revoke",
+            "--secret",
         ])
         .is_err());
     }
 
     #[test]
     fn response_credential_flags_parse_and_conflict() {
-        let cli =
-            Cli::try_parse_from(["mfa", "conn", "response-credentials", "api", "--allow"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "multitool",
+            "conn",
+            "response-credentials",
+            "api",
+            "--allow",
+        ])
+        .unwrap();
         assert!(matches!(
             cli.command,
             Command::Conn {
@@ -5023,7 +5048,7 @@ mod tests {
             }
         ));
         assert!(Cli::try_parse_from([
-            "mfa",
+            "multitool",
             "conn",
             "response-credentials",
             "api",
@@ -5032,7 +5057,7 @@ mod tests {
         ])
         .is_err());
         assert!(
-            Cli::try_parse_from(["mfa", "conn", "response-credentials", "api"]).is_ok(),
+            Cli::try_parse_from(["multitool", "conn", "response-credentials", "api"]).is_ok(),
             "no flag reports the effective state"
         );
     }
@@ -5065,7 +5090,7 @@ mod tests {
         assert!(endpoint_action_supported(EndpointAction::Read, false).is_ok());
         assert!(endpoint_action_supported(EndpointAction::Revoke, false).is_ok());
         assert!(Cli::try_parse_from([
-            "mfa",
+            "multitool",
             "conn",
             "endpoint",
             "production",
@@ -5085,7 +5110,7 @@ mod tests {
         assert_eq!(endpoint_require_auth(false, true), Some(false));
 
         assert!(Cli::try_parse_from([
-            "mfa",
+            "multitool",
             "conn",
             "endpoint",
             "production",
@@ -5095,7 +5120,7 @@ mod tests {
         .is_err());
         // Revocation removes the endpoint, so a posture for it is nonsense.
         assert!(Cli::try_parse_from([
-            "mfa",
+            "multitool",
             "conn",
             "endpoint",
             "production",
@@ -5104,7 +5129,7 @@ mod tests {
         ])
         .is_err());
         assert!(Cli::try_parse_from([
-            "mfa",
+            "multitool",
             "conn",
             "endpoint",
             "production",
@@ -5119,7 +5144,7 @@ mod tests {
     #[test]
     fn the_ssh_agent_forwarder_passes_its_command_through_untouched() {
         let cli = Cli::try_parse_from([
-            "mfa",
+            "multitool",
             "ssh-agent",
             "production",
             "--socket",
@@ -5144,7 +5169,7 @@ mod tests {
         assert_eq!(socket.as_deref(), Some(Path::new("/tmp/a.sock")));
         assert_eq!(command, ["ssh", "-o", "IdentitiesOnly=no", "prod"]);
 
-        let cli = Cli::try_parse_from(["mfa", "ssh-agent", "production"]).unwrap();
+        let cli = Cli::try_parse_from(["multitool", "ssh-agent", "production"]).unwrap();
         let Command::SshAgent { command, .. } = cli.command else {
             panic!("expected the ssh-agent command");
         };
@@ -5219,22 +5244,27 @@ mod tests {
 
     #[test]
     fn skill_write_options_are_not_silently_ignored() {
-        assert!(Cli::try_parse_from(["mfa", "skill", "--path", "SKILL.md"]).is_err());
-        assert!(Cli::try_parse_from(["mfa", "skill", "--user"]).is_err());
-        assert!(Cli::try_parse_from(["mfa", "skill", "--write", "--path", "SKILL.md"]).is_ok());
+        assert!(Cli::try_parse_from(["multitool", "skill", "--path", "SKILL.md"]).is_err());
+        assert!(Cli::try_parse_from(["multitool", "skill", "--user"]).is_err());
         assert!(
-            Cli::try_parse_from(["mfa", "skill", "--broker", "https://broker.example.test"])
-                .is_ok()
+            Cli::try_parse_from(["multitool", "skill", "--write", "--path", "SKILL.md"]).is_ok()
         );
         assert!(Cli::try_parse_from([
-            "mfa",
+            "multitool",
+            "skill",
+            "--broker",
+            "https://broker.example.test"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "multitool",
             "instructions",
             "--broker",
             "https://broker.example.test"
         ])
         .is_ok());
         assert!(generated_skill_file(&format!(
-            "---\nname: mfa\n---\n{GENERATED_SKILL_MARKER} generated -->"
+            "---\nname: multitool\n---\n{GENERATED_SKILL_MARKER} generated -->"
         )));
         assert!(!generated_skill_file("# A hand-written skill\n"));
     }

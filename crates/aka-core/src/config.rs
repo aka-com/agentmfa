@@ -134,26 +134,34 @@ pub struct BrokerConfig {
 }
 
 impl BrokerConfig {
-    /// Apply operator overrides from `AGENTMFA_*` environment variables.
+    /// Apply operator overrides from `MULTITOOL_*` environment variables.
+    /// The former `AGENTMFA_*` names remain fallback aliases.
     /// Explicit CLI flags are applied by the callers *after* this, so a flag
     /// always beats the environment. Unparseable or zero values are ignored
     /// with a warning rather than half-applying a broken configuration.
     ///
-    /// - `AGENTMFA_UPSTREAM_TIMEOUT_SECS` — one upstream HTTP hop.
-    /// - `AGENTMFA_UPSTREAM_OPERATION_TIMEOUT_SECS` — the whole upstream
+    /// - `MULTITOOL_UPSTREAM_TIMEOUT_SECS` — one upstream HTTP hop.
+    /// - `MULTITOOL_UPSTREAM_OPERATION_TIMEOUT_SECS` — the whole upstream
     ///   operation (refresh + redirect chain + body receipt).
-    /// - `AGENTMFA_RESPONSE_CAP_BYTES` — buffered response body cap.
-    /// - `AGENTMFA_REQUEST_CAP_BYTES` — request body cap.
-    /// - `AGENTMFA_SPOOL_THRESHOLD_BYTES` — request bodies above this spool
+    /// - `MULTITOOL_RESPONSE_CAP_BYTES` — buffered response body cap.
+    /// - `MULTITOOL_REQUEST_CAP_BYTES` — request body cap.
+    /// - `MULTITOOL_SPOOL_THRESHOLD_BYTES` — request bodies above this spool
     ///   to disk instead of buffering in memory.
-    /// - `AGENTMFA_MAX_REDIRECTS` — redirect-chain budget per operation.
-    /// - `AGENTMFA_PER_IDENTITY_PER_MIN` — capability-call rate limit.
+    /// - `MULTITOOL_MAX_REDIRECTS` — redirect-chain budget per operation.
+    /// - `MULTITOOL_PER_IDENTITY_PER_MIN` — capability-call rate limit.
     pub fn overridden_from_env(mut self) -> Self {
         self.apply_env(|name| std::env::var(name).ok());
         self
     }
 
     fn apply_env(&mut self, get: impl Fn(&str) -> Option<String>) {
+        fn value(get: &impl Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+            get(name).or_else(|| {
+                name.strip_prefix("MULTITOOL_")
+                    .and_then(|suffix| get(&format!("AGENTMFA_{suffix}")))
+            })
+        }
+
         fn parse(name: &str, raw: Option<String>) -> Option<u64> {
             let raw = raw?;
             match raw.trim().parse::<u64>() {
@@ -165,41 +173,44 @@ impl BrokerConfig {
             }
         }
         if let Some(secs) = parse(
-            "AGENTMFA_UPSTREAM_TIMEOUT_SECS",
-            get("AGENTMFA_UPSTREAM_TIMEOUT_SECS"),
+            "MULTITOOL_UPSTREAM_TIMEOUT_SECS",
+            value(&get, "MULTITOOL_UPSTREAM_TIMEOUT_SECS"),
         ) {
             self.upstream_timeout = Duration::from_secs(secs);
         }
         if let Some(secs) = parse(
-            "AGENTMFA_UPSTREAM_OPERATION_TIMEOUT_SECS",
-            get("AGENTMFA_UPSTREAM_OPERATION_TIMEOUT_SECS"),
+            "MULTITOOL_UPSTREAM_OPERATION_TIMEOUT_SECS",
+            value(&get, "MULTITOOL_UPSTREAM_OPERATION_TIMEOUT_SECS"),
         ) {
             self.upstream_operation_timeout = Duration::from_secs(secs);
         }
         if let Some(bytes) = parse(
-            "AGENTMFA_RESPONSE_CAP_BYTES",
-            get("AGENTMFA_RESPONSE_CAP_BYTES"),
+            "MULTITOOL_RESPONSE_CAP_BYTES",
+            value(&get, "MULTITOOL_RESPONSE_CAP_BYTES"),
         ) {
             self.response_cap = bytes as usize;
         }
         if let Some(bytes) = parse(
-            "AGENTMFA_REQUEST_CAP_BYTES",
-            get("AGENTMFA_REQUEST_CAP_BYTES"),
+            "MULTITOOL_REQUEST_CAP_BYTES",
+            value(&get, "MULTITOOL_REQUEST_CAP_BYTES"),
         ) {
             self.request_cap = bytes as usize;
         }
         if let Some(bytes) = parse(
-            "AGENTMFA_SPOOL_THRESHOLD_BYTES",
-            get("AGENTMFA_SPOOL_THRESHOLD_BYTES"),
+            "MULTITOOL_SPOOL_THRESHOLD_BYTES",
+            value(&get, "MULTITOOL_SPOOL_THRESHOLD_BYTES"),
         ) {
             self.spool_threshold = bytes as usize;
         }
-        if let Some(redirects) = parse("AGENTMFA_MAX_REDIRECTS", get("AGENTMFA_MAX_REDIRECTS")) {
+        if let Some(redirects) = parse(
+            "MULTITOOL_MAX_REDIRECTS",
+            value(&get, "MULTITOOL_MAX_REDIRECTS"),
+        ) {
             self.max_redirects = redirects as usize;
         }
         if let Some(per_min) = parse(
-            "AGENTMFA_PER_IDENTITY_PER_MIN",
-            get("AGENTMFA_PER_IDENTITY_PER_MIN"),
+            "MULTITOOL_PER_IDENTITY_PER_MIN",
+            value(&get, "MULTITOOL_PER_IDENTITY_PER_MIN"),
         ) {
             self.per_identity_per_min = per_min.min(u32::MAX as u64) as u32;
         }
@@ -237,13 +248,13 @@ mod tests {
     fn env_overrides_apply_and_bad_values_are_ignored() {
         let mut config = BrokerConfig::default();
         config.apply_env(|name| match name {
-            "AGENTMFA_UPSTREAM_TIMEOUT_SECS" => Some("90".into()),
-            "AGENTMFA_UPSTREAM_OPERATION_TIMEOUT_SECS" => Some("garbage".into()),
-            "AGENTMFA_RESPONSE_CAP_BYTES" => Some("0".into()),
-            "AGENTMFA_REQUEST_CAP_BYTES" => Some("2000000".into()),
-            "AGENTMFA_SPOOL_THRESHOLD_BYTES" => Some("-5".into()),
-            "AGENTMFA_MAX_REDIRECTS" => Some("3".into()),
-            "AGENTMFA_PER_IDENTITY_PER_MIN" => Some("120".into()),
+            "MULTITOOL_UPSTREAM_TIMEOUT_SECS" => Some("90".into()),
+            "MULTITOOL_UPSTREAM_OPERATION_TIMEOUT_SECS" => Some("garbage".into()),
+            "MULTITOOL_RESPONSE_CAP_BYTES" => Some("0".into()),
+            "MULTITOOL_REQUEST_CAP_BYTES" => Some("2000000".into()),
+            "MULTITOOL_SPOOL_THRESHOLD_BYTES" => Some("-5".into()),
+            "MULTITOOL_MAX_REDIRECTS" => Some("3".into()),
+            "MULTITOOL_PER_IDENTITY_PER_MIN" => Some("120".into()),
             _ => None,
         });
         let defaults = BrokerConfig::default();
@@ -269,6 +280,23 @@ mod tests {
         assert_eq!(config.upstream_timeout, defaults.upstream_timeout);
         assert_eq!(config.response_cap, defaults.response_cap);
         assert_eq!(config.per_identity_per_min, defaults.per_identity_per_min);
+    }
+
+    #[test]
+    fn legacy_environment_names_are_fallbacks() {
+        let mut config = BrokerConfig::default();
+        config.apply_env(|name| match name {
+            "AGENTMFA_UPSTREAM_TIMEOUT_SECS" => Some("75".into()),
+            _ => None,
+        });
+        assert_eq!(config.upstream_timeout, Duration::from_secs(75));
+
+        config.apply_env(|name| match name {
+            "MULTITOOL_UPSTREAM_TIMEOUT_SECS" => Some("90".into()),
+            "AGENTMFA_UPSTREAM_TIMEOUT_SECS" => Some("120".into()),
+            _ => None,
+        });
+        assert_eq!(config.upstream_timeout, Duration::from_secs(90));
     }
 }
 

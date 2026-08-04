@@ -200,7 +200,7 @@ const MAC_KEYCHAIN_SERVICE: &str = "com.aka.desktop";
 
 /// The macOS Keychain backend: one generic-password item per secret (service
 /// `com.aka.desktop`, account = the secret's UUID), over Security.framework
-/// directly. Dev roots use a root-scoped service so `mfa serve --root ...`
+/// directly. Dev roots use a root-scoped service so `multitool serve --root ...`
 /// cannot create or rotate production vault state.
 ///
 /// Which of the two macOS keychains those items live in — and therefore

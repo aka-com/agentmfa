@@ -1,12 +1,12 @@
 [package]
-name = "mfa"
+name = "multitool"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AgentMFA command line: broker, MCP bridge, and headless management"
+description = "Multitool command line: broker, MCP bridge, and headless management"
 
 [[bin]]
-name = "mfa"
+name = "multitool"
 path = "src/main.rs"
 
 [dependencies]

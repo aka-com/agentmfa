@@ -214,7 +214,7 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
         move |body: axum::Json<Value>| {
             let state = state.clone();
             async move {
-                assert_eq!(body.0["client_name"], json!("AgentMFA"));
+                assert_eq!(body.0["client_name"], json!("Multitool"));
                 assert_eq!(body.0["token_endpoint_auth_method"], json!("none"));
                 let redirect = body.0["redirect_uris"][0]
                     .as_str()
@@ -370,7 +370,7 @@ async fn uds_json_request(socket: &std::path::Path, token: &str, body: Value) ->
         .uri("/v1/http")
         .header("host", "localhost")
         .header("authorization", format!("Bearer {token}"))
-        .header("x-agentmfa-client", "codex")
+        .header("x-multitool-client", "codex")
         .header("content-type", "application/json")
         .body(body.to_string())
         .unwrap();

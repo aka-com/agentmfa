@@ -62,7 +62,7 @@ export interface AgentAccess {
     /**
      * SSH only: the agent socket refuses to list or sign until the caller
      * presents the endpoint secret. Changes what the row can say — such a
-     * socket is reached through `mfa ssh-agent`, not by pointing
+     * socket is reached through `multitool ssh-agent`, not by pointing
      * `IdentityAgent` straight at the path.
      */
     require_auth?: boolean;
@@ -259,7 +259,7 @@ export interface ElicitationRequest {
  * (or until it lapses, when the call is refused).
  *
  * Unlike an elicitation — the upstream asking the *agent* something — this
- * is AgentMFA asking the *user* whether the traffic should happen at all.
+ * is Multitool asking the *user* whether the traffic should happen at all.
  * It is answered here and never through the agent.
  */
 export interface Approval {

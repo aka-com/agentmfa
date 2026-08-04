@@ -752,7 +752,7 @@ impl RequestAttention {
         let mut inner = self.inner.lock().unwrap();
         inner.notifications_available = false;
         inner.notification_unavailable_reason = Some(
-            "AgentMFA needs notification permission to alert you before requests expire.".into(),
+            "Multitool needs notification permission to alert you before requests expire.".into(),
         );
         inner.notification_permission_prompt = true;
         NotificationSettingsView {
@@ -1081,8 +1081,11 @@ fn flush_notification(app: &AppHandle, generation: u64) {
                 "Open the Request Inbox to review {} waiting requests. Further notifications are paused for one minute.",
                 pending.total
             );
-            let storm =
-                notification_content(pending.settings, "Many AgentMFA requests are waiting", body);
+            let storm = notification_content(
+                pending.settings,
+                "Many Multitool requests are waiting",
+                body,
+            );
             if let Err(error) = deliver_notification(app, &storm, storm_subjects) {
                 tracing::warn!(%error, "could not deliver the notification rate-limit warning");
             }
@@ -1129,7 +1132,7 @@ fn flush_expirations(app: &AppHandle, generation: u64) {
         NotificationAdmission::Storm => {
             let storm = notification_content(
                 pending.settings,
-                "Several AgentMFA requests expired",
+                "Several Multitool requests expired",
                 "Open Recent in the Request Inbox for details. Further notifications are paused for one minute.",
             );
             if let Err(error) = deliver_terminal_notification(app, &storm, subjects) {
@@ -1155,9 +1158,9 @@ fn expiration_delivery_plan(
         return None;
     }
     let title = if requests.len() == 1 {
-        "An AgentMFA request expired".to_string()
+        "An Multitool request expired".to_string()
     } else {
-        format!("{} AgentMFA requests expired", requests.len())
+        format!("{} Multitool requests expired", requests.len())
     };
     let body = if settings.show_context && requests.len() == 1 {
         let request = &requests[0];
@@ -1201,7 +1204,7 @@ fn request_delivery_plan(
         NotificationMode::WhenHidden | NotificationMode::Always => {}
     }
     let title = if requests.len() == 1 {
-        "AgentMFA needs your approval".to_string()
+        "Multitool needs your approval".to_string()
     } else {
         format!("{} new requests need your approval", requests.len())
     };
@@ -1299,7 +1302,7 @@ fn schedule_escalation(
         if let Some(attention) = app.try_state::<RequestAttention>() {
             let content = notification_content(
                 settings,
-                "AgentMFA is still waiting",
+                "Multitool is still waiting",
                 "A request is nearing its deadline. Open the Request Inbox to respond.",
             );
             if let Err(error) = attention.enqueue_notification(
@@ -1958,7 +1961,7 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
             let body = format!(
                 "Open the Request Inbox to review {total} waiting requests. Further notifications are paused for one minute."
             );
-            let storm = notification_content(settings, "Many AgentMFA requests are waiting", body);
+            let storm = notification_content(settings, "Many Multitool requests are waiting", body);
             if let Err(error) = deliver_notification(app, &storm, storm_subjects) {
                 tracing::warn!(%error, "could not deliver the notification rate-limit warning");
             }
@@ -1982,7 +1985,7 @@ fn elicitation_delivery_plan(
         NotificationMode::WhenHidden if surface_focused => return DeliveryPlan::Suppress,
         NotificationMode::WhenHidden | NotificationMode::Always => {}
     }
-    let title = "AgentMFA needs your input".to_string();
+    let title = "Multitool needs your input".to_string();
     let body = if settings.show_context {
         let agent = notification_label(&pending.agent, "An agent");
         let connection = notification_label(&pending.connection, "a tool");
@@ -2261,7 +2264,7 @@ mod tests {
         assert_eq!(
             contextual,
             DeliveryPlan::Notify(NotificationContent {
-                title: "AgentMFA needs your approval".into(),
+                title: "Multitool needs your approval".into(),
                 body: "codex agent is waiting to use github. Open the Request Inbox to review."
                     .into(),
                 play_sound: true,
@@ -2278,7 +2281,7 @@ mod tests {
         assert_eq!(
             private,
             DeliveryPlan::Notify(NotificationContent {
-                title: "AgentMFA needs your approval".into(),
+                title: "Multitool needs your approval".into(),
                 body: "Open the Request Inbox to review this request.".into(),
                 play_sound: true,
                 time_sensitive: false,
@@ -2312,7 +2315,7 @@ mod tests {
         assert_eq!(
             request_delivery_plan(&[request], 1, preferences, false),
             DeliveryPlan::Notify(NotificationContent {
-                title: "AgentMFA needs your approval".into(),
+                title: "Multitool needs your approval".into(),
                 body: "Open the Request Inbox to review this request.".into(),
                 play_sound: false,
                 time_sensitive: true,
@@ -2336,7 +2339,7 @@ mod tests {
         let single =
             expiration_delivery_plan(&[one], settings(NotificationMode::Always, true), false)
                 .unwrap();
-        assert_eq!(single.title, "An AgentMFA request expired");
+        assert_eq!(single.title, "An Multitool request expired");
         assert!(single.body.contains("codex was refused access to github"));
         assert!(expiration_delivery_plan(
             &pending.requests,
@@ -2414,7 +2417,7 @@ mod tests {
         assert_eq!(
             elicitation_delivery_plan(&elicitation, settings(NotificationMode::Always, true), true,),
             DeliveryPlan::Notify(NotificationContent {
-                title: "AgentMFA needs your input".into(),
+                title: "Multitool needs your input".into(),
                 body:
                     "postgres needs your input. codex is paused. Open the Request Inbox to respond."
                         .into(),

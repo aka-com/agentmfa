@@ -108,7 +108,7 @@ pub enum CoreError {
     StateTampered(String),
 
     #[error(
-        "state file {path} uses schema version {found}, but this build supports up to {supported}; upgrade AKA before opening this store"
+        "state file {path} uses schema version {found}, but this build supports up to {supported}; upgrade Multitool before opening this store"
     )]
     UnsupportedStateVersion {
         path: String,

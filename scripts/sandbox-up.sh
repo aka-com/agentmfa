@@ -33,7 +33,7 @@ for path in "$client_key" "$client_key.pub"; do
   if [[ -d "$path" ]]; then rmdir "$path"; fi
 done
 if [[ ! -f "$client_key" ]]; then
-  echo "Generating a dedicated SSH key for the AKA sandbox..."
+  echo "Generating a dedicated SSH key for the Multitool sandbox..."
   ssh-keygen -q -t ed25519 -N "" -C aka-sandbox -f "$client_key"
 elif [[ ! -f "$client_key.pub" ]]; then
   ssh-keygen -y -f "$client_key" >"$client_key.pub"

@@ -1,11 +1,17 @@
-# AgentMFA
+# Multitool
 
-AgentMFA lets your agents make API calls, connect to databases and
+Multitool lets your agents make API calls, connect to databases and
 servers, and talk to MCPs without exposing credentials.
 
 It combines a secrets vault, connection broker, and tool router into
 one application, so your agents can use unmodified CLI tools like
 `curl`, `psql`, and `git`, with credentials stored in a secure vault.
+
+Install the CLI on macOS or Linux with:
+
+```sh
+npm install -g @aka-com/multitool
+```
 
 ## How it works
 
@@ -19,14 +25,14 @@ environment variables. That means:
 - Rotating a key means hunting down every config that copied it.
 - Use may leave no central record.
 
-AgentMFA sits between your agents and everything they reach. Agents
+Multitool sits between your agents and everything they reach. Agents
 talk to services through a local proxied endpoint to make API calls or
 open database connections. The real upstream credential is injected on
-the upstream leg only and never enters agent context. AgentMFA records
+the upstream leg only and never enters agent context. Multitool records
 brokered use and lets you disable a connection centrally instead of
 redistributing its upstream credential.
 
-AgentMFA is primarily tested locally today, but a hosted version has
+Multitool is primarily tested locally today, but a hosted version has
 been implemented for a shared vault. Hosted mode is one broker per trust
 domain, not a multi-user authorization system: see [HOSTING.md](HOSTING.md)
 before exposing it to a network. We also support limited audit logging,
@@ -34,7 +40,7 @@ and team management is coming soon.
 
 ### Security boundary
 
-AgentMFA keeps the real API token, database password, or SSH private key
+Multitool keeps the real API token, database password, or SSH private key
 out of the agent's files and context. It does not sandbox agents from one
 another. Every process running as the same local user can read the shared
 0600 broker key (or pair over the private local socket) and can use every
@@ -62,16 +68,16 @@ encode credential material into a new form.
    host, Postgres database, SSH server, or MCP server.
 
 2. **Create a secret.** Pin an API token, database password, or SSH key
-   inside the application, using the desktop app or `mfa secret add`.
+   inside the application, using the desktop app or `multitool secret add`.
 
 3. **Give your agent the endpoint.** Each connection gets its own local
    credential-free endpoint, that you can provide to your agent as a
    DATABASE_URL, SSH endpoint, etc., while MCPs get a unified tool.
 
    ```sh
-   eval "$(mfa dsn analytics)" && psql             # ticket stays in PGPASSWORD
-   export SSH_AUTH_SOCK="$(mfa ssh production)"    # scoped signing agent
-   claude mcp add agentmfa -- mfa mcp             # unified MCP tool
+   eval "$(multitool dsn analytics)" && psql             # ticket stays in PGPASSWORD
+   export SSH_AUTH_SOCK="$(multitool ssh production)"    # scoped signing agent
+   claude mcp add multitool -- multitool mcp             # unified MCP tool
    ```
 
    For each connection type, the broker injects the real credential on
@@ -84,18 +90,30 @@ encode credential material into a new form.
 Any agent that uses MCP or the CLI works: Claude Code, Claude Desktop,
 Codex, Cursor, your own harness using `curl`.
 
+### Compatibility with pre-rename installs
+
+The `mfa` and `agentmfa` executable names remain aliases for `multitool`.
+Existing `AGENTMFA_*` environment variables, `X-AgentMFA-Client` headers,
+`agentmfa_*` MCP calls, `agentmfa://` resource URIs, and the former SSH-agent
+extension are accepted as fallbacks. New output and setup instructions use
+the Multitool names.
+
+The application keeps its existing `com.aka.desktop` identity, `~/.aka` data
+directory, and Keychain services so upgrading does not create an empty vault
+or require users to move local state.
+
 ### Direct connection setup
 
 Agents that run shell commands don't need MCP at all: each connection
 is automatically exposed as a local endpoint, that automatically
 injects the credential on the upstream.
 
-- **Postgres** — `mfa dsn <connection>` prints shell-safe `PG*` exports with
+- **Postgres** — `multitool dsn <connection>` prints shell-safe `PG*` exports with
   the short-lived ticket in `PGPASSWORD`, keeping it out of process-visible
   argv:
 
   ```sh
-  eval "$(mfa dsn analytics)"
+  eval "$(multitool dsn analytics)"
   psql
   ```
 
@@ -105,12 +123,12 @@ injects the credential on the upstream.
   the connection. `--format uri` is available for compatibility but embeds
   the ticket in argv.
 
-- **SSH** — `mfa ssh <connection>` prints an `SSH_AUTH_SOCK` backed by a
+- **SSH** — `multitool ssh <connection>` prints an `SSH_AUTH_SOCK` backed by a
   scoped signing agent; the private key never leaves the broker. Works
   with stock `ssh`, `git`, `scp`, and `rsync`:
 
   ```sh
-  export SSH_AUTH_SOCK="$(mfa ssh production)"
+  export SSH_AUTH_SOCK="$(multitool ssh production)"
   ssh production uptime
   git push production main
   scp app.tar.gz production:/srv/app/
@@ -127,25 +145,25 @@ injects the credential on the upstream.
     http://127.0.0.1:52000/user/repos
   ```
 
-### AgentMFA MCP setup
+### Multitool MCP setup
 
 Every connection is also exposed as an MCP tool. API connections are
-exposed as `agentmfa_<name>_request`, and databases/servers as
-`agentmfa_<name>_open`, which returns a ready-to-use local endpoint.
+exposed as `multitool_<name>_request`, and databases/servers as
+`multitool_<name>_open`, which returns a ready-to-use local endpoint.
 
 Upstream MCP servers are proxied through the same broker, so their
 credentials stay in the vault too. HTTP/Postgres/SSH connections are
-registered as one native AgentMFA tool each. Streamable-HTTP MCP upstreams
+registered as one native Multitool tool each. Streamable-HTTP MCP upstreams
 contribute their own bounded tool names and may be limited to a curated
 subset in the app; upstream stdio servers are not supported. Native
 connection enable/rename changes are announced during a session, while an
 upstream MCP catalog is discovered at session start—reconnect to refresh it.
-Use `agentmfa_status` first when a tool is missing or an upstream failed.
+Use `multitool_status` first when a tool is missing or an upstream failed.
 
 **Claude Code**:
 
 ```sh
-claude mcp add agentmfa -- mfa mcp --client claude-code
+claude mcp add multitool -- multitool mcp --client claude-code
 ```
 
 **Claude Desktop** in `claude_desktop_config.json`:
@@ -153,8 +171,8 @@ claude mcp add agentmfa -- mfa mcp --client claude-code
 ```json
 {
   "mcpServers": {
-    "agentmfa": {
-      "command": "mfa",
+    "multitool": {
+      "command": "multitool",
       "args": ["mcp", "--client", "claude-desktop"]
     }
   }
@@ -164,12 +182,12 @@ claude mcp add agentmfa -- mfa mcp --client claude-code
 **Codex** in `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.agentmfa]
-command = "mfa"
+[mcp_servers.multitool]
+command = "multitool"
 args = ["mcp", "--client", "codex"]
 ```
 
-Any client that launches stdio servers can run `mfa mcp` directly,
+Any client that launches stdio servers can run `multitool mcp` directly,
 which discovers the broker and its key automatically.
 
 ## Contributing
@@ -179,4 +197,4 @@ against a mock broker, see [DEVELOPING.md](DEVELOPING.md).
 
 ## License
 
-AgentMFA is available under the [MIT License](LICENSE).
+Multitool is available under the [MIT License](LICENSE).

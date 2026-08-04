@@ -63,7 +63,7 @@ const MOCK_ACTIVITY_META = {
   approvalTimeout: { icon: 'clockAlert', tone: 'danger' },
 };
 const MOCK_AGENT_SETUP = [
-  'Connect to the local AgentMFA broker. Read its current instructions, then list the available connections:',
+  'Connect to the local Multitool broker. Read its current instructions, then list the available connections:',
   '',
   'curl -fsS --unix-socket ~/.aka/broker.sock \\',
   '  -H "Authorization: Bearer $(cat ~/.aka/token)" \\',
@@ -360,7 +360,7 @@ function seedFixtures() {
     id: uid(),
     agent: 'claude-code',
     connection: 'notion',
-    tool: 'agentmfa_notion_search',
+    tool: 'multitool_notion_search',
     prompt: 'Notion needs to know where to search: which workspace should this query run against?',
     fields: [
       { name: 'workspace', label: 'Workspace', required: true },
@@ -389,7 +389,7 @@ function seedFixtures() {
     id: uid(),
     agent: 'claude-code',
     connection: 'notion',
-    tool: 'agentmfa_notion_connect',
+    tool: 'multitool_notion_connect',
     prompt: 'Which stored credential should this integration use?',
     fields: [{ name: 'client_secret_name', label: 'Credential name' }],
     credential_warning: true,
@@ -477,7 +477,7 @@ function seedFixtures() {
       detail: 'host key SHA256:t3kZ0h1Qm7pXvB2nR8sLdY4wJcF6aGuE9oNbT5iKxWs',
       consequence:
         'Approving signs one SSH login. What runs afterwards is between the client and the '
-        + 'host: AgentMFA is not in that connection, so it cannot see the commands, time the '
+        + 'host: Multitool is not in that connection, so it cannot see the commands, time the '
         + 'session out, or close it.',
       waiting: 1,
       requested_at: new Date(Date.now() - 2000).toISOString(),
@@ -525,7 +525,7 @@ function seedFixtures() {
       connection: 'notion',
       agent: 'claude-code',
       summary: 'Which workspace should this query use?',
-      detail: 'agentmfa_notion_search',
+      detail: 'multitool_notion_search',
       waiting: 1,
       requested_at: t(91),
       resolved_at: t(81),
@@ -736,7 +736,7 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
         'list_issues', 'create_issue', 'create_pull_request'],
       resources_supported: true,
       resources: [
-        { uri: 'repo://aka-com/agentmfa/contents', name: 'aka-com/agentmfa' },
+        { uri: 'repo://aka-com/multitool/contents', name: 'aka-com/multitool' },
       ],
     };
   }
@@ -778,7 +778,7 @@ function mockConnectRemote(url: string, token: string | null): unknown {
     throw 'the remote broker could not be reached: connection refused';
   }
   if (token?.includes('badtoken')) {
-    throw 'the broker rejected the management token; re-issue it with `mfa manage token` and enter the new one';
+    throw 'the broker rejected the management token; re-issue it with `multitool manage token` and enter the new one';
   }
   mockBroker = {
     mode: 'remote', url: trimmed, connected: true, error: null, has_saved_token: true,
@@ -1309,7 +1309,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       const expiresAt = record.endpoint?.expires_at ?? '';
       if (kind === 'ssh' && requireAuth) {
         shownSecret = secret;
-        example = `mfa ssh-agent ${connection.name}`;
+        example = `multitool ssh-agent ${connection.name}`;
       }
       record.endpoint = kind === 'ssh'
         ? {
@@ -1371,7 +1371,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       const example = connection.type === 'pg' ? `DATABASE_URL="${dsn}"`
         : connection.type === 'ssh'
           ? endpoint.require_auth
-            ? `mfa ssh-agent ${connection.name}`
+            ? `multitool ssh-agent ${connection.name}`
             : `SSH_AUTH_SOCK="${dsn}" ${sshInvocationCommand({ ...connection, target: connTarget(connection) })}`
         : `curl -H "Authorization: Bearer ${secret}" ${dsn}/`;
       return {

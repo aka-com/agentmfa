@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    aka_desktop_app::run()
+    multitool_desktop_app::run()
 }

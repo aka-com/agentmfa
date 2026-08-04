@@ -204,7 +204,7 @@ impl Transport {
                         message: if error.is_timeout() {
                             format!(
                                 "no answer from the broker within {}s; if the command was waiting \
-                                 on a gated action, confirm it in the AgentMFA app",
+                                 on a gated action, confirm it in the Multitool app",
                                 REQUEST_TIMEOUT.as_secs()
                             )
                         } else {
@@ -233,7 +233,7 @@ impl Transport {
             .map_err(|_| ManageError::Unreachable {
                 message: format!(
                     "no answer from the broker socket within {}s; if the command was waiting on a \
-                     gated action, confirm it in the AgentMFA app",
+                     gated action, confirm it in the Multitool app",
                     REQUEST_TIMEOUT.as_secs()
                 ),
             })?,

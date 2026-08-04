@@ -12,7 +12,7 @@ elif [[ $# -gt 0 ]]; then
   exit 2
 else
   confirmed=false
-  read -r -p "Delete all AKA sandbox containers, volumes, and generated SSH keys? [y/N] " answer
+  read -r -p "Delete all Multitool sandbox containers, volumes, and generated SSH keys? [y/N] " answer
   case "$answer" in
     y|Y|yes|YES) confirmed=true ;;
   esac

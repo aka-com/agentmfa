@@ -158,7 +158,7 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
  *
  * Off by default, because turning it on is a real trade: stock `ssh` cannot
  * send the extension, so an authenticated endpoint has to be reached through
- * `mfa ssh-agent` rather than by naming the socket.
+ * `multitool ssh-agent` rather than by naming the socket.
  */
 export function EndpointAuthRow({ connection: c }: {
   connection: ConnectionSummary;
@@ -172,7 +172,7 @@ export function EndpointAuthRow({ connection: c }: {
       <div className="cd-confirm-sub">
         {on
           ? 'The signing socket refuses to list keys or sign until the caller presents this '
-            + 'endpoint’s secret. Reach it with the mfa ssh-agent command above.'
+            + 'endpoint’s secret. Reach it with the multitool ssh-agent command above.'
           : 'Any process running as you that finds the signing socket can log in as the '
             + 'pinned user. The ssh-agent protocol carries no password of its own.'}
       </div>

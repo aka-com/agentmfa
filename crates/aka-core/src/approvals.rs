@@ -16,7 +16,7 @@
 //!   waiter rides. Otherwise the first honest use of the switch would bury
 //!   the user.
 //! - It **fails closed**. With no surface able to ask (a headless
-//!   `mfa serve`, a shell that never implemented the hook), traffic on a
+//!   `multitool serve`, a shell that never implemented the hook), traffic on a
 //!   confirm-on connection gets only a short reconnect grace, then is refused
 //!   rather than waved through: the user asked to be asked.
 //! - A refusal **cools down**. An agent that retries in a loop would
@@ -314,7 +314,7 @@ impl Verdict {
     pub fn detail(self) -> &'static str {
         match self {
             Verdict::Allowed => "approved",
-            Verdict::Denied => "the user refused this call in AgentMFA",
+            Verdict::Denied => "the user refused this call in Multitool",
             Verdict::Revoked => {
                 "the connection or its access policy changed while confirmation was waiting"
             }
@@ -323,7 +323,7 @@ impl Verdict {
                 // An attached app that predates request surfaces is an
                 // observer here, not a surface: name the update path or the
                 // refusal reads as the app being ignored.
-                "traffic confirmation is unavailable; attach AgentMFA (updating it if one is \
+                "traffic confirmation is unavailable; attach Multitool (updating it if one is \
                  already attached), or retry when capacity is available"
             }
         }

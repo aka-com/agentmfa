@@ -10,11 +10,11 @@ repo_root="$(cd "$script_dir/.." >/dev/null && pwd)"
 cd "$repo_root"
 
 packages=(
-  agentmfa-darwin-arm64
-  agentmfa-darwin-x64
-  agentmfa-linux-arm64
-  agentmfa-linux-x64
-  agentmfa
+  multitool-darwin-arm64
+  multitool-darwin-x64
+  multitool-linux-arm64
+  multitool-linux-x64
+  multitool
 )
 
 # `npm publish --dry-run` never authenticates with the registry, so it can
@@ -28,10 +28,17 @@ if ! npm_user="$(npm whoami 2>/dev/null)"; then
 fi
 
 for package in "${packages[@]}"; do
-  if ! maintainers="$(npm view "$package" maintainers --json 2>/dev/null)"; then
-    echo "Could not read npm ownership for $package; refusing to publish." >&2
+  published="@aka-com/$package"
+  if ! view_output="$(npm view "$published" maintainers --json 2>&1)"; then
+    if [[ "$view_output" == *"E404"* ]]; then
+      echo "$published is not published yet; npm will verify scope access on first publish."
+      continue
+    fi
+    echo "Could not inspect maintainers for $published; refusing to publish." >&2
+    echo "$view_output" >&2
     exit 1
   fi
+  maintainers="$view_output"
   if ! node -e '
     const entries = JSON.parse(process.argv[1]);
     const user = process.argv[2];
@@ -41,7 +48,7 @@ for package in "${packages[@]}"; do
     );
     process.exit(names.includes(user) ? 0 : 1);
   ' "$maintainers" "$npm_user"; then
-    echo "npm user $npm_user is not a maintainer of $package; refusing to publish." >&2
+    echo "npm user $npm_user is not a maintainer of $published; refusing to publish." >&2
     exit 1
   fi
 done
@@ -51,6 +58,6 @@ node scripts/npm/sync-versions.mjs --check
 node scripts/npm/verify-package.mjs --all
 
 for package in "${packages[@]}"; do
-  echo "publishing $package"
+  echo "publishing @aka-com/$package"
   (cd "npm/$package" && npm publish "$@")
 done

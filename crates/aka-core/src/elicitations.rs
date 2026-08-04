@@ -556,7 +556,7 @@ impl Elicitations {
                 .agent(request.agent.clone())
                 .connection(request.connection.name.clone())
                 .detail(
-                    "Shown as plain text with a warning. AgentMFA never prompts for a \
+                    "Shown as plain text with a warning. Multitool never prompts for a \
                      credential on a tool's behalf — store it in the vault instead."
                         .to_string(),
                 )

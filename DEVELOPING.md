@@ -1,4 +1,4 @@
-## Developing AgentMFA
+## Developing Multitool
 
 ```sh
 npm install        # Install the pinned Tauri and TypeScript toolchain
@@ -22,7 +22,7 @@ npm run sandbox:up     # start the four upstreams (Docker required)
 npm run sandbox:test   # drive real brokers against them
 ```
 
-Each test file in `dev/sandbox/tests/` starts its own headless `mfa serve`
+Each test file in `dev/sandbox/tests/` starts its own headless `multitool serve`
 on a throwaway root and speaks the real wire planes — control socket,
 manage plane, Postgres proxy, SSH agent socket, MCP host — against the
 sandbox's HTTP, MCP, Postgres, and SSH services. It is not part of
@@ -116,7 +116,7 @@ What that means while developing:
   `src-tauri/entitlements.signed.plist` from `src-tauri/entitlements.plist`
   plus `keychain-access-groups = <TEAMID>.com.aka.desktop`, reading the team
   ID from `APPLE_TEAM_ID` or off the signing identity's name. It refuses to
-  build if it cannot resolve one; `AGENTMFA_NO_KEYCHAIN_ENTITLEMENT=1` opts
+  build if it cannot resolve one; `MULTITOOL_NO_KEYCHAIN_ENTITLEMENT=1` opts
   out and accepts the prompts.
 - `scripts/build.sh` loads signing settings from the ignored repository
   `.env` when it exists. Variables explicitly exported by the caller take
@@ -124,12 +124,12 @@ What that means while developing:
 - Items written by earlier builds are in the login keychain. They migrate on
   first read: copied across, original deleted. Each one may prompt once more
   on the way, and never again.
-- `mfa status` prints which keychain the store is on, and
+- `multitool status` prints which keychain the store is on, and
   `<data-dir>/keychain.json` records it. A binary that cannot reach the
   data-protection keychain but finds a store recorded on it fails with an
   explanation rather than presenting an empty vault.
 - `AKA_KEYCHAIN=login` forces the old behaviour — the escape hatch for
-  running an unsigned `mfa` against a store the signed app owns.
+  running an unsigned `multitool` against a store the signed app owns.
 
 ### If a signed build will not launch
 
@@ -143,7 +143,7 @@ probe cannot help there — it never gets to run.)
 The fix is a provisioning profile, and the build supports it:
 
 ```sh
-APPLE_PROVISIONING_PROFILE=~/AgentMFA.provisionprofile npm run build
+APPLE_PROVISIONING_PROFILE=~/Multitool.provisionprofile npm run build
 ```
 
 That adds `com.apple.application-identifier` — restricted for certain, which
@@ -164,9 +164,9 @@ Ask-before decision, pinned destination, and immediate revocation behavior.
 Destructive UI actions such as rotating the shared key use ordinary in-app
 confirmation dialogs.
 
-The unsigned `mfa` binary uses the login keychain for an offline edit, so macOS
+The unsigned `multitool` binary uses the login keychain for an offline edit, so macOS
 may still show a Keychain access dialog for those reads. That is a consequence
-of the offline executable's Keychain access, not an AgentMFA presence policy;
+of the offline executable's Keychain access, not a Multitool presence policy;
 online CLI commands go through the broker and do not touch the Keychain.
 
 ## Publishing
@@ -197,8 +197,8 @@ Prerequisites: one-time macOS cross-linker setup: `brew install zig`
    npm run build:release  # will also notarize, staple, and validate
 
    gh release create v0.1.0 \
-     src-tauri/target/universal-apple-darwin/release/bundle/dmg/AgentMFA_0.1.0_universal.dmg \
+     src-tauri/target/universal-apple-darwin/release/bundle/dmg/Multitool_0.1.0_universal.dmg \
      --target main \
-     --title "AgentMFA 0.1.0" \
+     --title "Multitool 0.1.0" \
      --generate-notes
    ```

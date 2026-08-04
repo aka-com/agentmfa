@@ -359,7 +359,7 @@ async fn wait_for_redirect_verified(
         let _ = respond(
             &mut stream,
             "200 OK",
-            "You can close this window and return to AgentMFA.",
+            "You can close this window and return to Multitool.",
         )
         .await;
         return Ok((code, state, iss));
@@ -372,7 +372,7 @@ async fn respond(
     body: &str,
 ) -> std::io::Result<()> {
     let page = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>AgentMFA</title>\
+        "<!doctype html><meta charset=\"utf-8\"><title>Multitool</title>\
          <body style=\"font-family:system-ui;margin:4rem auto;max-width:26rem;text-align:center\">\
          <h3>{body}</h3></body>"
     );

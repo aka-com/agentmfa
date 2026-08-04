@@ -1121,7 +1121,7 @@ async fn mutating_retries_coalesce_to_one_execution() {
         &h.socket,
         "POST",
         "/v1/http",
-        &[("authorization", &auth), ("x-agentmfa-client", "codex")],
+        &[("authorization", &auth), ("x-multitool-client", "codex")],
         Some(payload.clone()),
     )
     .await;
@@ -1142,7 +1142,7 @@ async fn mutating_retries_coalesce_to_one_execution() {
         "/v1/http",
         &[
             ("authorization", &auth),
-            ("x-agentmfa-client", "another-label"),
+            ("x-multitool-client", "another-label"),
         ],
         Some(altered),
     )
@@ -1314,7 +1314,7 @@ async fn changing_the_client_label_cannot_bypass_the_identity_rate_limit() {
             &h.socket,
             "GET",
             "/v1/connections",
-            &[("authorization", &auth), ("x-agentmfa-client", label)],
+            &[("authorization", &auth), ("x-multitool-client", label)],
             None,
         )
         .await;
@@ -1326,7 +1326,7 @@ async fn changing_the_client_label_cannot_bypass_the_identity_rate_limit() {
         "/v1/connections",
         &[
             ("authorization", &auth),
-            ("x-agentmfa-client", "fresh-label"),
+            ("x-multitool-client", "fresh-label"),
         ],
         None,
     )
@@ -1463,7 +1463,7 @@ async fn whoami_probes_a_stored_token() {
         "/v1/whoami",
         &[
             ("authorization", &auth),
-            ("x-agentmfa-client", "claude-code"),
+            ("x-multitool-client", "claude-code"),
         ],
         None,
     )
@@ -1471,6 +1471,20 @@ async fn whoami_probes_a_stored_token() {
     assert_eq!(status, 200);
     assert_eq!(body["agent"], "claude-code");
     assert!(body["expires_at"].as_str().is_some());
+    // Existing integrations can migrate independently of the broker.
+    let (status, body) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/whoami",
+        &[
+            ("authorization", &auth),
+            ("x-agentmfa-client", "legacy-client"),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["agent"], "legacy-client");
     // Unlabeled calls fall back to the generic label.
     let (status, body) = uds_request(
         &h.socket,
@@ -1996,7 +2010,7 @@ async fn an_oversized_mcp_tool_result_becomes_a_bounded_explicit_tool_error() {
     assert_eq!(response["id"], 77);
     assert_eq!(response["result"]["isError"], true);
     assert_eq!(
-        response["result"]["_meta"]["agentmfa"]["result_truncated"],
+        response["result"]["_meta"]["multitool"]["result_truncated"],
         true
     );
     let text = response["result"]["content"][0]["text"]
@@ -2018,7 +2032,7 @@ async fn agent_connect_requests_are_audited_and_debounced() {
         "/v1/connect-requests",
         &[
             ("authorization", &auth),
-            ("x-agentmfa-client", "claude-code"),
+            ("x-multitool-client", "claude-code"),
         ],
         Some(json!({ "service": "linear" })),
     )
@@ -2042,7 +2056,7 @@ async fn agent_connect_requests_are_audited_and_debounced() {
         "/v1/connect-requests",
         &[
             ("authorization", &auth),
-            ("x-agentmfa-client", "claude-code"),
+            ("x-multitool-client", "claude-code"),
         ],
         Some(json!({ "service": "linear" })),
     )
@@ -2057,7 +2071,7 @@ async fn agent_connect_requests_are_audited_and_debounced() {
         "/v1/connect-requests",
         &[
             ("authorization", &auth),
-            ("x-agentmfa-client", "claude-code"),
+            ("x-multitool-client", "claude-code"),
         ],
         Some(json!({ "service": "" })),
     )
@@ -2219,7 +2233,7 @@ async fn brokered_calls_audit_attribution_duration_and_outcome() {
         "/v1/http",
         &[
             ("authorization", &auth),
-            ("x-agentmfa-client", "claude-code"),
+            ("x-multitool-client", "claude-code"),
         ],
         Some(json!({ "connection": "github", "method": "GET", "path": "/user/repos" })),
     )

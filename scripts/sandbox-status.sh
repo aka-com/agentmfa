@@ -139,7 +139,7 @@ SSH
   Name:             sandbox-ssh
   User / Host / Port: sandbox / 127.0.0.1 / $ssh_port
   Identity file:    $client_key
-                    (pre-selected by the Quick setup line; AKA reads
+                    (pre-selected by the Quick setup line; Multitool reads
                     the key file itself — no need to paste key contents)
   Host key fingerprint — optional, under “Advanced”: $ssh_fingerprint
                     Leave blank to confirm and pin it at the first connection.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the broker test suite against the local Docker sandbox.
 #
-# The suite drives real brokers (`mfa serve` on throwaway roots) against the
+# The suite drives real brokers (`multitool serve` on throwaway roots) against the
 # sandbox's four upstreams, so this script checks that the sandbox is up,
 # makes sure the binaries the tests spawn exist, and then hands over to the
 # Node test runner. Every argument is passed through to it, so a single file
@@ -52,14 +52,14 @@ check_tcp "$ssh_port" || not_up "SSH is not listening on 127.0.0.1:$ssh_port"
 [[ -f "$client_key" ]] || not_up "the sandbox SSH key is missing ($client_key)"
 
 # The tests spawn this binary; build it unless the caller pinned one.
-if [[ -z "${AKA_MFA_BIN:-}" ]]; then
-  echo "Building the mfa binary..."
-  cargo build -p mfa
-  AKA_MFA_BIN="$repo_root/target/debug/mfa"
-  export AKA_MFA_BIN
+if [[ -z "${AKA_MULTITOOL_BIN:-}" ]]; then
+  echo "Building the multitool binary..."
+  cargo build -p multitool
+  AKA_MULTITOOL_BIN="$repo_root/target/debug/multitool"
+  export AKA_MULTITOOL_BIN
 fi
-[[ -x "$AKA_MFA_BIN" ]] || {
-  echo "sandbox: AKA_MFA_BIN=$AKA_MFA_BIN is not executable" >&2
+[[ -x "$AKA_MULTITOOL_BIN" ]] || {
+  echo "sandbox: AKA_MULTITOOL_BIN=$AKA_MULTITOOL_BIN is not executable" >&2
   exit 1
 }
 

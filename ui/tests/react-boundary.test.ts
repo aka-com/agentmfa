@@ -414,7 +414,7 @@ test('direct connection guides tell the user to hand the address to their agent'
 
   assert.match(startView, /Tell your agent to connect directly to this database\./);
   assert.match(startView, /Tell your agent to connect directly to this server\./);
-  assert.doesNotMatch(startView, /Connect directly to this (?:database|remote server) via AgentMFA\./);
+  assert.doesNotMatch(startView, /Connect directly to this (?:database|remote server) via Multitool\./);
 });
 
 test('a finished step 1 keeps its action but gives up the primary button', async () => {
@@ -678,7 +678,7 @@ test('connection detail keeps only Ask before outside its Advanced disclosure', 
     /invoke\('set_expose_response_credentials',[\s\S]*?expose: false/,
   );
   assert.doesNotMatch(disable, /holdDropdownFormOpen\(\)/);
-  assert.match(app, /AgentMFA has not connected to this tool yet\. The SSH host key will be pinned on first connection\./);
+  assert.match(app, /Multitool has not connected to this tool yet\. The SSH host key will be pinned on first connection\./);
 });
 
 test('request history and secret dependencies remain actionable', async () => {

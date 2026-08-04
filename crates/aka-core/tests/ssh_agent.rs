@@ -1658,12 +1658,21 @@ async fn the_session_ends_when_the_client_closes_its_agent_fd_after_signing() {
 /* --------------------- authenticated endpoint sockets --------------------- */
 
 const SSH_AGENT_EXTENSION_FAILURE: u8 = 28;
-const AUTHENTICATE_EXTENSION: &[u8] = b"authenticate@agentmfa.dev";
+const AUTHENTICATE_EXTENSION: &[u8] = b"authenticate@multitool.dev";
+const LEGACY_AUTHENTICATE_EXTENSION: &[u8] = b"authenticate@agentmfa.dev";
 
 /// Present `secret` on this connection and return the reply type.
 async fn authenticate(stream: &mut UnixStream, secret: &str) -> u8 {
+    authenticate_with_extension(stream, AUTHENTICATE_EXTENSION, secret).await
+}
+
+async fn authenticate_with_extension(
+    stream: &mut UnixStream,
+    extension: &[u8],
+    secret: &str,
+) -> u8 {
     let mut body = Vec::new();
-    put_string(&mut body, AUTHENTICATE_EXTENSION);
+    put_string(&mut body, extension);
     put_string(&mut body, secret.as_bytes());
     write_message(stream, SSH_AGENTC_EXTENSION, &body).await;
     read_message(stream).await.0
@@ -1691,7 +1700,7 @@ async fn require_endpoint_auth(h: &Harness) -> String {
         "an authenticated endpoint surfaces the secret a client has to send"
     );
     assert!(
-        info.example.contains("mfa ssh-agent"),
+        info.example.contains("multitool ssh-agent"),
         "the example must name the forwarder that can send it: {}",
         info.example
     );
@@ -1738,6 +1747,22 @@ async fn an_authenticated_endpoint_refuses_everything_until_the_secret_arrives()
     let (kind, sig) = sign(&mut s, &key_blob, &data, 0).await;
     assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
     verify_signature(key.public_key(), &sig, &data);
+}
+
+#[tokio::test]
+async fn the_legacy_authentication_extension_remains_accepted() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let _host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    h.pair().await;
+    let info = h.issue_ssh_endpoint().await;
+    let secret = require_endpoint_auth(&h).await;
+
+    let mut stream = UnixStream::connect(&info.dsn).await.unwrap();
+    assert_eq!(
+        authenticate_with_extension(&mut stream, LEGACY_AUTHENTICATE_EXTENSION, &secret).await,
+        SSH_AGENT_SUCCESS
+    );
 }
 
 /// A wrong secret leaves the connection exactly where it was, and says so in
@@ -1897,7 +1922,7 @@ async fn reissuing_an_endpoint_keeps_it_authenticated() {
     let reissued = h.issue_ssh_endpoint().await;
     assert_ne!(reissued.secret, first, "the secret rotates");
     assert!(
-        !reissued.secret.is_empty() && reissued.example.contains("mfa ssh-agent"),
+        !reissued.secret.is_empty() && reissued.example.contains("multitool ssh-agent"),
         "the socket still requires authentication after a rotation"
     );
 

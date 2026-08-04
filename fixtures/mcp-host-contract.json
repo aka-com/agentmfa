@@ -18,16 +18,16 @@
   },
   "fake_broker": {
     "wired_tools": [
-      "agentmfa_connect",
-      "agentmfa_prod-db_open",
-      "agentmfa_status"
+      "multitool_connect",
+      "multitool_prod-db_open",
+      "multitool_status"
     ],
     "bare_tools": [
-      "agentmfa_connect",
-      "agentmfa_status"
+      "multitool_connect",
+      "multitool_status"
     ],
     "open_call": {
-      "tool": "agentmfa_prod-db_open",
+      "tool": "multitool_prod-db_open",
       "result": {
         "endpoint": "/v1/pg/open",
         "body": {
@@ -38,17 +38,17 @@
   },
   "real_broker": {
     "wired_tools": [
-      "agentmfa_connect",
-      "agentmfa_notes_search",
-      "agentmfa_prod-db_request",
-      "agentmfa_status"
+      "multitool_connect",
+      "multitool_notes_search",
+      "multitool_prod-db_request",
+      "multitool_status"
     ],
     "bare_tools": [
-      "agentmfa_connect",
-      "agentmfa_status"
+      "multitool_connect",
+      "multitool_status"
     ],
     "http_call": {
-      "tool": "agentmfa_prod-db_request",
+      "tool": "multitool_prod-db_request",
       "arguments": {
         "method": "GET",
         "path": "/whoami"
@@ -58,7 +58,7 @@
       "forbidden_response_text": "secret-value"
     },
     "mcp_call": {
-      "tool": "agentmfa_notes_search",
+      "tool": "multitool_notes_search",
       "arguments": {
         "query": "roadmap"
       },
@@ -72,8 +72,8 @@
       }
     },
     "status": {
-      "tool": "agentmfa_status",
-      "contains_tool": "agentmfa_notes_search",
+      "tool": "multitool_status",
+      "contains_tool": "multitool_notes_search",
       "excludes_tool_fragment": "notes_request",
       "bare_tools": []
     }

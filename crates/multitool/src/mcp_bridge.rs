@@ -1,7 +1,7 @@
-//! `mfa mcp`: a stdio ⇄ streamable-HTTP MCP bridge.
+//! `multitool mcp`: a stdio ⇄ streamable-HTTP MCP bridge.
 //!
 //! Every MCP client that can launch a stdio server — Claude Code, Claude
-//! Desktop, Codex, custom harnesses — can be pointed at `mfa mcp` and needs
+//! Desktop, Codex, custom harnesses — can be pointed at `multitool mcp` and needs
 //! no token pasting and no port discovery: the bridge reads this computer's
 //! shared key from the broker's token file and finds the MCP host through
 //! the broker's discovery manifest (the MCP host's loopback port is dynamic,
@@ -69,7 +69,7 @@ async fn discover_mcp_url(socket: &Path) -> Result<String, String> {
             Ok(manifest) => {
                 if !reported_protocol_skew {
                     if let Some(warning) = agent_protocol_warning(&manifest) {
-                        eprintln!("mfa mcp: warning: {warning}");
+                        eprintln!("multitool mcp: warning: {warning}");
                         reported_protocol_skew = true;
                     }
                 }
@@ -78,15 +78,15 @@ async fn discover_mcp_url(socket: &Path) -> Result<String, String> {
                 }
                 if !reported_no_mcp {
                     eprintln!(
-                        "mfa mcp: the broker is running but its MCP host is not; \
-                         open the AgentMFA app (waiting)"
+                        "multitool mcp: the broker is running but its MCP host is not; \
+                         open the Multitool app (waiting)"
                     );
                     reported_no_mcp = true;
                 }
             }
             Err(_) if !reported_waiting => {
                 eprintln!(
-                    "mfa mcp: waiting for the AgentMFA broker at {}",
+                    "multitool mcp: waiting for the Multitool broker at {}",
                     socket.display()
                 );
                 reported_waiting = true;
@@ -95,7 +95,7 @@ async fn discover_mcp_url(socket: &Path) -> Result<String, String> {
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
-                "no MCP host within {}s — is the AgentMFA app running?",
+                "no MCP host within {}s — is the Multitool app running?",
                 DISCOVER_TIMEOUT.as_secs()
             ));
         }
@@ -243,7 +243,7 @@ impl Bridge {
             request = request.header("mcp-session-id", session.clone());
         }
         if let Some(label) = &self.label {
-            request = request.header("x-agentmfa-client", label.clone());
+            request = request.header("x-multitool-client", label.clone());
         }
         // SEP-2243: surface the JSON-RPC method (and named tool/prompt) as
         // routing headers so the host and any load balancer between it and
@@ -550,7 +550,7 @@ fn internal_error(message: &str, detail: &str) -> String {
         "id": request_id(message),
         "error": {
             "code": -32603,
-            "message": "AgentMFA MCP transport error",
+            "message": "Multitool MCP transport error",
             "data": { "detail": detail },
         },
     })
@@ -597,7 +597,7 @@ fn correlate_http_error(
             "id": id,
             "error": {
                 "code": -32000,
-                "message": format!("AgentMFA MCP host returned HTTP {status}"),
+                "message": format!("Multitool MCP host returned HTTP {status}"),
                 "data": { "detail": body.chars().take(256).collect::<String>() },
             },
         })
@@ -632,7 +632,7 @@ fn one_line(message: &str) -> Option<String> {
     match serde_json::from_str::<serde_json::Value>(message) {
         Ok(value) => Some(value.to_string()),
         Err(_) => {
-            eprintln!("mfa mcp: dropped a non-JSON frame from the MCP host");
+            eprintln!("multitool mcp: dropped a non-JSON frame from the MCP host");
             None
         }
     }
@@ -670,7 +670,7 @@ async fn follow_notifications(
             .header("accept", "text/event-stream")
             .header("mcp-session-id", session.clone());
         if let Some(label) = &label {
-            request = request.header("x-agentmfa-client", label.clone());
+            request = request.header("x-multitool-client", label.clone());
         }
         if let Some(version) = &protocol_version {
             request = request.header("mcp-protocol-version", version.clone());
@@ -1052,7 +1052,7 @@ mod tests {
                 }
                 "tools/call" => {
                     assert_eq!(headers.get("mcp-session-id").unwrap(), "sess-1");
-                    assert_eq!(headers.get("x-agentmfa-client").unwrap(), "test-client");
+                    assert_eq!(headers.get("x-multitool-client").unwrap(), "test-client");
                     // SEP-2243 routing headers, derived from the body.
                     assert_eq!(headers.get("mcp-method").unwrap(), "tools/call");
                     assert_eq!(headers.get("mcp-name").unwrap(), "search");

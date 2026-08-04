@@ -1,6 +1,6 @@
 // A minimal ssh-agent client, for talking to the socket `/v1/ssh/open` mints.
 //
-// `mfa ssh <connection>` hands an agent socket to a stock OpenSSH client;
+// `multitool ssh <connection>` hands an agent socket to a stock OpenSSH client;
 // the broker signs with a key that never leaves it. These helpers let a test
 // inspect that socket directly — list the identity, and attempt a signature
 // — without needing a full SSH client, which matters for the refusal cases:

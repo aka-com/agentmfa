@@ -143,7 +143,7 @@ function startSubject(option: StartOption): string {
 
 /** Step 1's lead before anything exists: what the step is about to do. */
 export function startAddLead(option: StartOption): string {
-  return `Connect to ${startSubject(option)} via AgentMFA.`;
+  return `Connect to ${startSubject(option)} via Multitool.`;
 }
 
 /**
@@ -162,7 +162,7 @@ export function startAddedLead(option: StartOption, progress: StartProgress): st
     return `${named} is connected, but agents may not call it yet — turn on`
       + ' agent access from the Tools tab.';
   }
-  return `Agents reach ${startSubject(option)} as ${named} through AgentMFA.`;
+  return `Agents reach ${startSubject(option)} as ${named} through Multitool.`;
 }
 
 /**
@@ -268,7 +268,7 @@ export interface ConnectClient {
   /** The walkthrough pane's copy-button label. */
   copyLabel: string;
   snippet: (env: ConnectClientEnv) => string;
-  /** This client launches `mfa mcp`, which must be installed separately. */
+  /** This client launches `multitool mcp`, which must be installed separately. */
   requiresCli?: boolean;
   /** Its Quick Start snippet is shell commands, so CLI installation can be
    * prepended to the same runnable block. */
@@ -283,7 +283,7 @@ export interface ConnectClient {
   note?: string;
 }
 
-export const CLI_INSTALL_COMMAND = 'npm install -g agentmfa';
+export const CLI_INSTALL_COMMAND = 'npm install -g @aka-com/multitool';
 
 /** Connection-guide steps include the CLI prerequisite as its own first step
  * for clients that launch the stdio bridge. */
@@ -291,19 +291,19 @@ export function connectGuideSteps(client: ConnectClient, env: ConnectClientEnv):
   const steps = client.steps(env);
   if (!client.requiresCli) return steps;
   return [{
-    title: 'Install the AgentMFA CLI',
-    detail: 'Install the mfa command globally and keep it available on PATH. Requires Node.js 22 or newer.',
+    title: 'Install the Multitool CLI',
+    detail: 'Install the multitool command globally and keep it available on PATH. Requires Node.js 22 or newer.',
     snippet: CLI_INSTALL_COMMAND,
   }, ...steps];
 }
 
 const SNIPPETS: Record<string, (env: ConnectClientEnv) => string> = {
-  'claude-code': () => 'claude mcp add agentmfa -- mfa mcp --client claude-code',
+  'claude-code': () => 'claude mcp add multitool -- multitool mcp --client claude-code',
   'claude-desktop': () =>
     '{\n'
     + '  "mcpServers": {\n'
-    + '    "agentmfa": {\n'
-    + '      "command": "mfa",\n'
+    + '    "multitool": {\n'
+    + '      "command": "multitool",\n'
     + '      "args": [\n'
     + '        "mcp",\n'
     + '        "--client",\n'
@@ -312,7 +312,7 @@ const SNIPPETS: Record<string, (env: ConnectClientEnv) => string> = {
     + '    }\n'
     + '  }\n'
     + '}',
-  codex: () => '[mcp_servers.agentmfa]\ncommand = "mfa"\nargs = ["mcp", "--client", "codex"]',
+  codex: () => '[mcp_servers.multitool]\ncommand = "multitool"\nargs = ["mcp", "--client", "codex"]',
   mcp: (env: ConnectClientEnv) =>
     `# the MCP URL's port moves with restarts — read mcp_url from the manifest\n`
     + `curl -fsS --unix-socket ${env.socket} http://localhost/.well-known/agent-broker.json\n\n`
@@ -320,8 +320,8 @@ const SNIPPETS: Record<string, (env: ConnectClientEnv) => string> = {
     + `Authorization: Bearer $(cat ${env.token})`,
   cli: (env: ConnectClientEnv) =>
     `# discover what's available (and full API docs)\ncurl -fsS --unix-socket ${env.socket} http://localhost/instructions\n\n`
-    + `# authenticated calls: one shared key for this machine\nexport AGENTMFA_TOKEN="$(cat ${env.token})"\n`
-    + `curl -fsS --unix-socket ${env.socket} \\\n  -H "Authorization: Bearer $AGENTMFA_TOKEN" \\\n  -H "X-AgentMFA-Client: my-harness" \\\n  http://localhost/v1/connections`,
+    + `# authenticated calls: one shared key for this machine\nexport MULTITOOL_TOKEN="$(cat ${env.token})"\n`
+    + `curl -fsS --unix-socket ${env.socket} \\\n  -H "Authorization: Bearer $MULTITOOL_TOKEN" \\\n  -H "X-Multitool-Client: my-harness" \\\n  http://localhost/v1/connections`,
 };
 
 export const CONNECT_CLIENTS: ConnectClient[] = [
@@ -332,19 +332,19 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     mark: 'CC',
     icon: 'anthropic',
     labels: ['claude-code'],
-    lead: () => 'Install the AgentMFA CLI, then add it to Claude Code:',
+    lead: () => 'Install the Multitool CLI, then add it to Claude Code:',
     copyLabel: 'Copy',
     snippet: SNIPPETS['claude-code'],
     requiresCli: true,
     inlineCliInstall: true,
     steps: (env) => [
       {
-        title: 'Add AgentMFA as an MCP server',
+        title: 'Add Multitool as an MCP server',
         snippet: SNIPPETS['claude-code'](env),
       },
       {
         title: 'Check for valid tools',
-        detail: 'In any Claude Code session, ask it to run agentmfa_status to list your enabled tools.',
+        detail: 'In any Claude Code session, ask it to run multitool_status to list your enabled tools.',
       },
     ],
   },
@@ -362,13 +362,13 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     requiresCli: true,
     steps: (env) => [
       {
-        title: 'Add AgentMFA to Claude Desktop’s config',
+        title: 'Add Multitool to Claude Desktop’s config',
         detail: `Merge this into ${CLAUDE_DESKTOP_CONFIG_PATH[env.platform]}, or copy the whole file if you don’t have one yet.`,
         snippet: SNIPPETS['claude-desktop'](env),
       },
       {
         title: 'Restart Claude Desktop',
-        detail: 'AgentMFA appears under the tools icon. Ask Claude to run agentmfa_status to confirm.',
+        detail: 'Multitool appears under the tools icon. Ask Claude to run multitool_status to confirm.',
       },
     ],
   },
@@ -391,7 +391,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
       },
       {
         title: 'Verify from a Codex session',
-        detail: 'Ask Codex to call agentmfa_status. Your enabled tools show up as agentmfa_* tools.',
+        detail: 'Ask Codex to call multitool_status. Your enabled tools show up as multitool_* tools.',
       },
     ],
   },
@@ -413,7 +413,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
       },
       {
         title: 'Or skip HTTP entirely',
-        detail: 'After installing the AgentMFA CLI, clients that launch stdio servers can run mfa mcp directly.',
+        detail: 'After installing the Multitool CLI, clients that launch stdio servers can run multitool mcp directly.',
         snippet: CLI_INSTALL_COMMAND,
       },
     ],
@@ -491,7 +491,7 @@ export function startProgress(
 
 /** The example task, with a placeholder while no tool exists yet. */
 export function startTask(option: StartOption, progress: StartProgress): string {
-  return `Using my AgentMFA connection "${progress.toolName ?? 'my-tool'}", ${option.taskBody}`;
+  return `Using my Multitool connection "${progress.toolName ?? 'my-tool'}", ${option.taskBody}`;
 }
 
 function sshAuthSockAssignment(socket: string): string {
@@ -585,7 +585,7 @@ export function sshDirectCommand(
   // it is the command shown — an address that cannot be used is worse than no
   // address, because it looks like a working one.
   if (requireAuth) {
-    return `mfa ssh-agent ${shellWord(connection.name ?? '')} -- ${sshInvocationCommand(connection)}`;
+    return `multitool ssh-agent ${shellWord(connection.name ?? '')} -- ${sshInvocationCommand(connection)}`;
   }
   return `${sshAuthSockAssignment(socket)} ${sshInvocationCommand(connection)}`;
 }
@@ -632,7 +632,7 @@ export function directStartTask(
   if (option.connType === 'ssh') {
     const socket = endpoint.dsn
       ? `Use this SSH agent socket: ${sshAuthSockAssignment(endpoint.dsn)}`
-      : 'Use the SSH agent socket AgentMFA issued.';
+      : 'Use the SSH agent socket Multitool issued.';
     const connect = endpoint.sshInvocation
       ? `SSH to the server with ${endpoint.sshInvocation}`
       : 'SSH to the configured server';
@@ -640,7 +640,7 @@ export function directStartTask(
   }
   const lead = endpoint.dsn
     ? `Connect to this Postgres DSN: ${endpoint.dsn}`
-    : `Connect to the direct endpoint AgentMFA issued.`;
+    : `Connect to the direct endpoint Multitool issued.`;
   return `${lead}\n\nThen ${option.taskBody}`;
 }
 

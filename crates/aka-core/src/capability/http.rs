@@ -198,7 +198,7 @@ const ALWAYS_RESERVED: &[&str] = &["authorization"];
 /// swallowed it would silently disable the vendor's own retry safety. A
 /// broker-namespaced header is unambiguous and is stripped before the upstream
 /// leg, like every other piece of broker plumbing.
-pub const ENDPOINT_REQUEST_ID_HEADER: &str = "x-agentmfa-request-id";
+pub const ENDPOINT_REQUEST_ID_HEADER: &str = "x-multitool-request-id";
 
 pub fn validate_headers(
     headers: &[(String, String)],
@@ -2211,7 +2211,7 @@ async fn relay_response(
                                     ),
                                 }],
                                 "_meta": {
-                                    "agentmfa": {
+                                    "multitool": {
                                         "result_truncated": true,
                                         "response_cap_bytes": config.response_cap,
                                     }

@@ -262,7 +262,7 @@ test('an unanswered prompt eventually times out', { skip: !process.env.AKA_SANDB
 });
 
 // ---------------------------------------------------------------------------
-// Approval granularity that AKA does not have. Kept in this file (rather
+// Approval granularity that Multitool does not have. Kept in this file (rather
 // than only in unsupported.test.ts) because this is where an implementer
 // would look for it.
 // ---------------------------------------------------------------------------

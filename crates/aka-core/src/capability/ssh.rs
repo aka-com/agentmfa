@@ -87,7 +87,7 @@ const SSH_AGENTC_EXTENSION: u8 = 27;
 const SSH_AGENT_EXTENSION_FAILURE: u8 = 28;
 
 const SESSION_BIND_EXTENSION: &[u8] = b"session-bind@openssh.com";
-/// AgentMFA's own agent extension: proves the caller holds this endpoint's
+/// Multitool's own agent extension: proves the caller holds this endpoint's
 /// secret before the socket will list identities or sign.
 ///
 /// The ssh-agent wire protocol has no credential field, which is why a
@@ -95,7 +95,8 @@ const SESSION_BIND_EXTENSION: &[u8] = b"session-bind@openssh.com";
 /// the missing field as an extension — the one place the protocol leaves for
 /// it — carrying the same secret the PG and HTTP endpoints already present.
 /// Vendor-named per PROTOCOL.agent so it cannot collide with OpenSSH's own.
-const AUTHENTICATE_EXTENSION: &[u8] = b"authenticate@agentmfa.dev";
+const AUTHENTICATE_EXTENSION: &[u8] = b"authenticate@multitool.dev";
+const LEGACY_AUTHENTICATE_EXTENSION: &[u8] = b"authenticate@agentmfa.dev";
 const HOSTBOUND_AUTH_METHOD: &[u8] = b"publickey-hostbound-v00@openssh.com";
 
 // SIGN_REQUEST flags selecting the RSA hash (OpenSSH PROTOCOL.agent).
@@ -319,7 +320,7 @@ pub fn private_key_for_vault(
 fn check_supported(key: &PrivateKey) -> Result<(), String> {
     let unsupported = |key: &PrivateKey| {
         format!(
-            "unsupported key type {:?} (AgentMFA signs ed25519, rsa, and ecdsa \
+            "unsupported key type {:?} (Multitool signs ed25519, rsa, and ecdsa \
              on nistp256/nistp384)",
             key.key_data().algorithm().map(|a| a.as_str().to_string())
         )
@@ -686,7 +687,7 @@ struct AgentState {
     /// that minted it and by its own expiry.
     ///
     /// Held as an id, not as a resolved posture: whether the endpoint demands
-    /// `authenticate@agentmfa.dev` is read from the registry when a connection
+    /// `authenticate@multitool.dev` is read from the registry when a connection
     /// is accepted, the same place the access re-check happens. Capturing it
     /// at bind time would have made a posture change need a rebind, and
     /// rebinding a Unix socket in place is how you delete the socket you just
@@ -1085,7 +1086,7 @@ fn grade_login(
         // `ProxyJump=none`, since the agent cannot authenticate a jump hop.
         let jump_hint = if destination.is_some() {
             " If this destination is only reachable through a ProxyJump host, \
-             AgentMFA cannot broker it: the jump hop is a separate SSH login \
+             Multitool cannot broker it: the jump hop is a separate SSH login \
              against the jump host, and a tool pins one host key. Import the \
              jump host as its own tool and connect in two hops."
         } else {
@@ -1489,7 +1490,7 @@ pub const LEGACY_ENDPOINT_SOCK: &str = "agent.sock";
 pub fn endpoint_sock_name(secret: &str) -> String {
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(b"agentmfa/ssh-endpoint-socket/v1\0");
+    hasher.update(b"multitool/ssh-endpoint-socket/v1\0");
     hasher.update(secret.as_bytes());
     let digest = hasher.finalize();
     let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
@@ -1880,7 +1881,12 @@ async fn handle_request(
                 .unwrap_or_else(|| 0u32.to_be_bytes().to_vec());
             frame(SSH_AGENT_IDENTITIES_ANSWER, &body)
         }
-        SSH_AGENTC_EXTENSION if extension_name(payload) == AUTHENTICATE_EXTENSION => {
+        SSH_AGENTC_EXTENSION
+            if matches!(
+                extension_name(payload),
+                AUTHENTICATE_EXTENSION | LEGACY_AUTHENTICATE_EXTENSION
+            ) =>
+        {
             authenticate_extension(state, auth, payload)
         }
         SSH_AGENTC_EXTENSION => {
@@ -1912,7 +1918,7 @@ fn extension_name(payload: &[u8]) -> &[u8] {
     Reader::new(payload).string().unwrap_or_default()
 }
 
-/// Answer `authenticate@agentmfa.dev`: the caller presents this endpoint's
+/// Answer `authenticate@multitool.dev`: the caller presents this endpoint's
 /// secret, and the connection is marked authenticated when it matches.
 ///
 /// Resolved through the registry by hash and required to resolve to *this*
@@ -2196,7 +2202,7 @@ fn refuse_with(state: &AgentState, reason: &str, outcome: &str) -> Vec<u8> {
 /// TTL bounds further *logins*, not this one's lifetime.
 const LOGIN_CONSEQUENCE: &str =
     "Approving signs one SSH login. What runs afterwards is between the client and the host: \
-     AgentMFA is not in that connection, so it cannot see the commands, time the session out, \
+     Multitool is not in that connection, so it cannot see the commands, time the session out, \
      or close it.";
 
 /// Ask the user about one login, if this connection's switch is on.

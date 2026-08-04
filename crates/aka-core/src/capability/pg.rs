@@ -276,7 +276,7 @@ fn startup_identity_mismatch(
             sqlstate: "3D000",
             reason: "database_mismatch",
             detail: format!(
-                "AKA: requested database {requested:?} does not match this connection; \
+                "Multitool: requested database {requested:?} does not match this connection; \
                  use the pinned database {dbname:?}"
             ),
         });
@@ -291,12 +291,12 @@ fn startup_identity_mismatch(
             reason: "user_mismatch",
             detail: if expected_user == user {
                 format!(
-                    "AKA: requested user {requested:?} does not match this connection; \
+                    "Multitool: requested user {requested:?} does not match this connection; \
                      use the pinned user {user:?}"
                 )
             } else {
                 format!(
-                    "AKA: requested user {requested:?} does not match this ticket DSN; \
+                    "Multitool: requested user {requested:?} does not match this ticket DSN; \
                      use the advertised user {expected_user:?} (the upstream user is pinned to \
                      {user:?})"
                 )
@@ -452,7 +452,7 @@ fn audit_redemption_rate_limit(
 /// Record that `sslmode=prefer` asked for TLS, the server refused, and the
 /// session proceeded in clear text anyway.
 ///
-/// libpq behaves the same way, but AgentMFA is the custodian of the credential
+/// libpq behaves the same way, but Multitool is the custodian of the credential
 /// that just crossed the network unprotected: an on-path attacker who answers
 /// `N` and then requests `AuthenticationCleartextPassword` harvests the vault's
 /// password, and without this the user has no record that TLS was ever lost.
@@ -801,7 +801,7 @@ where
                 .write_all(&error_response(
                     "FATAL",
                     "53300",
-                    "AKA: Postgres handshake admission exhausted; retry shortly",
+                    "Multitool: Postgres handshake admission exhausted; retry shortly",
                 ))
                 .await;
             return Ok(());
@@ -841,7 +841,7 @@ where
                 "FATAL",
                 "53300",
                 &format!(
-                    "AKA: endpoint authentication rate limited; retry in {}s",
+                    "Multitool: endpoint authentication rate limited; retry in {}s",
                     wait.as_secs().max(1)
                 ),
             ))
@@ -880,7 +880,7 @@ where
                         "FATAL",
                         "53300",
                         &format!(
-                            "AKA: endpoint authentication rate limited; retry in {}s",
+                            "Multitool: endpoint authentication rate limited; retry in {}s",
                             wait.as_secs().max(1)
                         ),
                     ))
@@ -892,7 +892,7 @@ where
             .write_all(&error_response(
                 "FATAL",
                 "28P01",
-                "AKA: invalid endpoint secret",
+                "Multitool: invalid endpoint secret",
             ))
             .await?;
         return Ok(());
@@ -916,7 +916,11 @@ where
             "agent access is disabled for this tool",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     }
@@ -924,7 +928,11 @@ where
     // Resolve the connection fresh; it may have been edited since issue.
     let Ok(connection) = state.broker.store.connection_by_id(&endpoint.connection_id) else {
         client
-            .write_all(&error_response("FATAL", "08006", "AKA: unknown_connection"))
+            .write_all(&error_response(
+                "FATAL",
+                "08006",
+                "Multitool: unknown_connection",
+            ))
             .await?;
         return Ok(());
     };
@@ -933,7 +941,7 @@ where
             .write_all(&error_response(
                 "FATAL",
                 "08P01",
-                "AKA: connection is no longer Postgres",
+                "Multitool: connection is no longer Postgres",
             ))
             .await?;
         return Ok(());
@@ -990,7 +998,11 @@ where
             "the endpoint or the tool's access was revoked while the session was being established",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     }
@@ -1000,7 +1012,11 @@ where
     let Ok(connection) = state.broker.store.connection_by_id(&endpoint.connection_id) else {
         state.broker.approvals.revoke(&endpoint.connection_id);
         client
-            .write_all(&error_response("FATAL", "08006", "AKA: unknown_connection"))
+            .write_all(&error_response(
+                "FATAL",
+                "08006",
+                "Multitool: unknown_connection",
+            ))
             .await?;
         return Ok(());
     };
@@ -1013,7 +1029,11 @@ where
             "the tool was retargeted after the approval",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     }
@@ -1029,7 +1049,7 @@ where
             .write_all(&error_response(
                 "FATAL",
                 "08P01",
-                "AKA: connection is no longer Postgres",
+                "Multitool: connection is no longer Postgres",
             ))
             .await?;
         return Ok(());
@@ -1061,7 +1081,7 @@ where
                 .write_all(&error_response(
                     "FATAL",
                     "08001",
-                    &format!("AKA: upstream_connect_failed: {e}"),
+                    &format!("Multitool: upstream_connect_failed: {e}"),
                 ))
                 .await?;
             return Ok(());
@@ -1094,7 +1114,7 @@ where
                 .write_all(&error_response(
                     "FATAL",
                     "53300",
-                    "AKA: broker_session_limit",
+                    "Multitool: broker_session_limit",
                 ))
                 .await?;
             return Ok(());
@@ -1117,7 +1137,11 @@ where
             "the endpoint or the tool's access was revoked while the session was being established",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     }
@@ -1258,7 +1282,7 @@ where
         // Refusing the session is an authorization outcome, whichever way
         // the confirmation went; libpq surfaces the message either way.
         "28000",
-        &format!("AKA: {}: {}", reason.as_str(), verdict.detail()),
+        &format!("Multitool: {}: {}", reason.as_str(), verdict.detail()),
     ))
 }
 
@@ -1355,7 +1379,7 @@ where
                         "FATAL",
                         "0A000", // feature_not_supported
                         &format!(
-                            "AKA: unsupported frontend protocol {major}.{minor}; \
+                            "Multitool: unsupported frontend protocol {major}.{minor}; \
                              this proxy speaks 3.0"
                         ),
                     ))
@@ -1432,7 +1456,10 @@ async fn handle_conn(
                 .write_all(&error_response(
                     "FATAL",
                     "53300",
-                    &format!("AKA: rate_limited: retry in {}s", wait.as_secs().max(1)),
+                    &format!(
+                        "Multitool: rate_limited: retry in {}s",
+                        wait.as_secs().max(1)
+                    ),
                 ))
                 .await?;
             return Ok(());
@@ -1463,7 +1490,7 @@ async fn handle_conn(
                 .write_all(&error_response(
                     "FATAL",
                     sqlstate,
-                    &format!("AKA: {}", e.reason()),
+                    &format!("Multitool: {}", e.reason()),
                 ))
                 .await?;
             return Ok(());
@@ -1480,7 +1507,7 @@ async fn handle_conn(
             .write_all(&error_response(
                 "FATAL",
                 "08P01",
-                "AKA: ticket is not for a Postgres connection",
+                "Multitool: ticket is not for a Postgres connection",
             ))
             .await?;
         return Ok(());
@@ -1500,7 +1527,11 @@ async fn handle_conn(
             "agent access is disabled for this tool",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     }
@@ -1517,7 +1548,11 @@ async fn handle_conn(
             "the tool no longer exists",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     };
@@ -1530,7 +1565,11 @@ async fn handle_conn(
             "the tool was retargeted after the approval",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     }
@@ -1571,7 +1610,11 @@ async fn handle_conn(
             "agent access is disabled for this tool",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     }
@@ -1592,7 +1635,11 @@ async fn handle_conn(
             "the tool no longer exists",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     };
@@ -1605,7 +1652,11 @@ async fn handle_conn(
             "the tool was retargeted after the approval",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     }
@@ -1622,7 +1673,7 @@ async fn handle_conn(
             .write_all(&error_response(
                 "FATAL",
                 "08P01",
-                "AKA: ticket is not for a Postgres connection",
+                "Multitool: ticket is not for a Postgres connection",
             ))
             .await?;
         return Ok(());
@@ -1660,7 +1711,7 @@ async fn handle_conn(
                 .write_all(&error_response(
                     "FATAL",
                     "08001", // sqlclient_unable_to_establish_sqlconnection
-                    &format!("AKA: upstream_connect_failed: {e}"),
+                    &format!("Multitool: upstream_connect_failed: {e}"),
                 ))
                 .await?;
             return Ok(());
@@ -1713,7 +1764,11 @@ async fn handle_conn(
             "the tool's access was revoked while the session was being established",
         );
         client
-            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .write_all(&error_response(
+                "FATAL",
+                "28000",
+                "Multitool: denied_by_policy",
+            ))
             .await?;
         return Ok(());
     }
@@ -2456,7 +2511,7 @@ async fn dial_upstream_with_password(
                 other => {
                     return Err(format!(
                         "The server asked for an authentication method \
-                         AgentMFA doesn't support (code {other})"
+                         Multitool doesn't support (code {other})"
                     )
                     .into())
                 }
@@ -3223,7 +3278,11 @@ async fn splice<C>(
     if matches!(reason, "closed_by_user" | "session_ttl" | "idle_timeout") {
         let _ = tokio::time::timeout(
             SPLICE_TEARDOWN_TIMEOUT,
-            client_tx.write_all(&error_response("FATAL", "57P01", &format!("AKA: {reason}"))),
+            client_tx.write_all(&error_response(
+                "FATAL",
+                "57P01",
+                &format!("Multitool: {reason}"),
+            )),
         )
         .await;
     }
@@ -3584,11 +3643,11 @@ mod tests {
 
     #[test]
     fn error_response_carries_sqlstate() {
-        let msg = error_response("FATAL", "28P01", "AKA: unknown_ticket");
+        let msg = error_response("FATAL", "28P01", "Multitool: unknown_ticket");
         assert_eq!(msg[0], b'E');
         let (code, message) = parse_error_response(&msg[5..]);
         assert_eq!(code, "28P01");
-        assert_eq!(message, "AKA: unknown_ticket");
+        assert_eq!(message, "Multitool: unknown_ticket");
     }
 
     #[test]

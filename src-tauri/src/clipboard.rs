@@ -26,7 +26,7 @@ struct PendingClipboard {
     generation: u64,
 }
 
-/// The last value AgentMFA placed on the clipboard, represented only by a
+/// The last value Multitool placed on the clipboard, represented only by a
 /// one-way digest. The credential itself is zeroized as soon as the platform
 /// write returns; timeout and shutdown compare the current clipboard by hash.
 static PENDING_CLEAR: Mutex<Option<PendingClipboard>> = Mutex::new(None);
@@ -107,7 +107,7 @@ pub fn copy_with_hygiene(app: &AppHandle, value: Zeroizing<String>) -> Result<()
 
 /// Best-effort shutdown cleanup. This runs while the Tauri clipboard plugin
 /// and macOS application context still exist; it never clears content copied
-/// after AgentMFA's credential.
+/// after Multitool's credential.
 fn clear_pending(app: &AppHandle) {
     let expected = *PENDING_CLEAR.lock().unwrap();
     if let Some(expected) = expected {

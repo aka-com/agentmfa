@@ -1,9 +1,9 @@
-# systemd unit for a hosted AKA broker on Linux (non-container).
-# Install to /etc/systemd/system/aka-broker.service, edit the paths/URL and
+# systemd unit for a hosted Multitool broker on Linux (non-container).
+# Install to /etc/systemd/system/multitool-broker.service, edit the paths/URL and
 # the vault key source, then:
-#   systemctl daemon-reload && systemctl enable --now aka-broker
+#   systemctl daemon-reload && systemctl enable --now multitool-broker
 [Unit]
-Description=AKA secrets broker
+Description=Multitool secrets broker
 After=network-online.target
 Wants=network-online.target
 
@@ -17,13 +17,13 @@ Environment=HOME=/var/lib/aka
 # reads (EnvironmentFile), or inject AKA_VAULT_KEY from your secret manager.
 # NEVER put the key literal in this unit file.
 EnvironmentFile=/etc/aka/vault.env
-ExecStart=/usr/local/bin/mfa serve \
+ExecStart=/usr/local/bin/multitool serve \
     --root /var/lib/aka \
     --listen 127.0.0.1:4780 \
     --public-url https://broker.example.dev
 Restart=on-failure
 RestartSec=2
-# `mfa serve` handles SIGTERM, stops accepting new work, and gives active
+# `multitool serve` handles SIGTERM, stops accepting new work, and gives active
 # data-plane sessions a bounded drain window before releasing its socket.
 KillSignal=SIGTERM
 TimeoutStopSec=15s

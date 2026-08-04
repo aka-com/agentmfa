@@ -1,4 +1,4 @@
-//! AKA broker core.
+//! Multitool broker core.
 //!
 //! Everything sensitive lives here: the secret store, the
 //! injection-template engine, the wiring table, the audit log, and the

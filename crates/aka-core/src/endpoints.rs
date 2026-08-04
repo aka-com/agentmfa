@@ -200,7 +200,7 @@ impl EndpointRegistry {
         Ok(updated)
     }
 
-    /// Require (or stop requiring) the `authenticate@agentmfa.dev` extension
+    /// Require (or stop requiring) the `authenticate@multitool.dev` extension
     /// on an SSH endpoint's socket. Returns whether the flag changed.
     ///
     /// Reissuing preserves it: rotating the secret is not a decision about

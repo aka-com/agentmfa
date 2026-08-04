@@ -14,27 +14,27 @@ const repoRoot = path.resolve(
 const launcher = path.join(
   repoRoot,
   "npm",
-  "agentmfa",
+  "multitool",
   "bin",
-  "agentmfa.js"
+  "multitool.js"
 );
-function runLauncher() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "agentmfa-launcher-"));
-  const stub = path.join(dir, "mfa-stub");
+function runLauncher(useLegacyOverride = false) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "multitool-launcher-"));
+  const stub = path.join(dir, "multitool-stub");
   const capture = path.join(dir, "capture.json");
   writeFileSync(
     stub,
     `#!/bin/sh
-printf '{"args":"%s"}' "$*" > "$AGENTMFA_CAPTURE"
+printf '{"args":"%s"}' "$*" > "$MULTITOOL_CAPTURE"
 `,
   );
   chmodSync(stub, 0o755);
 
   const env = {
     ...process.env,
-    AGENTMFA_BIN: stub,
-    AGENTMFA_CAPTURE: capture,
+    MULTITOOL_CAPTURE: capture,
   };
+  env[useLegacyOverride ? "AGENTMFA_BIN" : "MULTITOOL_BIN"] = stub;
 
   const result = spawnSync(
     process.execPath,
@@ -47,5 +47,10 @@ printf '{"args":"%s"}' "$*" > "$AGENTMFA_CAPTURE"
 
 test("launcher hands arguments to the platform binary", () => {
   const captured = runLauncher();
+  assert.equal(captured.args, "serve --root /tmp/aka-test");
+});
+
+test("launcher keeps the legacy AGENTMFA_BIN override working", () => {
+  const captured = runLauncher(true);
   assert.equal(captured.args, "serve --root /tmp/aka-test");
 });

@@ -1,8 +1,8 @@
-// Placeholders for behaviour AKA does not implement yet.
+// Placeholders for behaviour Multitool does not implement yet.
 //
 // The matrix in this suite is written from the outside in: it names the
 // things an operator would expect a broker sitting between an agent and a
-// database, a shell, or an API to be able to do. Some of those AKA does not
+// database, a shell, or an API to be able to do. Some of those Multitool does not
 // do today — per-statement Postgres approval, per-command SSH approval,
 // approval levels that differ for reads and writes.
 //

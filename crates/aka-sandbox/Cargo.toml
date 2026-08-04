@@ -3,7 +3,7 @@ name = "aka-sandbox"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Deterministic HTTP upstreams for AKA development"
+description = "Deterministic HTTP upstreams for Multitool development"
 publish = false
 
 [dependencies]

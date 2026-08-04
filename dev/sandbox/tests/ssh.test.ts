@@ -17,7 +17,7 @@ import test, { after, before } from 'node:test';
 import {
   Broker,
   connectionNames,
-  mfaBinary,
+  multitoolBinary,
   type ApprovalSurface,
   type AutoAnswer,
 } from './lib/broker';
@@ -154,16 +154,16 @@ test('a stock ssh client logs in through the socket', async (t) => {
   );
 });
 
-test('the `mfa ssh` binary opens a socket a stock client can use', async (t) => {
+test('the `multitool ssh` binary opens a socket a stock client can use', async (t) => {
   if (!sshClient) return t.skip('no ssh client on PATH');
   const opened = await run(
-    mfaBinary(),
+    multitoolBinary(),
     ['ssh', ssh, '--root', broker.root, '--client', 'cli-spawn'],
     { timeoutMs: 30_000 },
   );
   assert.equal(opened.code, 0, opened.stderr);
   const authSock = opened.stdout.trim();
-  assert.ok(existsSync(authSock), `mfa returned a live socket: ${authSock}`);
+  assert.ok(existsSync(authSock), `multitool returned a live socket: ${authSock}`);
 
   const result = await sshCommand(authSock, 'echo cli-spawn-ok');
   assert.equal(result.code, 0, result.stderr);

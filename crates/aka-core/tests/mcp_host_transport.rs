@@ -118,7 +118,7 @@ async fn rust_host_owns_the_streamable_http_session_lifecycle() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, ["agentmfa_connect", "agentmfa_status"]);
+    assert_eq!(names, ["multitool_connect", "multitool_status"]);
 
     let status = rpc(
         &client,
@@ -127,12 +127,24 @@ async fn rust_host_owns_the_streamable_http_session_lifecycle() {
         &session,
         4,
         "tools/call",
-        json!({"name": "agentmfa_status", "arguments": {}}),
+        json!({"name": "multitool_status", "arguments": {}}),
     )
     .await;
     let status = tool_payload(&status);
     assert_eq!(status["tools"], json!([]));
     assert!(status["hint"].as_str().unwrap().contains("No tools"));
+
+    let legacy_status = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        5,
+        "tools/call",
+        json!({"name": "agentmfa_status", "arguments": {}}),
+    )
+    .await;
+    assert_eq!(tool_payload(&legacy_status)["tools"], json!([]));
 
     let revoked = client
         .post(host.mcp_url())
@@ -267,7 +279,7 @@ async fn rust_host_projects_and_invokes_native_broker_tools() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|tool| tool["name"] == "agentmfa_prod-db_request"));
+        .any(|tool| tool["name"] == "multitool_prod-db_request"));
 
     let called = rpc(
         &client,
@@ -277,7 +289,7 @@ async fn rust_host_projects_and_invokes_native_broker_tools() {
         3,
         "tools/call",
         json!({
-            "name": "agentmfa_prod-db_request",
+            "name": "multitool_prod-db_request",
             "arguments": {"method": "GET", "path": "/whoami"},
         }),
     )
@@ -321,7 +333,7 @@ async fn rust_host_projects_and_invokes_native_broker_tools() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|tool| tool["name"] == "agentmfa_prod-db_request"));
+        .any(|tool| tool["name"] == "multitool_prod-db_request"));
     let event = tokio::time::timeout(std::time::Duration::from_secs(2), event_bytes.next())
         .await
         .expect("tools/list_changed event")
@@ -429,7 +441,7 @@ async fn rust_host_cancels_active_calls_and_notifies_the_upstream() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|tool| tool["name"] == "agentmfa_slow_wait"));
+        .any(|tool| tool["name"] == "multitool_slow_wait"));
 
     let call_client = client.clone();
     let call_url = host.mcp_url();
@@ -443,7 +455,7 @@ async fn rust_host_cancels_active_calls_and_notifies_the_upstream() {
             &call_session,
             10,
             "tools/call",
-            json!({"name": "agentmfa_slow_wait", "arguments": {}}),
+            json!({"name": "multitool_slow_wait", "arguments": {}}),
         )
         .await
     });
@@ -541,9 +553,9 @@ async fn rust_host_keeps_catalog_overflow_searchable_and_callable() {
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    assert!(names.contains(&"agentmfa_search_tools"));
-    assert!(names.contains(&"agentmfa_call_tool"));
-    assert!(!names.contains(&"agentmfa_catalog_tool41"));
+    assert!(names.contains(&"multitool_search_tools"));
+    assert!(names.contains(&"multitool_call_tool"));
+    assert!(!names.contains(&"multitool_catalog_tool41"));
 
     let searched = rpc(
         &client,
@@ -553,7 +565,7 @@ async fn rust_host_keeps_catalog_overflow_searchable_and_callable() {
         3,
         "tools/call",
         json!({
-            "name": "agentmfa_search_tools",
+            "name": "multitool_search_tools",
             "arguments": {"query": "tool41"},
         }),
     )
@@ -568,7 +580,7 @@ async fn rust_host_keeps_catalog_overflow_searchable_and_callable() {
         4,
         "tools/call",
         json!({
-            "name": "agentmfa_call_tool",
+            "name": "multitool_call_tool",
             "arguments": {"connection": "catalog", "tool": "tool41", "arguments": {}},
         }),
     )
@@ -591,7 +603,7 @@ async fn rust_host_keeps_catalog_overflow_searchable_and_callable() {
         5,
         "tools/call",
         json!({
-            "name": "agentmfa_search_tools",
+            "name": "multitool_search_tools",
             "arguments": {"query": "tool00"},
         }),
     )
@@ -600,7 +612,7 @@ async fn rust_host_keeps_catalog_overflow_searchable_and_callable() {
     assert_eq!(results["results"][0]["tool"], "tool00");
     assert_eq!(
         results["results"][0]["call"]["tool"],
-        "agentmfa_catalog_tool00"
+        "multitool_catalog_tool00"
     );
 
     let called = rpc(
@@ -611,7 +623,7 @@ async fn rust_host_keeps_catalog_overflow_searchable_and_callable() {
         6,
         "tools/call",
         json!({
-            "name": "agentmfa_call_tool",
+            "name": "multitool_call_tool",
             "arguments": {"connection": "catalog", "tool": "tool00", "arguments": {}},
         }),
     )
@@ -709,7 +721,7 @@ async fn rust_host_serves_tool_calls_before_the_first_listing() {
         2,
         "tools/call",
         json!({
-            "name": "agentmfa_prod-db_request",
+            "name": "multitool_prod-db_request",
             "arguments": {"method": "GET", "path": "/ping"},
         }),
     )
@@ -724,7 +736,7 @@ async fn rust_host_serves_tool_calls_before_the_first_listing() {
         3,
         "tools/call",
         json!({
-            "name": "agentmfa_notes_search",
+            "name": "multitool_notes_search",
             "arguments": {"query": "roadmap"},
         }),
     )
@@ -826,7 +838,7 @@ async fn rust_host_completes_a_multi_round_input_flow() {
         &session,
         3,
         "tools/call",
-        json!({"name": "agentmfa_input_needs_input", "arguments": {}}),
+        json!({"name": "multitool_input_needs_input", "arguments": {}}),
     )
     .await;
     assert!(called["result"]["content"][0]["text"]
@@ -956,7 +968,7 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
     .await;
     assert_eq!(
         resources["result"]["resources"][0]["uri"],
-        "agentmfa://docs/docs://home"
+        "multitool://docs/docs://home"
     );
 
     let templates = rpc(
@@ -971,7 +983,7 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
     .await;
     assert_eq!(
         templates["result"]["resourceTemplates"][0]["uriTemplate"],
-        "agentmfa://docs/docs://page/{id}"
+        "multitool://docs/docs://page/{id}"
     );
 
     let read = rpc(
@@ -981,7 +993,7 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
         &session,
         4,
         "resources/read",
-        json!({"uri": "agentmfa://docs/docs://page/42"}),
+        json!({"uri": "multitool://docs/docs://page/42"}),
     )
     .await;
     // The upstream received the original URI, stripped of the namespace…
@@ -996,7 +1008,7 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
     // …and the URI handed back to the agent is re-namespaced.
     assert_eq!(
         read["result"]["contents"][0]["uri"],
-        "agentmfa://docs/docs://page/42"
+        "multitool://docs/docs://page/42"
     );
 
     // The raw upstream URI is not readable — only the exposed form routes.
@@ -1054,7 +1066,7 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
         7,
         "completion/complete",
         json!({
-            "ref": {"type": "ref/resource", "uri": "agentmfa://docs/docs://page/{id}"},
+            "ref": {"type": "ref/resource", "uri": "multitool://docs/docs://page/{id}"},
             "argument": {"name": "id", "value": ""},
         }),
     )
@@ -1210,7 +1222,7 @@ async fn a_curated_connection_refuses_every_non_tool_capability() {
         &session,
         6,
         "resources/read",
-        json!({"uri": "agentmfa://docs/docs://home"}),
+        json!({"uri": "multitool://docs/docs://home"}),
     )
     .await;
     assert!(read["error"]["message"]
@@ -1239,7 +1251,7 @@ async fn a_curated_connection_refuses_every_non_tool_capability() {
         8,
         "completion/complete",
         json!({
-            "ref": {"type": "ref/resource", "uri": "agentmfa://docs/docs://page/{id}"},
+            "ref": {"type": "ref/resource", "uri": "multitool://docs/docs://page/{id}"},
             "argument": {"name": "id", "value": "secret-value"},
         }),
     )

@@ -725,11 +725,11 @@ pub struct DirectEndpoint {
     /// process, is everyone. The secret minted for the endpoint was never
     /// presented; only the socket's derived filename made it awkward to find.
     /// With this on, a connection must first send the
-    /// `authenticate@agentmfa.dev` extension, moving the boundary from
+    /// `authenticate@multitool.dev` extension, moving the boundary from
     /// "can list a directory" to "can read the vault".
     ///
     /// Off by default because stock `ssh` cannot send an extension: an
-    /// authenticated endpoint is reached through `mfa ssh-agent`, which
+    /// authenticated endpoint is reached through `multitool ssh-agent`, which
     /// supplies the proof and forwards. PG and HTTP endpoints ignore this —
     /// their protocols present the secret already.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

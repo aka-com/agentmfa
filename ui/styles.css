@@ -1,4 +1,4 @@
-/* AgentMFA frontend: the same visual language as mockup.html, sized to
+/* Multitool frontend: the same visual language as mockup.html, sized to
    fill a Tauri window. Component styles (chips, badges, sheets) are lifted
    from the mockup so the real app matches the design.
 
@@ -1509,7 +1509,7 @@
   border-top: 1px solid var(--line-soft);
 }
 /* Every section headline in the panel speaks to the user in sentence case
-   and the text ink — "Connect to this database", "AgentMFA MCP",
+   and the text ink — "Connect to this database", "Multitool MCP",
    "Details" — one register, no tracked-caps machinery labels. */
 .cd-connect-lbl {
   display: flex; align-items: center; gap: 7px; margin-bottom: 8px;

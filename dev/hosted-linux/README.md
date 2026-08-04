@@ -1,11 +1,11 @@
 # Host a broker on Linux
 
 The broker runs headless on Linux the same way it does on a Mac
-(`mfa serve`), with one difference: **secrets are sealed by an encrypted
+(`multitool serve`), with one difference: **secrets are sealed by an encrypted
 vault** instead of the macOS Keychain, so you must provide a master key.
 Everything else — the manage API, the `akamgr_` token, TCP control plane,
 relayed OAuth, data-plane advertise — works identically. Manage it from
-AKA Desktop exactly as you would a hosted Mac.
+Multitool Desktop exactly as you would a hosted Mac.
 
 ## The vault master key
 
@@ -36,20 +36,20 @@ startup rather than silently.
 
 ```sh
 # From the repo root:
-docker build -f dev/hosted-linux/Dockerfile -t aka-broker .
+docker build -f dev/hosted-linux/Dockerfile -t multitool-broker .
 
 # One broker per workspace, state on a named volume, key from your env:
-docker run -d --name aka-broker \
+docker run -d --name multitool-broker \
     -e AKA_VAULT_KEY="$AKA_VAULT_KEY" \
     -p 4780:4780 \
     -v aka-state:/var/lib/aka \
-    aka-broker --public-url https://broker.example.dev --advertise-host broker.lan
+    multitool-broker --public-url https://broker.example.dev --advertise-host broker.lan
 ```
 
-The image builds the self-contained `mfa` CLI (glibc/Debian — no musl
+The image builds the self-contained `multitool` CLI (glibc/Debian — no musl
 needed); its in-process Rust MCP host serves `<public-url>/mcp`. Args after
 the image name are appended to the entrypoint's
-`mfa serve --root /var/lib/aka --listen 0.0.0.0:4780`.
+`multitool serve --root /var/lib/aka --listen 0.0.0.0:4780`.
 
 On its first start, the broker writes a bounded bootstrap credential to
 `/var/lib/aka/sock/manage-token` (mode 0600). Rotate it online immediately;
@@ -57,38 +57,38 @@ the CLI authenticates with that file, stores the replacement, and the broker
 removes the bootstrap file:
 
 ```sh
-docker exec aka-broker mfa manage token --root /var/lib/aka
+docker exec multitool-broker multitool manage token --root /var/lib/aka
 ```
 
 The command prints the replacement once; enter it in the desktop app. Future
 rotations use the saved current token and also happen while the broker runs.
 From another machine, store the current token with
-`mfa manage login --broker <public-url>` and then rotate with
-`mfa manage token --broker <public-url>`. Every management command drives the
+`multitool manage login --broker <public-url>` and then rotate with
+`multitool manage token --broker <public-url>`. Every management command drives the
 **running** broker over its manage API — seed secrets and tools, flip agent
 access, test connections, read the activity trail:
 
 ```sh
-printf '%s' "$GITHUB_TOKEN" | mfa secret add GITHUB_TOKEN --broker https://broker.example.dev
-mfa conn add github --kind api --host api.github.com \
+printf '%s' "$GITHUB_TOKEN" | multitool secret add GITHUB_TOKEN --broker https://broker.example.dev
+multitool conn add github --kind api --host api.github.com \
     --template 'Authorization: Bearer {{GITHUB_TOKEN}}' --broker https://broker.example.dev
-mfa conn disable github --broker https://broker.example.dev
-mfa activity --broker https://broker.example.dev
+multitool conn disable github --broker https://broker.example.dev
+multitool activity --broker https://broker.example.dev
 ```
 
 ## Run it (systemd, no container)
 
-Build `mfa` (`cargo build --release -p mfa`), install it, create the `aka`
+Build `multitool` (`cargo build --release -p multitool`), install it, create the `aka`
 user and `/var/lib/aka`, and drop the key in `/etc/aka/vault.env`
 (`AKA_VAULT_KEY=…`, mode 0400), then use
-[`aka-broker.service`](aka-broker.service):
+[`multitool-broker.service`](multitool-broker.service):
 
 ```sh
-install -Dm755 target/release/mfa /usr/local/bin/mfa
+install -Dm755 target/release/multitool /usr/local/bin/multitool
 useradd --system --home /var/lib/aka --create-home aka
-install -Dm644 dev/hosted-linux/aka-broker.service /etc/systemd/system/aka-broker.service
+install -Dm644 dev/hosted-linux/multitool-broker.service /etc/systemd/system/multitool-broker.service
 # edit the unit's --public-url; put the key in /etc/aka/vault.env
-systemctl daemon-reload && systemctl enable --now aka-broker
+systemctl daemon-reload && systemctl enable --now multitool-broker
 ```
 
 ## TLS, data planes, and the rest
@@ -96,7 +96,7 @@ systemctl daemon-reload && systemctl enable --now aka-broker
 Same as the Mac runbook (`dev/hosted-mac/`): put TLS in front of the TCP
 port (reverse proxy or tunnel), `--data-plane-listen`/`--advertise-host`
 for PG agents on other machines (the plaintext leg → trusted network only),
-and SSH stays same-machine. `--ttl-days` on `mfa manage token` bounds a
+and SSH stays same-machine. `--ttl-days` on `multitool manage token` bounds a
 leaked token.
 
 ## Still open

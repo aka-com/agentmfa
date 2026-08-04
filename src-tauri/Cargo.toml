@@ -3,7 +3,7 @@
 [workspace]
 
 [package]
-name = "aka-desktop"
+name = "multitool-desktop"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -13,11 +13,11 @@ description = "A secrets manager for humans and agents."
 # webkit2gtk). The core + CLI crates build and test everywhere.
 
 [lib]
-name = "aka_desktop_app"
+name = "multitool_desktop_app"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "aka-desktop"
+name = "multitool-desktop"
 path = "src/main.rs"
 
 [build-dependencies]

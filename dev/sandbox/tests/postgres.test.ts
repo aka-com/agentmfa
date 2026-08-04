@@ -359,7 +359,7 @@ test('a ticket expires 60 seconds after issue', { skip: !process.env.AKA_SANDBOX
 });
 
 // ---------------------------------------------------------------------------
-// Postgres-shaped policy AKA does not have.
+// Postgres-shaped policy Multitool does not have.
 // ---------------------------------------------------------------------------
 
 test('statements inside a session are not inspected', (t) => {

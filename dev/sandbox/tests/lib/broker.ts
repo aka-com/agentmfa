@@ -1,8 +1,8 @@
 // One disposable headless broker per test file.
 //
 // The desktop app is macOS-only, so this suite drives what the sandbox
-// README calls the headless path: `mfa manage token` mints a management
-// credential offline, `mfa serve --root <tmp>` runs the broker with its
+// README calls the headless path: `multitool manage token` mints a management
+// credential offline, `multitool serve --root <tmp>` runs the broker with its
 // state under a throwaway directory, and the tests then speak the two wire
 // planes an agent and the app speak — the control plane over the Unix
 // socket, and the manage plane at /v1/manage.
@@ -167,15 +167,15 @@ export interface StartOptions {
 
 /* -------------------------------- harness --------------------------------- */
 
-export function mfaBinary(): string {
-  const configured = process.env.AKA_MFA_BIN;
+export function multitoolBinary(): string {
+  const configured = process.env.AKA_MULTITOOL_BIN;
   if (configured) return configured;
-  for (const candidate of ['target/debug/mfa', 'target/release/mfa']) {
+  for (const candidate of ['target/debug/multitool', 'target/release/multitool']) {
     const path = join(repoRoot, candidate);
     if (existsSync(path)) return path;
   }
   throw new Error(
-    'no `mfa` binary found — run `cargo build -p mfa` or set AKA_MFA_BIN ' +
+    'no `multitool` binary found — run `cargo build -p multitool` or set AKA_MULTITOOL_BIN ' +
       '(`npm run sandbox:test` does this for you)',
   );
 }
@@ -194,7 +194,7 @@ export class Broker {
 
   /** Start a broker, seed the requested sandbox services, and wait until it serves. */
   static async start(options: StartOptions): Promise<Broker> {
-    const binary = mfaBinary();
+    const binary = multitoolBinary();
     const root = await mkdtemp(join(tmpdir(), `aka-sandbox-${options.label}-`));
 
     // Offline: the manage token can only be issued while no broker holds the
@@ -202,7 +202,7 @@ export class Broker {
     const issued = await run(binary, ['manage', 'token', '--root', root], { timeoutMs: 30_000 });
     const manageToken = issued.stdout.trim().split('\n').pop() ?? '';
     if (!manageToken.startsWith('akamgr_')) {
-      throw new Error(`\`mfa manage token\` did not print a token: ${issued.stderr}`);
+      throw new Error(`\`multitool manage token\` did not print a token: ${issued.stderr}`);
     }
 
     const broker = await Broker.launch(root, manageToken, options);
@@ -227,7 +227,7 @@ export class Broker {
     manageToken: string,
     options: Pick<StartOptions, 'mcp'>,
   ): Promise<Broker> {
-    const binary = mfaBinary();
+    const binary = multitoolBinary();
     const socketPath = join(root, 'sock/broker.sock');
     const args = ['serve', '--root', root];
     if (options.mcp === false) args.push('--no-mcp');
@@ -321,7 +321,7 @@ export class Broker {
     const headers: Record<string, string> = { ...(options.headers ?? {}) };
     const token = options.token === undefined ? this.agentToken : options.token;
     if (token !== null) headers.authorization = `Bearer ${token}`;
-    if (options.client) headers['x-agentmfa-client'] = options.client;
+    if (options.client) headers['x-multitool-client'] = options.client;
     return json({
       socketPath: this.socketPath,
       method,

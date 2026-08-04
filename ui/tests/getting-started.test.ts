@@ -105,7 +105,7 @@ test('a finished step 1 reports what it produced instead of repeating itself', (
     ...conn('api', 'notion-work', true), host: 'mcp.notion.com', mcp_path: '/mcp',
   };
   const lead = startAddedLead(notion, startProgress(notion, [notionServer]));
-  assert.equal(lead, 'Agents reach Notion as “notion-work” through AgentMFA.');
+  assert.equal(lead, 'Agents reach Notion as “notion-work” through Multitool.');
   // The pre-connection imperative is what made the done state read as though
   // nothing had happened yet.
   assert.doesNotMatch(lead, /^Connect to /);
@@ -114,7 +114,7 @@ test('a finished step 1 reports what it produced instead of repeating itself', (
   const postgres = startOptionById('postgres');
   assert.equal(
     startAddedLead(postgres, startProgress(postgres, [conn('pg', 'prod-db', true)])),
-    'Agents reach this Postgres database as “prod-db” through AgentMFA.',
+    'Agents reach this Postgres database as “prod-db” through Multitool.',
   );
 });
 
@@ -232,7 +232,7 @@ test('an authenticated endpoint is shown as the forwarder command, not a socket'
       port: 2222,
       target: 'deploy@prod.example.com:2222',
     }, true),
-    `mfa ssh-agent production -- ssh -p 2222 ${sshBrokerFlags()} production`,
+    `multitool ssh-agent production -- ssh -p 2222 ${sshBrokerFlags()} production`,
   );
   // A name is free text and this lands on a command line.
   assert.equal(
@@ -244,7 +244,7 @@ test('an authenticated endpoint is shown as the forwarder command, not a socket'
       port: 22,
       target: 'deploy@prod.example.com',
     }, true),
-    `mfa ssh-agent 'prod box' -- ssh ${sshBrokerFlags()} production`,
+    `multitool ssh-agent 'prod box' -- ssh ${sshBrokerFlags()} production`,
   );
 });
 
@@ -326,7 +326,7 @@ test('the on-screen task redacts the DSN password and the socket filename', () =
     'Use this SSH agent socket: SSH_AUTH_SOCK="/u/.aka/endpoints/e1/agent-••••••.sock"',
   );
   // A brokered task carries no secret and passes through untouched.
-  const brokered = 'Using my AgentMFA connection "prod-db", list tables.';
+  const brokered = 'Using my Multitool connection "prod-db", list tables.';
   assert.equal(redactedStartTask(brokered), brokered);
 });
 
@@ -394,13 +394,13 @@ test('stdio connection guides and quick-start clients require the separate CLI',
   );
   for (const client of requiringCli) {
     const [install, ...steps] = connectGuideSteps(client, ENV);
-    assert.equal(install.title, 'Install the AgentMFA CLI', client.id);
+    assert.equal(install.title, 'Install the Multitool CLI', client.id);
     assert.equal(install.snippet, CLI_INSTALL_COMMAND, client.id);
     assert.deepEqual(steps, client.steps(ENV), client.id);
   }
   assert.match(
     connectClientById('mcp')!.steps(ENV)[1].detail ?? '',
-    /After installing the AgentMFA CLI/,
+    /After installing the Multitool CLI/,
   );
   assert.equal(connectClientById('mcp')!.steps(ENV)[1].snippet, CLI_INSTALL_COMMAND);
 });

@@ -230,7 +230,7 @@ function StartConnectPane({ mode: connectMode, option, progress }: {
   }
   const clientSnippet = client.snippet(env);
   if (client.requiresCli && !client.inlineCliInstall) {
-    return <><p>Install the AgentMFA CLI:</p>
+    return <><p>Install the Multitool CLI:</p>
       {snippet(CLI_INSTALL_COMMAND)}
       <p className="start-pane-next">{client.lead(env)}</p>
       {snippet(clientSnippet)}
@@ -334,7 +334,7 @@ function StartWalkthrough(): ReactNode {
     {connectMode !== 'direct' && step1Done && !step2Done
       ? <div className="start-waiting">
           <span className="start-pulse" aria-hidden="true"></span>
-          Waiting for {clientLabel} to connect to AgentMFA…
+          Waiting for {clientLabel} to connect to Multitool…
         </div>
       : null}
   </>;

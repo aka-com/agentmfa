@@ -1,4 +1,4 @@
-# Hosting AgentMFA
+# Hosting Multitool
 
 Hosted mode is intended for one trusted user, workspace, or automation trust
 domain per broker. It is not a multi-tenant identity or policy service.
@@ -6,7 +6,7 @@ domain per broker. It is not a multi-tenant identity or policy service.
 ## Trust model
 
 - One shared agent key authorizes every agent-plane call. The optional
-  `X-AgentMFA-Client` label is self-reported attribution, not authentication.
+  `X-Multitool-Client` label is self-reported attribution, not authentication.
   Do not use one broker to isolate mutually untrusted users or agents.
 - The management token is administrator authority. On a headless broker it
   substitutes for native user presence when a gated configuration action is
@@ -25,7 +25,7 @@ domain per broker. It is not a multi-tenant identity or policy service.
 
 ## Network boundary
 
-`mfa serve --listen` speaks plaintext HTTP. Put an authenticated TLS reverse
+`multitool serve --listen` speaks plaintext HTTP. Put an authenticated TLS reverse
 proxy or private tunnel in front of it and advertise only the HTTPS origin
 with `--public-url`. TCP does not expose `/v1/pair`; provision the shared agent
 key out of band. Restrict both the control listener and proxy with host
@@ -52,7 +52,7 @@ directory and inject it through the hosting platform's secret mechanism.
 Management tokens are stored in a plaintext 0600 file on non-macOS clients;
 prefer `AKA_MANAGE_TOKEN` in CI. The default management-token lifetime is 30
 days. A never-managed broker writes one bounded first-start credential to its
-owner-only socket directory. `mfa manage token` consumes it to perform the
+owner-only socket directory. `multitool manage token` consumes it to perform the
 first authenticated online rotation; subsequent rotations require the still
 current saved or environment token and do not stop the broker.
 

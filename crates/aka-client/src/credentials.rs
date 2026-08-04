@@ -78,7 +78,7 @@ impl TokenStore {
                 Self::keychain(),
                 KEYCHAIN_SERVICE,
                 &key_for(url),
-                &format!("AgentMFA management token ({url})"),
+                &format!("Multitool management token ({url})"),
                 token.as_bytes(),
             )
             .map_err(|error| error.to_string())

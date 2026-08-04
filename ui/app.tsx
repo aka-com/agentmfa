@@ -1,4 +1,4 @@
-// AgentMFA React frontend. One file drives all Tauri windows (main, tray
+// Multitool React frontend. One file drives all Tauri windows (main, tray
 // and dropdown), chosen from location.hash.
 //
 // Every mutation and read goes through the Rust core via Tauri
@@ -1135,7 +1135,7 @@ const NARROW_LAYOUT = '(max-width: 720px)';
 /* ---- connection guides ---- */
 // The guides' job is no longer to manage identities the broker stores —
 // there is exactly one, this computer's key — but to get the user's own
-// agents talking to AgentMFA: a key card, one guide card per client from
+// agents talking to Multitool: a key card, one guide card per client from
 // the shared CONNECT_CLIENTS definitions (the same ones step 2 of the
 // walkthrough renders), and a cosmetic recently-seen list built from
 // activity labels. Per-tool access lives on the Tools tab.
@@ -1217,7 +1217,7 @@ function connectionIssues(
   }
   if (c.type === 'ssh' && !c.host_key_fingerprint) {
     issues.push({
-      text: 'AgentMFA has not connected to this tool yet. The SSH host key will be pinned on first connection.',
+      text: 'Multitool has not connected to this tool yet. The SSH host key will be pinned on first connection.',
       tone: 'info',
     });
   }
@@ -1624,7 +1624,7 @@ function ConfirmationSection({ connection: c }: {
         </div>
       : null}
     {on
-      ? <div className="cd-confirm-note">With no AgentMFA approval surface attached,
+      ? <div className="cd-confirm-note">With no Multitool approval surface attached,
           this tool’s traffic is refused rather than carried.</div>
       : null}
   </div>;
@@ -1795,7 +1795,7 @@ function connectionFactRows(c: ConnectionSummary): Array<[string, string]> {
       `AWS SigV4 (${c.signer.region} · ${c.signer.service}), signs with ${
         c.secret_names.length ? c.secret_names.join(', ') : 'vault credentials'}`]);
   } else if (c.secret_names.length) rows.push(['Credential', c.secret_names.join(', ')]);
-  else if (c.oauth) rows.push(['Credential', 'OAuth, renewed by AgentMFA']);
+  else if (c.oauth) rows.push(['Credential', 'OAuth, renewed by Multitool']);
   if (c.client_cert_path) rows.push(['Client certificate', c.client_cert_path]);
   return rows;
 }
@@ -1819,7 +1819,7 @@ function ConnectionDetail({ connection: c }: {
     : null;
   const mcpSection = enabled && c.mcp_path
     ? <div className="cd-sec">
-        <div className="cd-connect-lbl"><span>AgentMFA MCP</span></div>
+        <div className="cd-connect-lbl"><span>Multitool MCP</span></div>
         {ENDPOINTABLE[c.type] ? <EndpointStrip connection={c} /> : null}
       </div>
     : null;
@@ -2739,15 +2739,15 @@ function BrokerPane({ kind }: { kind: 'setup' | 'connecting' | 'error' }): React
     const setup = state.remoteSetup;
     const setupInstructions =
       '# To start a remote instance, run this behind a TLS proxy or tunnel:\n'
-      + 'mfa serve --listen 0.0.0.0:4780\nmfa manage token';
+      + 'multitool serve --listen 0.0.0.0:4780\nmultitool manage token';
     const hasSaved = state.broker.has_saved_token
       && (setup.url.trim() === '' || setup.url.trim().replace(/\/+$/, '') === (state.broker.url ?? ''));
     const insecureRemote = insecureNonLoopbackHttp(setup.url);
     return (
-      <div className="broker-pane" role="form" aria-label="Connect to hosted AgentMFA">
+      <div className="broker-pane" role="form" aria-label="Connect to hosted Multitool">
         <div className="bp-icon"><Icon markup={ICONS.appIcon} /></div>
-        <h2>Connect to hosted AgentMFA</h2>
-        <p className="bp-lead">Connect to a remote AgentMFA server with a management token.</p>
+        <h2>Connect to hosted Multitool</h2>
+        <p className="bp-lead">Connect to a remote Multitool server with a management token.</p>
         <div className="adv-collapse">
           <button type="button" className="adv-toggle" aria-expanded={setup.advancedOpen}
             data-act="toggle-remote-advanced">
@@ -2762,7 +2762,7 @@ function BrokerPane({ kind }: { kind: 'setup' | 'connecting' | 'error' }): React
         </div>
         <div className="f-row">
           <label htmlFor="rb-url">Hosted instance URL</label>
-          <input id="rb-url" placeholder="https://agentmfa.aka.com" value={setup.url}
+          <input id="rb-url" placeholder="https://multitool.dev" value={setup.url}
             autoComplete="off" spellCheck={false}
             onChange={(e) => { setup.url = e.currentTarget.value; render(); }} />
           {insecureRemote
@@ -2905,14 +2905,14 @@ function MainWindow(): ReactNode {
     <>
       <div className="surface">
         <div className="dw-titlebar" data-tauri-drag-region="">
-          <span className="dw-title dw-title-center">AgentMFA</span>
+          <span className="dw-title dw-title-center">Multitool</span>
           <BrokerSwitch />
         </div>
         <div className="dw-body">
           <div className={`dw-side ${takeover ? 'disabled' : ''}`}>
             <div className="dw-brand">
               <div className="dd-appicon"><Icon markup={ICONS.appIcon} /></div>
-              <div><div className="dd-title">AgentMFA</div><BrokerReady /></div>
+              <div><div className="dd-title">Multitool</div><BrokerReady /></div>
             </div>
             <div className="dw-nav">
               {TABS.map((tab) => (
@@ -2987,7 +2987,7 @@ function DropdownWindow(): ReactNode {
       <div className="surface dropdown-surface">
         <div className="dd-head">
           <div className="dd-appicon"><Icon markup={ICONS.appIcon} /></div>
-          <div className="dd-identity"><div className="dd-title">AgentMFA</div></div>
+          <div className="dd-identity"><div className="dd-title">Multitool</div></div>
           <button className="icon-btn" title="Open as a window" aria-label="Open as a window"
             data-act="mode-window"><Icon markup={ICONS.expand} /></button>
         </div>
@@ -3001,7 +3001,7 @@ function DropdownWindow(): ReactNode {
         <div className="dd-head">
           <div className="dd-appicon"><Icon markup={ICONS.appIcon} /></div>
           <div className="dd-identity">
-            <div className="dd-title">AgentMFA</div><BrokerReady />
+            <div className="dd-title">Multitool</div><BrokerReady />
           </div>
           <button className="icon-btn" title="Open as a window" aria-label="Open as a window"
             data-act="mode-window"><Icon markup={ICONS.expand} /></button>
@@ -3081,7 +3081,7 @@ function AppRoot(): ReactNode {
     // splash up until boot() has real data, instead of flashing a fully
     // chromed but empty window that snaps to the landing tab a beat later.
     return (
-      <div className="app-loading" role="status" aria-label="Loading AgentMFA">
+      <div className="app-loading" role="status" aria-label="Loading Multitool">
         <span className="app-loading-spinner" />
       </div>
     );
@@ -3365,7 +3365,7 @@ function ElicitationSheet(): ReactNode {
             <span>
               Don’t enter a password, API key, or other credential here.
               This form is a round trip to {request.connection} over MCP: whatever you type is
-              sent back to it as ordinary text, and AgentMFA neither masks nor stores it.
+              sent back to it as ordinary text, and Multitool neither masks nor stores it.
               Credentials belong in <strong>Secrets</strong>, where they stay in the Keychain and
               are attached to traffic without passing through a prompt.
             </span>
@@ -3446,7 +3446,7 @@ function ElicitationSheet(): ReactNode {
  *
  * Same alert shape as the elicitation sheet, and deliberately so — but the
  * question is the opposite one. There, the upstream asks the user for
- * input; here, AgentMFA asks whether the traffic should happen at all, and
+ * input; here, Multitool asks whether the traffic should happen at all, and
  * the answer is a decision about access rather than a value to forward.
  *
  * The three answers are the whole point of the switch: let this through for
@@ -3501,7 +3501,7 @@ function ApprovalSheet(): ReactNode {
               + `key${provenance.candidates.length === 1 ? '' : 's'} in this computer’s known_hosts.`
             : provenance.hasCertificateAuthority
               ? 'This computer’s known_hosts trusts a certificate authority for this destination, '
-                + 'but AgentMFA cannot verify this concrete key through that CA. '
+                + 'but Multitool cannot verify this concrete key through that CA. '
                 + 'Verify it through another trusted channel before pinning it.'
             : 'No key for this destination was found in this computer’s known_hosts. '
               + 'Verify the fingerprint through another trusted channel before pinning it.'
@@ -3974,7 +3974,7 @@ function CredentialChooser({ type, allowNew = true, valueHint }: {
           onChange={(e) => setDraftField('keyPassphrase', 'keyPassphrase', e.currentTarget.value)} />
         <FieldError k="keyPassphrase" />
         <div className="rule-note">
-          Used once, to unlock the key. AgentMFA stores the unlocked key in the
+          Used once, to unlock the key. Multitool stores the unlocked key in the
           system keychain and never keeps the passphrase.
         </div>
       </div>
@@ -4274,7 +4274,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       // login against a second one — so it cannot be brokered in one tool.
       d.proxyJump
         ? <div className="rule-note warn" key="proxyjump">
-            Connects through ProxyJump <b>{d.proxyJump}</b>, which AgentMFA
+            Connects through ProxyJump <b>{d.proxyJump}</b>, which Multitool
             cannot broker in one tool: the jump hop is a separate SSH login
             against its own host key. Add <b>{d.proxyJump}</b> as its own tool
             and connect in two hops.
@@ -4420,7 +4420,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
     fields.push(
       <div className="f-row" key="auth">
         <label>Authentication</label>
-        <input value={managedMcpOAuth ? 'OAuth (managed by AgentMFA)' : 'OAuth (your app)'}
+        <input value={managedMcpOAuth ? 'OAuth (managed by Multitool)' : 'OAuth (your app)'}
           readOnly aria-readonly="true" />
         <div className="rule-note">
           {conn?.account ? `Connected account: ${conn.account}. ` : ''}
@@ -4811,7 +4811,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
 const AUTH_STEPS: Array<[string, string]> = [
   ['probing', 'Contacting the server'],
   ['discovering', 'Reading how to sign in'],
-  ['registering', 'Registering AgentMFA'],
+  ['registering', 'Registering Multitool'],
   ['awaiting_authorization', 'Approving in your browser'],
   ['exchanging', 'Finishing sign-in'],
   ['verifying', 'Confirming the account'],
@@ -4997,11 +4997,11 @@ function SettingsSheet(): ReactNode {
         {escalationBtn(30, '30 sec')}{escalationBtn(60, '1 min')}
       </div></div>;
   const autostartRow = <div className="set-row"><div className="set-txt">
-      <div className="st-title">Launch AgentMFA at login</div>
+      <div className="st-title">Launch Multitool at login</div>
       <div className="st-sub">Start the broker and tray automatically so agents do not arrive before their approval surface.</div></div>
       <button className={`switch ${state.launchAtLogin ? 'on' : ''}`}
         data-act="toggle-autostart" role="checkbox"
-        aria-label="Launch AgentMFA at login"
+        aria-label="Launch Multitool at login"
         aria-checked={state.launchAtLogin}></button></div>;
   const sampleToolsRow = <div className="set-row"><div className="set-txt">
       <div className="st-title">Show sample tools</div>
@@ -5039,7 +5039,7 @@ function SettingsSheet(): ReactNode {
       <div className="st-title">Ask before trusting a new SSH host key</div>
       <div className="st-sub">
         Unpinned servers are otherwise trusted the first time they answer, and
-        the pin is permanent. Needs AgentMFA open to answer: with nothing
+        the pin is permanent. Needs Multitool open to answer: with nothing
         attached, a first login to an unpinned server is refused.
       </div></div>
     <button className={`switch ${s.confirm_ssh_host_keys ? 'on' : ''}`}
@@ -7253,8 +7253,8 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
           on: !state.launchAtLogin,
         });
         toast(state.launchAtLogin
-          ? '✓ AgentMFA will launch at login'
-          : 'AgentMFA will not launch at login');
+          ? '✓ Multitool will launch at login'
+          : 'Multitool will not launch at login');
       } catch (error) {
         toast('⚠ ' + errorMessage(error));
       }

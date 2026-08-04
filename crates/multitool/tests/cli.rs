@@ -78,7 +78,7 @@ fn whoami() -> Reply {
 }
 
 fn run(args: &[&str], root: &std::path::Path, broker: Option<&str>, stdin: Option<&str>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_mfa"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_multitool"));
     command.args(args).env("AKA_MANAGE_TOKEN", "akamgr_test");
     if let Some(broker) = broker {
         command.args(["--broker", broker]);
@@ -139,7 +139,7 @@ fn connection() -> Value {
 fn status_is_machine_readable_and_classifies_a_missing_broker() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("data")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+    let output = Command::new(env!("CARGO_BIN_EXE_multitool"))
         .args(["--json", "status", "--root", root.path().to_str().unwrap()])
         .output()
         .unwrap();
@@ -209,7 +209,7 @@ fn remote_status_surfaces_structured_recent_ssh_refusals() {
 #[test]
 fn json_mutations_are_rejected_instead_of_silently_ignoring_the_flag() {
     let root = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+    let output = Command::new(env!("CARGO_BIN_EXE_multitool"))
         .args([
             "--json",
             "secret",
@@ -228,7 +228,7 @@ fn json_mutations_are_rejected_instead_of_silently_ignoring_the_flag() {
 fn explicit_missing_roots_are_not_created_by_mutations() {
     let parent = tempfile::tempdir().unwrap();
     let missing = parent.path().join("typo");
-    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+    let output = Command::new(env!("CARGO_BIN_EXE_multitool"))
         .args(["conn", "rm", "unused", "--root", missing.to_str().unwrap()])
         .output()
         .unwrap();
@@ -248,7 +248,7 @@ fn broker_url_environment_variable_matches_the_broker_flag() {
             body: json!([]),
         },
     ]);
-    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+    let output = Command::new(env!("CARGO_BIN_EXE_multitool"))
         .args([
             "--json",
             "conn",
@@ -294,9 +294,9 @@ fn hosted_instructions_and_skills_fetch_authoritative_agent_setup() {
     let output = run(&["skill"], root.path(), Some(&url), None);
     assert_success(&output);
     let skill = String::from_utf8_lossy(&output.stdout);
-    assert!(skill.starts_with("---\nname: mfa"), "{skill}");
+    assert!(skill.starts_with("---\nname: multitool"), "{skill}");
     assert!(skill.contains(setup), "{skill}");
-    assert!(skill.contains("selected AgentMFA broker"), "{skill}");
+    assert!(skill.contains("selected Multitool broker"), "{skill}");
     assert!(!skill.contains("--unix-socket"), "{skill}");
     skill_handle.join().unwrap();
     assert_eq!(skill_requests.lock().unwrap().len(), 2);
@@ -313,7 +313,7 @@ fn broker_url_environment_rotates_the_current_management_token_online() {
             "expires_at": "2026-08-29T12:00:00Z"
         }),
     }]);
-    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+    let output = Command::new(env!("CARGO_BIN_EXE_multitool"))
         .args([
             "manage",
             "token",
@@ -358,7 +358,7 @@ fn broker_url_environment_applies_to_agent_key_reads() {
             body: json!({ "token": "aka_remote_key" }),
         },
     ]);
-    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+    let output = Command::new(env!("CARGO_BIN_EXE_multitool"))
         .args(["--json", "key", "--root", root.path().to_str().unwrap()])
         .env("AKA_MANAGE_TOKEN", "akamgr_test")
         .env("AKA_BROKER_URL", &url)
@@ -611,7 +611,7 @@ fn secret_input_is_normalized_identically_from_stdin_and_environment() {
                 body: Value::Null,
             },
         ]);
-        let mut command = Command::new(env!("CARGO_BIN_EXE_mfa"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_multitool"));
         command
             .env("AKA_MANAGE_TOKEN", "akamgr_test")
             .args(["secret", "add", "TOKEN", "--broker", &url, "--root"])
@@ -650,7 +650,7 @@ fn secret_input_is_normalized_identically_from_stdin_and_environment() {
 #[test]
 fn remote_commands_fail_with_auth_exit_code_before_network_without_a_token() {
     let root = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+    let output = Command::new(env!("CARGO_BIN_EXE_multitool"))
         .env_remove("AKA_MANAGE_TOKEN")
         .args([
             "settings",

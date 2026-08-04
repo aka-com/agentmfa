@@ -529,7 +529,7 @@ fn resolved_from_output(destination: String, output: &str) -> Result<ResolvedSsh
     // there is no configuration under which this destination would work.
     if let Some(jump) = &proxy_jump {
         return Err(format!(
-            "{destination} connects through ProxyJump {jump}, which AgentMFA cannot broker: \
+            "{destination} connects through ProxyJump {jump}, which Multitool cannot broker: \
              the jump hop is a separate SSH login against {jump}, and a tool pins one host \
              key. Import {jump} as its own tool and connect in two hops, or add this host by \
              address if it is reachable directly."

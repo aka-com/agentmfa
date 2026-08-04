@@ -1,0 +1,28 @@
+{
+  "name": "@aka-com/multitool-linux-x64",
+  "version": "0.1.0",
+  "description": "Multitool CLI binary for Linux (x64, glibc). Install @aka-com/multitool instead of installing this directly.",
+  "homepage": "https://github.com/aka-com/multitool",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aka-com/multitool.git"
+  },
+  "files": [
+    "bin/multitool"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepublishOnly": "node ../../scripts/npm/verify-package.mjs"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

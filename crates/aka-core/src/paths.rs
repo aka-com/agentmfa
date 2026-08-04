@@ -239,7 +239,7 @@ impl Paths {
 
     /// First-start management credential (`<socket-dir>/manage-token`, 0600).
     ///
-    /// `mfa serve` creates this only when the broker has never had a
+    /// `multitool serve` creates this only when the broker has never had a
     /// management token. It gives an operator on the broker host a bounded
     /// credential with which to perform the first authenticated online
     /// rotation; ordinary agents are never told this path.
@@ -261,7 +261,7 @@ impl Paths {
         }
     }
 
-    /// Client-side stored management tokens (`mfa manage login`), one file
+    /// Client-side stored management tokens (`multitool manage login`), one file
     /// per broker, 0600. macOS clients store in the login Keychain instead;
     /// see aka-client's `TokenStore`.
     pub fn manage_tokens_dir(&self) -> PathBuf {

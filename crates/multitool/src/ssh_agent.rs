@@ -2,7 +2,7 @@
 //! caller's behalf.
 //!
 //! An SSH direct endpoint with `require_auth` set refuses to list identities
-//! or sign until the connection has sent `authenticate@agentmfa.dev` carrying
+//! or sign until the connection has sent `authenticate@multitool.dev` carrying
 //! the endpoint secret. Stock `ssh` cannot send an agent extension, so without
 //! this forwarder an authenticated endpoint would be unusable by the very
 //! clients endpoints exist for.
@@ -31,7 +31,8 @@ const SSH_AGENTC_EXTENSION: u8 = 27;
 /// `SSH_AGENT_SUCCESS`.
 const SSH_AGENT_SUCCESS: u8 = 6;
 /// The extension the broker's endpoint sockets answer.
-const AUTHENTICATE_EXTENSION: &str = "authenticate@agentmfa.dev";
+const AUTHENTICATE_EXTENSION: &str = "authenticate@multitool.dev";
+const LEGACY_AUTHENTICATE_EXTENSION: &str = "authenticate@agentmfa.dev";
 
 /// Refuse to read a reply larger than any agent reply legitimately is. The
 /// only frame this module reads itself is a one-byte status; the splice that
@@ -59,7 +60,8 @@ impl AgentSocket {
         // is what keeps concurrent runs apart.
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("mfa-ssh-agent-{}-{seq}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("multitool-ssh-agent-{}-{seq}", std::process::id()));
         // Fail rather than reuse: an existing directory at this path is either
         // a stale run whose socket would confuse `ssh`, or someone else's.
         std::fs::create_dir(&dir)?;
@@ -124,7 +126,7 @@ impl AgentSocket {
                     // client that left between poll and accept) and says
                     // nothing about the listener, so keep serving.
                     Err(error) => {
-                        eprintln!("mfa ssh-agent: could not accept a client: {error}");
+                        eprintln!("multitool ssh-agent: could not accept a client: {error}");
                         continue;
                     }
                 },
@@ -137,7 +139,7 @@ impl AgentSocket {
                     // The agent protocol has no error channel, so a client
                     // sees only "Permission denied (publickey)". Saying why
                     // here is the only chance to name the real cause.
-                    eprintln!("mfa ssh-agent: {error}");
+                    eprintln!("multitool ssh-agent: {error}");
                 }
             });
         }
@@ -204,15 +206,23 @@ async fn forward(client: UnixStream, upstream: &Path, secret: Option<&str>) -> i
         .map(|_| ())
 }
 
-/// Send `authenticate@agentmfa.dev` and require success.
+/// Send `authenticate@multitool.dev` and require success.
 async fn authenticate(server: &mut UnixStream, secret: &str) -> io::Result<()> {
-    server.write_all(&authenticate_frame(secret)).await?;
-    let kind = read_reply_kind(server).await?;
+    server
+        .write_all(&authenticate_frame(AUTHENTICATE_EXTENSION, secret))
+        .await?;
+    let mut kind = read_reply_kind(server).await?;
+    if kind != SSH_AGENT_SUCCESS {
+        server
+            .write_all(&authenticate_frame(LEGACY_AUTHENTICATE_EXTENSION, secret))
+            .await?;
+        kind = read_reply_kind(server).await?;
+    }
     if kind != SSH_AGENT_SUCCESS {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "the endpoint refused this secret — reissue the endpoint \
-             (`mfa conn endpoint <name> --issue`) if it was rotated",
+             (`multitool conn endpoint <name> --issue`) if it was rotated",
         ));
     }
     Ok(())
@@ -222,9 +232,9 @@ async fn authenticate(server: &mut UnixStream, secret: &str) -> io::Result<()> {
 ///
 /// Zeroized: this buffer holds the plaintext secret, and it is built once per
 /// accepted client rather than once per process.
-fn authenticate_frame(secret: &str) -> Zeroizing<Vec<u8>> {
+fn authenticate_frame(extension: &str, secret: &str) -> Zeroizing<Vec<u8>> {
     let mut payload = Zeroizing::new(Vec::new());
-    put_string(&mut payload, AUTHENTICATE_EXTENSION.as_bytes());
+    put_string(&mut payload, extension.as_bytes());
     put_string(&mut payload, secret.as_bytes());
     let mut frame = Zeroizing::new(Vec::with_capacity(payload.len() + 5));
     frame.extend_from_slice(&((payload.len() + 1) as u32).to_be_bytes());
@@ -265,7 +275,7 @@ mod tests {
 
     #[test]
     fn the_authenticate_frame_is_a_well_formed_extension_request() {
-        let frame = authenticate_frame("s3cret");
+        let frame = authenticate_frame(AUTHENTICATE_EXTENSION, "s3cret");
         let len = u32::from_be_bytes(frame[0..4].try_into().unwrap()) as usize;
         assert_eq!(len, frame.len() - 4, "the length prefix covers the rest");
         assert_eq!(frame[4], SSH_AGENTC_EXTENSION);

@@ -2,47 +2,47 @@
 
 V0 hosted deployment: one broker per workspace, running headless on a Mac
 (the same machine for testing, or a Mac mini / Mac server on your
-network), managed remotely from AKA Desktop and used by agents on other
+network), managed remotely from Multitool Desktop and used by agents on other
 machines. TLS is your proxy or tunnel's job; the broker itself serves
 plain HTTP on the address you give it.
 
 ## 1. On the broker Mac
 
-Install the CLI (`npm install -g agentmfa`) or use a checkout. Then:
+Install the CLI (`npm install -g @aka-com/multitool`) or use a checkout. Then:
 
 ```sh
 # Optionally seed tools/secrets offline (or do it all from the app later,
-# or live once the broker is up: `mfa manage login`, then the same
+# or live once the broker is up: `multitool manage login`, then the same
 # commands drive the running broker — remotely too, with
 # `--broker <public-url>`):
-mfa secret add GITHUB_API_KEY
-mfa conn add github --kind api --host api.github.com \
+multitool secret add GITHUB_API_KEY
+multitool conn add github --kind api --host api.github.com \
     --template 'Authorization: Bearer {{GITHUB_API_KEY}}'
 
 # Serve. --listen adds the TCP control plane (loopback here; see below),
 # --public-url is what remote clients will reach it at through your proxy.
-mfa serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev
+multitool serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev
 ```
 
-On its first start, `mfa serve` writes a bounded, owner-only bootstrap
+On its first start, `multitool serve` writes a bounded, owner-only bootstrap
 credential to `~/.aka/manage-token` (mode 0600). In another terminal, rotate
 and store it while the broker remains live:
 
 ```sh
 # Printed once — only its hash and the locally stored replacement remain.
-mfa manage token
+multitool manage token
 
 # Future rotations authenticate with the saved current token.
-mfa manage token --ttl-days 90
+multitool manage token --ttl-days 90
 
 # Close the manage API entirely.
-mfa manage token --revoke
+multitool manage token --revoke
 ```
 
 The first successful rotation removes the bootstrap file. To rotate from
 another machine, first store the current token with
-`mfa manage login --broker https://broker.example.dev`, then run
-`mfa manage token --broker https://broker.example.dev`.
+`multitool manage login --broker https://broker.example.dev`, then run
+`multitool manage token --broker https://broker.example.dev`.
 
 Notes:
 
@@ -52,25 +52,25 @@ Notes:
   A headless Mac mini works with auto-login enabled. Items are stored
   `AfterFirstUnlock`, so the broker keeps reading once the Mac has been
   unlocked once after boot; it cannot read before that.
-- **`mfa serve` uses the login Keychain, and it prompts.** The
+- **`multitool serve` uses the login Keychain, and it prompts.** The
   data-protection keychain that makes reads silent is gated on a
-  `keychain-access-groups` entitlement, which the unsigned `mfa` binary does
+  `keychain-access-groups` entitlement, which the unsigned `multitool` binary does
   not carry. On a headless box that means an approval dialog per secret, per
-  build of `mfa` — click *Always Allow* once per item, or sign your own `mfa`
-  build. `mfa status` prints which keychain is in use. If this host also runs
+  build of `multitool` — click *Always Allow* once per item, or sign your own `multitool`
+  build. `multitool status` prints which keychain is in use. If this host also runs
   the signed desktop app against the same store, see the note in
-  `crates/aka-core/src/keychain/mod.rs`: the app moves values somewhere `mfa`
-  cannot follow, and `mfa` will say so rather than show an empty vault.
-- **MCP host**: `mfa serve` starts the in-process Rust host automatically.
+  `crates/aka-core/src/keychain/mod.rs`: the app moves values somewhere `multitool`
+  cannot follow, and `multitool` will say so rather than show an empty vault.
+- **MCP host**: `multitool serve` starts the in-process Rust host automatically.
   Remote MCP clients use `<public-url>/mcp`.
 - `/v1/pair` is not served on the TCP listener: remote clients get the
-  shared agent key from you (`mfa key` prints it; it lives in
+  shared agent key from you (`multitool key` prints it; it lives in
   `~/.aka/token` on this Mac), and the desktop app manages the broker
   with the `akamgr_…` token only.
 
 A LaunchAgent that keeps it running (edit the paths, then
-`launchctl load ~/Library/LaunchAgents/com.aka.serve.plist`):
-see [`com.aka.serve.plist`](com.aka.serve.plist) in this directory.
+`launchctl load ~/Library/LaunchAgents/com.aka.multitool.serve.plist`):
+see [`com.aka.multitool.serve.plist`](com.aka.multitool.serve.plist) in this directory.
 
 ## 2. TLS in front
 
@@ -87,7 +87,7 @@ these in front and use its address as `--public-url`:
 The management token and secret values ride this connection — do not
 expose the bare listener to an untrusted network.
 
-## 3. In AKA Desktop (any machine)
+## 3. In Multitool Desktop (any machine)
 
 Open the broker switcher at the right of the title bar → **Remote
 broker…** → enter the URL and the `akamgr_…` token. The app manages the
@@ -103,7 +103,7 @@ For agents on other machines to use the **Postgres** data plane, serve it
 on a reachable address:
 
 ```sh
-mfa serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev \
+multitool serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev \
     --data-plane-listen 0.0.0.0 --advertise-host broker.lan
 ```
 

@@ -1,20 +1,19 @@
-# AgentMFA CLI
+# Multitool CLI
 
-This directory is the npm distribution of the `mfa` CLI, published as
-[`agentmfa`](https://www.npmjs.com/package/agentmfa).
+This directory is the npm distribution of the `multitool` CLI, published as
+[`@aka-com/multitool`](https://www.npmjs.com/package/@aka-com/multitool).
 
 This is an open-source package (MIT License) that follows an esbuild-style layout:
 
-- `agentmfa/` — the package users install. It contains a Node launcher
-  (`bin/agentmfa.js`, exposed as both `agentmfa` and `mfa`) plus the bundled
-  JavaScript MCP host. The launcher executes the prebuilt binary and gives its
-  own Node executable to the broker for supervising that MCP host. It declares
-  one exact-pinned `optionalDependency` per platform; npm installs the single
-  matching one.
-- `agentmfa-{darwin,linux}-{arm64,x64}/` — per-platform packages whose only
-  payload is `bin/mfa`, the release binary for that `os`/`cpu` pair. The
-  binaries are staged by `scripts/npm-dist.sh` and are gitignored; only the
-  manifests are checked in.
+- `multitool/` — the package users install. It contains a Node launcher
+  (`bin/multitool.js`, exposed canonically as `multitool` and through the legacy
+  `mfa` and `agentmfa` aliases). The launcher executes the prebuilt binary. It
+  declares one exact-pinned `optionalDependency` per platform; npm installs the
+  single matching one.
+- `multitool-{darwin,linux}-{arm64,x64}/` — per-platform packages whose only
+  payload is `bin/multitool`, published under the `@aka-com` scope for that
+  `os`/`cpu` pair. The binaries are staged by `scripts/npm-dist.sh` and are
+  gitignored; only the manifests are checked in.
 
 There are no postinstall scripts and no install-time downloads. Node
 22 or newer is required, as the MCP host runtime.
@@ -22,7 +21,7 @@ There are no postinstall scripts and no install-time downloads. Node
 ## Versioning
 
 The Cargo workspace version in the root `Cargo.toml` is the single source of
-truth (it is what `mfa --version` reports). All five `package.json` files must
+truth (it is what `multitool --version` reports). All five `package.json` files must
 carry the same version, with the launcher's `optionalDependencies` pinned
 exactly. After bumping the workspace version, run:
 
@@ -47,19 +46,19 @@ Linux cross-builds it prefers matching GNU tools when installed and otherwise
 uses the repo's wrappers with Zig. Explicit Cargo/CC/CXX/AR target variables
 are preserved. Use `scripts/npm-dist.sh --target TRIPLE --pack` on native
 CI runners when a single cross-build host is not available, then aggregate
-the staged `bin/mfa` files.
+the staged `bin/multitool` files.
 
 The command keeps its npm cache under `target/npm-cache`; set
-`AGENTMFA_NPM_CACHE` to override that location.
+`MULTITOOL_NPM_CACHE` to override that location.
 
 Smoke-test a native pair from the result in a scratch prefix:
 
 ```sh
-npm install --global --prefix /tmp/agentmfa-test \
-    dist/npm/agentmfa-linux-x64-*.tgz \
-    dist/npm/agentmfa-[0-9]*.tgz
-/tmp/agentmfa-test/bin/agentmfa --version
-/tmp/agentmfa-test/bin/mfa skill | head
+npm install --global --prefix /tmp/multitool-test \
+    dist/npm/aka-com-multitool-linux-x64-*.tgz \
+    dist/npm/aka-com-multitool-[0-9]*.tgz
+/tmp/multitool-test/bin/multitool --version
+/tmp/multitool-test/bin/multitool skill | head
 ```
 
 ## Platform support
@@ -67,7 +66,7 @@ npm install --global --prefix /tmp/agentmfa-test \
 Supported today: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`
 (glibc). Not covered yet:
 
-- **musl/Alpine**: either add `agentmfa-linux-{x64,arm64}-musl` packages, or
+- **musl/Alpine**: either add `multitool-linux-{x64,arm64}-musl` packages, or
   build the linux binaries as static musl artifacts so one package covers
   both libcs.
 - **Windows**: unsupported by the broker itself (Unix-domain-socket

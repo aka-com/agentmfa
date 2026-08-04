@@ -1,4 +1,4 @@
-# Try AKA against the local sandbox
+# Try Multitool against the local sandbox
 
 ```text
      _                    _   __  __ _____ _
@@ -10,11 +10,11 @@
 ```
 
 The sandbox is a disposable Docker Compose stack with one upstream for
-every AKA connection type — an authenticated HTTP API, an MCP server,
+every Multitool connection type — an authenticated HTTP API, an MCP server,
 Postgres, and SSH — so you can try the whole app in
 minutes without touching a real service. Every port binds to `127.0.0.1`
 and every credential is a fake, fixed test value that must never be
-reused outside the sandbox. AKA Desktop runs natively so it keeps using
+reused outside the sandbox. Multitool Desktop runs natively so it keeps using
 the host Keychain, webview, and Unix socket.
 
 The HTTP API and the MCP server are the same fixture container on one
@@ -30,8 +30,8 @@ A copy of this walkthrough formatted for the browser is in
 - Node.js with `npm` (only to run the `npm run sandbox:*` scripts —
   `bash scripts/sandbox-up.sh` works without it)
 - `curl`, `ssh-keygen`, `ssh-keyscan`, and the Postgres `psql` client
-- AKA Desktop: the desktop app, or the headless broker
-  (`cargo run -p mfa -- serve`) on any platform
+- Multitool Desktop: the desktop app, or the headless broker
+  (`cargo run -p multitool -- serve`) on any platform
 
 ## 2. Start the sandbox
 
@@ -45,7 +45,7 @@ The first start compiles the HTTP/MCP fixture inside Docker and
 can take several minutes; later starts take seconds. The command
 generates a sandbox-only SSH key under the ignored `dev/sandbox/state/`
 directory, waits until all five services answer, and prints the exact
-values to enter in AKA Desktop — including paste-ready “Quick setup” lines
+values to enter in Multitool Desktop — including paste-ready “Quick setup” lines
 for Postgres and SSH and the current SSH host-key fingerprint.
 
 Print the containers and connection values again at any time:
@@ -54,12 +54,12 @@ Print the containers and connection values again at any time:
 npm run sandbox:status
 ```
 
-## 3. Add the services in AKA Desktop
+## 3. Add the services in Multitool Desktop
 
 <!-- Keep this walkthrough in sync with scripts/sandbox-status.sh and
      quickstart.html (step 3). -->
 
-Open AKA Desktop from the menu bar icon; **Services** is the first tab.
+Open Multitool Desktop from the menu bar icon; **Services** is the first tab.
 At the top is an **Add a service for your agent** card. (If the card
 isn't shown, re-enable it from the **Walkthroughs** menu — the ?
 button in the Services header — or use **＋ Add service** to fill the
@@ -80,11 +80,11 @@ default ports:
 | HTTP API | Enter manually: API root `http://127.0.0.1:18080` | Name `sandbox-http`, authentication type **Bearer token**, credential value `aka-test-token` |
 | MCP server | **MCP server** row: server URL `http://127.0.0.1:18080/mcp` | Name `sandbox-mcp`, custom authentication `Authorization: Bearer {{SANDBOX_MCP_TOKEN}}`, credential value `aka-mcp-test-token` |
 | Postgres | Quick setup: `postgres://aka:aka-test-password@127.0.0.1:15432/aka_sandbox?sslmode=disable` | Name `sandbox-postgres`; host, database, TLS mode **Disable** (under **Advanced**), and password all pre-fill |
-| SSH | Quick setup: `ssh -i <printed key path> -p 12222 sandbox@127.0.0.1` | Name `sandbox-ssh`; AKA Desktop reads the key file itself — never paste key contents |
+| SSH | Quick setup: `ssh -i <printed key path> -p 12222 sandbox@127.0.0.1` | Name `sandbox-ssh`; Multitool Desktop reads the key file itself — never paste key contents |
 
 The SSH **Host key fingerprint** field (under **Advanced**) is
 optional: paste the printed `SHA256:…` value, or leave it blank and
-AKA Desktop will show the observed key for confirmation at the first
+Multitool Desktop will show the observed key for confirmation at the first
 agent connection and pin it then.
 
 Press **Test** on each service's card and expect:
@@ -103,16 +103,16 @@ Press **Test** on each service's card and expect:
 Pair an agent (the **Connect an agent** walkthrough shows the exact
 command), then ask it to use the services in plain language, e.g.:
 
-- “Using my AKA service `sandbox-http`, make a GET request to
+- “Using my Multitool service `sandbox-http`, make a GET request to
   `/authenticated` and summarize the response.”
-- “Using my AKA service `sandbox-postgres`, run
+- “Using my Multitool service `sandbox-postgres`, run
   `SELECT current_user, current_database();`.”
-- “Using my AKA service `sandbox-ssh`, run `uname -a`.”
-- “Using my AKA MCP service `sandbox-mcp`, call the `sandbox_echo` tool
+- “Using my Multitool service `sandbox-ssh`, run `uname -a`.”
+- “Using my Multitool MCP service `sandbox-mcp`, call the `sandbox_echo` tool
   with `hello`.” (The MCP tools appear as
-  `agentmfa_sandbox-mcp_sandbox_echo` and `…_sandbox_ping`.)
+  `multitool_sandbox-mcp_sandbox_echo` and `…_sandbox_ping`.)
 
-Approve the prompts AKA Desktop raises. What one decision covers depends
+Approve the prompts Multitool Desktop raises. What one decision covers depends
 on the service: one request for an API service, one `tools/call` for an
 MCP service, one whole session for Postgres, or one verified SSH login.
 After SSH authentication the broker never sees the commands or channels
@@ -123,10 +123,10 @@ deeper checks:
 GET  /authenticated            {"authenticated":true} with the token; 401 without
 GET  /status/{200..599}        the selected status code
 GET  /delay/{seconds}          response delayed up to 20 seconds
-GET  /redirect/same-origin     302 → /authenticated; AKA follows it and
+GET  /redirect/same-origin     302 → /authenticated; Multitool follows it and
                                re-injects the credential (expect a final 200)
 GET  /redirect/cross-origin    302 to the fixture's other published port;
-                               AKA returns the raw 302 rather than follow
+                               Multitool returns the raw 302 rather than follow
                                it (the target answers 418 if ever reached)
 GET  /binary                   5 non-UTF-8 bytes (body_encoding "base64")
 GET  /large/{bytes}            generated body up to 12 MiB; /large/12582912
@@ -153,9 +153,9 @@ npm run sandbox:test -- dev/sandbox/tests/ssh.test.ts  # one file
 AKA_SANDBOX_SLOW=1 npm run sandbox:test               # + the minute-scale cases
 ```
 
-The command checks that all four services are up, builds `mfa`, and runs the
+The command checks that all four services are up, builds `multitool`, and runs the
 tests in `dev/sandbox/tests/`. Each test file
-starts its own `mfa serve` on a throwaway root, seeds the sandbox
+starts its own `multitool serve` on a throwaway root, seeds the sandbox
 services as connections, and then speaks the real wire planes: the
 control plane over the broker's Unix socket, the manage plane the desktop
 app uses (including an attached request inbox that answers confirmation
@@ -178,8 +178,8 @@ connection:
 | `mcp.test.ts` | MCP over the HTTP plane, tool subsets, elicitations, the broker's MCP host |
 | `endpoints.test.ts` | direct endpoints for all three types: issue, use, rotate, revoke |
 | `manage-plane.test.ts` | the app's configuration surface and its validation |
-| `lifecycle.test.ts` | restart, key rotation, and the `mfa` commands this walkthrough names |
-| `unsupported.test.ts` | the matrix's empty cells — behaviour AKA does not implement |
+| `lifecycle.test.ts` | restart, key rotation, and the `multitool` commands this walkthrough names |
+| `unsupported.test.ts` | the matrix's empty cells — behaviour Multitool does not implement |
 
 Cases for behaviour that does not exist yet (per-statement Postgres
 approval, per-command SSH approval, approval levels that differ for
@@ -226,10 +226,10 @@ The builder, runtime, Postgres, and OpenSSH images are pinned to
 multi-platform manifest digests for reproducibility across Apple
 Silicon and amd64 hosts; update each tag and digest together after
 reviewing a new upstream release. The walkthrough above adds each
-service through AKA Desktop; the same checks run headless on Linux
+service through Multitool Desktop; the same checks run headless on Linux
 (where the desktop app does not build) by seeding the store with
-`mfa conn add` (the MCP connection needs `--mcp-path /mcp`), starting
-`mfa serve`, and driving the broker over its Unix socket the way an
+`multitool conn add` (the MCP connection needs `--mcp-path /mcp`), starting
+`multitool serve`, and driving the broker over its Unix socket the way an
 agent would.
 
 Do not mount the repository, home directory, or real credentials into

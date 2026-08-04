@@ -16,7 +16,7 @@ const tauri = typeof window !== 'undefined' ? window.__TAURI__ : undefined;
 
 async function developmentMock() {
   if (!import.meta.env.DEV) {
-    throw new Error('The AgentMFA frontend must run inside Tauri');
+    throw new Error('The Multitool frontend must run inside Tauri');
   }
   return import('./mock-bridge');
 }

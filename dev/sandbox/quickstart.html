@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AKA sandbox quickstart</title>
+<title>Multitool sandbox quickstart</title>
 <style>
   :root {
     --bg: #ffffff; --fg: #1a1d21; --muted: #5c6470;
@@ -55,19 +55,19 @@
 </head>
 <body>
 <main>
-  <pre aria-label="AKA logo"><code>     _                    _   __  __ _____ _
+  <pre aria-label="Multitool logo"><code>     _                    _   __  __ _____ _
     / \   __ _  ___ _ __ | |_|  \/  |  ___/ \
    / _ \ / _` |/ _ \ '_ \| __| |\/| | |_ / _ \
   / ___ \ (_| |  __/ | | | |_| |  | |  _/ ___ \
  /_/   \_\__, |\___|_| |_|\__|_|  |_|_|/_/   \_\
          |___/</code></pre>
-  <h1>AKA sandbox quickstart</h1>
-  <p class="subtitle">Try every AKA connection type against disposable
+  <h1>Multitool sandbox quickstart</h1>
+  <p class="subtitle">Try every Multitool connection type against disposable
   local containers — no real credentials involved.</p>
 
   <p>The sandbox starts four upstreams on <code>127.0.0.1</code>: an
   authenticated HTTP API, an MCP server, Postgres, and SSH. All credentials are fixed, fake test values; never reuse them
-  anywhere else. AKA Desktop runs natively on your machine. The MCP
+  anywhere else. Multitool Desktop runs natively on your machine. The MCP
   server shares the HTTP fixture on one port — an MCP connection is an
   API connection carrying an <code>mcp_path</code> (<code>/mcp</code>).</p>
 
@@ -75,22 +75,22 @@
   <ul>
     <li>Docker with Compose v2 — <b>running</b> (start Docker Desktop first)</li>
     <li>Node.js with <code>npm</code></li>
-    <li>The AKA Desktop app (or the headless broker, <code>cargo run -p mfa -- serve</code>)</li>
+    <li>The Multitool Desktop app (or the headless broker, <code>cargo run -p multitool -- serve</code>)</li>
   </ul>
 
   <h2><span class="step">2</span>Start the sandbox</h2>
-  <pre><code>git clone https://github.com/aka-com/agentmfa.git
-cd agentmfa
+  <pre><code>git clone https://github.com/aka-com/multitool.git
+cd multitool
 npm run sandbox:up</code></pre>
   <p>The first start compiles the test fixture inside Docker and can take
   several minutes; later starts take seconds. When everything is ready it
-  prints <span class="ok">ready</span> for HTTP, MCP, Postgres, and SSH, followed by the exact values to enter in AKA Desktop. Re-print
+  prints <span class="ok">ready</span> for HTTP, MCP, Postgres, and SSH, followed by the exact values to enter in Multitool Desktop. Re-print
   them any time with <code>npm run sandbox:status</code>.</p>
 
-  <h2><span class="step">3</span>Add the services in AKA</h2>
+  <h2><span class="step">3</span>Add the services in Multitool</h2>
   <!-- Keep this walkthrough in sync with scripts/sandbox-status.sh and
        dev/sandbox/README.md (section 3). -->
-  <p>Open AKA Desktop from the menu bar icon; <b>Services</b> is the first
+  <p>Open Multitool Desktop from the menu bar icon; <b>Services</b> is the first
   tab, with an <b>Add a service for your agent</b> card at the top. (If
   the card isn't shown, re-enable it from the <b>Walkthroughs</b> menu —
   the ? button in the Services header — or use <b>＋ Add service</b> to
@@ -131,7 +131,7 @@ npm run sandbox:up</code></pre>
           <div class="muted">copy the exact line from
           <code>sandbox:status</code> — it carries the generated key's
           absolute path</div></td>
-      <td>Name <code>sandbox-ssh</code>; AKA Desktop reads the key file
+      <td>Name <code>sandbox-ssh</code>; Multitool Desktop reads the key file
           itself. Host key fingerprint (under <b>Advanced</b>) is
           optional — leave it blank to confirm and pin on first
           connection.</td>
@@ -152,14 +152,14 @@ npm run sandbox:up</code></pre>
   <p>Pair an agent using the <b>Connect an agent</b> walkthrough, then ask
   it in plain language, for example:</p>
   <ul>
-    <li>“Using my AKA service <code>sandbox-http</code>, make a GET
+    <li>“Using my Multitool service <code>sandbox-http</code>, make a GET
         request to <code>/authenticated</code> and summarize the response.”</li>
-    <li>“Using my AKA service <code>sandbox-postgres</code>, run
+    <li>“Using my Multitool service <code>sandbox-postgres</code>, run
         <code>SELECT current_user, current_database();</code>”</li>
-    <li>“Using my AKA service <code>sandbox-ssh</code>, run
+    <li>“Using my Multitool service <code>sandbox-ssh</code>, run
         <code>uname -a</code> on the server.”</li>
   </ul>
-  <p>Approve the prompts AKA Desktop raises — one per API request, one per
+  <p>Approve the prompts Multitool Desktop raises — one per API request, one per
   MCP tool call, one per whole Postgres session; SSH logins are signed
   without a prompt. The agent never sees the tokens, password, or key:
   check the <b>Activity</b> tab afterwards to watch every brokered call,

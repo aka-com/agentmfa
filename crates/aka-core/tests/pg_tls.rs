@@ -481,7 +481,7 @@ async fn verify_full_refuses_an_unverifiable_certificate() {
 #[tokio::test]
 async fn verify_full_accepts_a_leaf_from_the_configured_ca_bundle() {
     let dir = tempfile::tempdir().unwrap();
-    let ca = new_ca("AgentMFA Test CA");
+    let ca = new_ca("Multitool Test CA");
     // An IP SAN, so `verify-full`'s name check is satisfied by the loopback
     // address the test can actually connect to.
     let (chain, key) = leaf_signed_by(&ca, "127.0.0.1");
@@ -505,7 +505,7 @@ async fn verify_full_accepts_a_leaf_from_the_configured_ca_bundle() {
 #[tokio::test]
 async fn verify_full_refuses_a_bundle_signed_leaf_for_another_host() {
     let dir = tempfile::tempdir().unwrap();
-    let ca = new_ca("AgentMFA Test CA");
+    let ca = new_ca("Multitool Test CA");
     let (chain, key) = leaf_signed_by(&ca, "db.internal");
     let port = fake_tls_pg(chain, key, SslAnswer::Accept).await;
     let bundle = bundle_file(dir.path(), &ca);
@@ -529,7 +529,7 @@ async fn verify_full_refuses_a_bundle_signed_leaf_for_another_host() {
 #[tokio::test]
 async fn verify_ca_accepts_a_bundle_signed_leaf_whose_name_does_not_match() {
     let dir = tempfile::tempdir().unwrap();
-    let ca = new_ca("AgentMFA Test CA");
+    let ca = new_ca("Multitool Test CA");
     let (chain, key) = leaf_signed_by(&ca, "db.internal");
     let port = fake_tls_pg(chain, key, SslAnswer::Accept).await;
     let bundle = bundle_file(dir.path(), &ca);

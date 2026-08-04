@@ -1,4 +1,4 @@
-//! AgentMFA Tauri shell.
+//! Multitool Tauri shell.
 //!
 //! The webview is the discovery/ergonomics surface; the Rust core
 //! owns everything sensitive. This shell wires the two together: it
@@ -50,7 +50,7 @@ pub(crate) fn start_local_runtime(handle: &AppHandle) -> Result<LocalRuntime, Co
     // planes). Kept in state; dropping the handle stops it.
     let daemon = runtime.block_on(daemon::serve(broker.clone()))?;
     tracing::info!(
-        "AgentMFA daemon listening on {}",
+        "Multitool daemon listening on {}",
         daemon.socket_path.display()
     );
 
@@ -92,9 +92,9 @@ fn integrity_recovery_dialog(file: &str) -> IntegrityRecoveryDecision {
         ));
         alert.setInformativeText(&NSString::from_str(&format!(
             "{file} failed its integrity check and won't be loaded.\n\n\
-             This happens when the file was modified outside AgentMFA, or was \
+             This happens when the file was modified outside Multitool, or was \
              created under a different app identity. You can quit and restore \
-             the file from backup, or archive AgentMFA's local data directory \
+             the file from backup, or archive Multitool's local data directory \
              so the next launch starts with fresh local state. Keychain secret \
              values are not deleted."
         )));
@@ -105,7 +105,7 @@ fn integrity_recovery_dialog(file: &str) -> IntegrityRecoveryDecision {
             return IntegrityRecoveryDecision::Quit;
         };
         checkbox.setTitle(&NSString::from_str(
-            "I understand AgentMFA will start with fresh local state on next launch.",
+            "I understand Multitool will start with fresh local state on next launch.",
         ));
 
         let response = alert.runModal();
@@ -132,8 +132,8 @@ fn fatal_integrity_startup(app: &tauri::App, file: &str) -> ! {
             app.dialog()
                 .message(format!(
                     "{file} failed its integrity check and won't be loaded.\n\n\
-                     Restore the file from a backup, or move AgentMFA's local \
-                     data directory away to start fresh, then relaunch AgentMFA."
+                     Restore the file from a backup, or move Multitool's local \
+                     data directory away to start fresh, then relaunch Multitool."
                 ))
                 .kind(MessageDialogKind::Error)
                 .title("Saved state failed its integrity check")
@@ -143,7 +143,7 @@ fn fatal_integrity_startup(app: &tauri::App, file: &str) -> ! {
         IntegrityRecoveryDecision::ArchiveUnconfirmed => {
             app.dialog()
                 .message(
-                    "AgentMFA did not archive local data because the confirmation checkbox \
+                    "Multitool did not archive local data because the confirmation checkbox \
                      was not selected.",
                 )
                 .kind(MessageDialogKind::Warning)
@@ -157,22 +157,22 @@ fn fatal_integrity_startup(app: &tauri::App, file: &str) -> ! {
                 Ok(path) => {
                     app.dialog()
                         .message(format!(
-                            "AgentMFA archived its local data to:\n\n{}\n\n\
-                             Relaunch AgentMFA to start with fresh local state. \
+                            "Multitool archived its local data to:\n\n{}\n\n\
+                             Relaunch Multitool to start with fresh local state. \
                              Keychain secret values were not deleted.",
                             path.display()
                         ))
                         .kind(MessageDialogKind::Info)
-                        .title("AgentMFA Data Archived")
+                        .title("Multitool Data Archived")
                         .blocking_show();
                     std::process::exit(0);
                 }
                 Err(e) => {
                     app.dialog()
                         .message(format!(
-                            "AgentMFA could not archive its local data directory: {e}.\n\n\
+                            "Multitool could not archive its local data directory: {e}.\n\n\
                              Nothing was changed. Restore the failed state file from backup, \
-                             or move the data directory away manually, then relaunch AgentMFA."
+                             or move the data directory away manually, then relaunch Multitool."
                         ))
                         .kind(MessageDialogKind::Error)
                         .title("Archive Failed")
@@ -199,28 +199,28 @@ fn fatal_startup(app: &tauri::App, e: CoreError) -> ! {
         // broker it cannot see (a headless dev broker, a differently-
         // identified build) can still hold the socket.
         CoreError::BrokerAlreadyRunning(_) => (
-            "AgentMFA is already running",
+            "Multitool is already running",
             MessageDialogKind::Warning,
-            format!("{e}.\n\nQuit the other broker, then relaunch AgentMFA."),
+            format!("{e}.\n\nQuit the other broker, then relaunch Multitool."),
         ),
         CoreError::BrokerStateBusy(_) => (
             "Broker state is being edited",
             MessageDialogKind::Warning,
-            format!("{e}.\n\nWait for the mfa command to finish, then relaunch AgentMFA."),
+            format!("{e}.\n\nWait for the multitool command to finish, then relaunch Multitool."),
         ),
         CoreError::Vault(_) => (
             "Keychain access failed",
             MessageDialogKind::Error,
             format!(
-                "{e}.\n\nAgentMFA cannot run without its Keychain items. \
-                 Approve Keychain access for AgentMFA (or unlock the login \
+                "{e}.\n\nMultitool cannot run without its Keychain items. \
+                 Approve Keychain access for Multitool (or unlock the login \
                  keychain), then relaunch."
             ),
         ),
         _ => (
-            "AgentMFA could not start",
+            "Multitool could not start",
             MessageDialogKind::Error,
-            format!("{e}.\n\nFix the underlying problem, then relaunch AgentMFA."),
+            format!("{e}.\n\nFix the underlying problem, then relaunch Multitool."),
         ),
     };
     app.dialog()
@@ -247,7 +247,7 @@ pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "aka_core=info,aka_desktop_app=info".into()),
+                .unwrap_or_else(|_| "aka_core=info,multitool_desktop_app=info".into()),
         )
         .init();
 
@@ -258,9 +258,9 @@ pub fn run() {
         // (a nounwind context, so any Err there aborts the process).
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             app.dialog()
-                .message("AgentMFA is already running in the menu bar.")
+                .message("Multitool is already running in the menu bar.")
                 .kind(MessageDialogKind::Info)
-                .title("AgentMFA")
+                .title("Multitool")
                 .show(|_| {});
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -369,7 +369,7 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building AgentMFA")
+        .expect("error while building Multitool")
         .run(|handle, event| {
             // Clicking the Dock icon (incl. when no window is visible) reopens
             // the main window — the standard regular-app reactivation path.

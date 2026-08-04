@@ -3,7 +3,7 @@ name = "aka-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AKA management-plane wire types: the DTOs, error, and event shapes shared by the broker's manage API and its clients"
+description = "Multitool management-plane wire types: the DTOs, error, and event shapes shared by the broker's manage API and its clients"
 
 [dependencies]
 serde = { workspace = true }

@@ -1,4 +1,4 @@
-This is AKA, a secrets broker application for AI agents.
+This is Multitool, a secrets broker application for AI agents.
 For commit messages, include a short description followed by a
 paragraph or bullet-point list of details about what was committed.
 Use multiple -m arguments instead of \n to break lines in commits.

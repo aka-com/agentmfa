@@ -608,9 +608,9 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         expected["mcp_call"]["audit"]["path"]
     );
 
-    // `agentmfa_status` — the tool an agent is told to trust when confused —
+    // `multitool_status` — the tool an agent is told to trust when confused —
     // names the upstream by its real tool names, not the request-tool naming
-    // convention. Regression: it used to advertise `agentmfa_notes_request`,
+    // convention. Regression: it used to advertise `multitool_notes_request`,
     // a tool that does not exist.
     let status = tool_payload(
         &wired

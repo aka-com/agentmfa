@@ -171,7 +171,7 @@ pub struct Broker {
     advertise_host: std::sync::OnceLock<String>,
     /// The in-process MCP host's loopback port (`None` while it is not
     /// running).
-    /// Advertised in the discovery manifest so `mfa mcp` and other bridges
+    /// Advertised in the discovery manifest so `multitool mcp` and other bridges
     /// can find the MCP endpoint without a config file.
     mcp_host_port: Mutex<Option<u16>>,
     /// The PG proxy's ephemeral loopback port, set when the daemon starts;
@@ -1640,7 +1640,7 @@ impl Broker {
     /* ------------------------ agent connect requests ----------------------- */
 
     /// An agent asked for a service that is not configured (the MCP host's
-    /// `agentmfa_connect` tool). This records the ask and pokes the shell
+    /// `multitool_connect` tool). This records the ask and pokes the shell
     /// so the user can add the tool — nothing is created or granted here,
     /// and the same client label asking for the same service within a minute
     /// is coalesced. Returns whether this call surfaced a fresh request.
@@ -1667,7 +1667,7 @@ impl Broker {
                 format!("{client} asked to connect: {service}"),
             )
             .agent(client.to_string())
-            .detail("A request only — add the tool in AgentMFA to grant it")
+            .detail("A request only — add the tool in Multitool to grant it")
             .field("service", service),
         );
         self.events.connect_requested(client, service);
@@ -1870,7 +1870,7 @@ impl Broker {
                 // The socket path used to be the whole capability, because the
                 // ssh-agent protocol has no password field — so the minted
                 // secret was never surfaced. An endpoint that requires
-                // `authenticate@agentmfa.dev` does present it, and a client
+                // `authenticate@multitool.dev` does present it, and a client
                 // that cannot read it cannot use the socket at all.
                 IssuedEndpointInfo {
                     endpoint_id: endpoint.id,
@@ -1888,7 +1888,10 @@ impl Broker {
                     // the forwarder: an address that looks usable and is not
                     // is worse than no address at all.
                     example: if endpoint.require_auth {
-                        format!("mfa ssh-agent {} -- {target}", shell_word(&connection.name))
+                        format!(
+                            "multitool ssh-agent {} -- {target}",
+                            shell_word(&connection.name)
+                        )
                     } else {
                         format!("SSH_AUTH_SOCK=\"{sock}\" {target}")
                     },
@@ -2148,7 +2151,7 @@ impl Broker {
         }
     }
 
-    /// Require (or stop requiring) `authenticate@agentmfa.dev` on an SSH
+    /// Require (or stop requiring) `authenticate@multitool.dev` on an SSH
     /// endpoint's socket, rebinding its listener so the change takes effect on
     /// the next connection rather than the next broker start.
     ///

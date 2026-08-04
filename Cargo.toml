@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/aka-api", "crates/aka-client", "crates/aka-core", "crates/mfa", "crates/aka-sandbox"]
+members = ["crates/aka-api", "crates/aka-client", "crates/aka-core", "crates/multitool", "crates/aka-sandbox"]
 # src-tauri is deliberately NOT a workspace member: it only builds where the
 # platform webview toolchain exists (macOS; Linux needs webkit2gtk). The core
 # and CLI crates build and test everywhere.

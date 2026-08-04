@@ -345,7 +345,7 @@ async fn mcp_is_reverse_proxied_to_the_loopback_host() {
     assert_eq!(response.status().as_u16(), 200);
     assert!(response.headers().get("mcp-session-id").is_some());
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["result"]["serverInfo"]["name"], "agentmfa");
+    assert_eq!(body["result"]["serverInfo"]["name"], "multitool");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -2,7 +2,7 @@
 //!
 //! `GET /.well-known/agent-broker.json` serves machine-readable manifest.
 //! `GET /instructions` serves the human/agent-readable version.
-//! `mfa skill` emits the same instructions as a checked-in skill file.
+//! `multitool skill` emits the same instructions as a checked-in skill file.
 
 use serde_json::json;
 
@@ -58,10 +58,10 @@ pub fn manifest(
             "ssh_open": "/v1/ssh/open",
             "instructions": "/instructions",
         },
-        "pairing": "One shared key covers every local agent: read it from the token_file and send it as your Bearer token. If you cannot read files, POST /v1/pair with {\"agent_name\": \"<your-name>\"} returns the same key. Optionally send X-AgentMFA-Client: <your-name> to label your activity.",
+        "pairing": "One shared key covers every local agent: read it from the token_file and send it as your Bearer token. If you cannot read files, POST /v1/pair with {\"agent_name\": \"<your-name>\"} returns the same key. Optionally send X-Multitool-Client: <your-name> to label your activity.",
     });
     // Where the MCP host is listening right now, when one is running: the
-    // loopback streamable-HTTP endpoint `mfa mcp` (and any HTTP-native MCP
+    // loopback streamable-HTTP endpoint `multitool mcp` (and any HTTP-native MCP
     // client) bridges to, authenticated with the same shared key. The port
     // is dynamic, so bridges discover it here instead of pinning it.
     if let Some(url) = mcp_url {
@@ -114,7 +114,7 @@ pub fn manifest_remote(
             "pg_open": "/v1/pg/open",
             "instructions": "/instructions",
         },
-        "pairing": "Not served remotely: every client of this broker uses its one shared key, obtained from the broker's operator (on the broker host it lives in the token file). Send it as your Bearer token, and optionally X-AgentMFA-Client: <your-name> to label your activity.",
+        "pairing": "Not served remotely: every client of this broker uses its one shared key, obtained from the broker's operator (on the broker host it lives in the token file). Send it as your Bearer token, and optionally X-Multitool-Client: <your-name> to label your activity.",
     });
     if let Some(base) = public_url {
         m["base_url"] = json!(base);
@@ -176,14 +176,14 @@ pub fn instructions(config: &BrokerConfig, paths: &Paths) -> String {
     let response_cap = config.response_cap;
     let max_redirects = config.max_redirects;
     format!(
-        r#"# AKA: broker instructions
+        r#"# Multitool: broker instructions
 
-AKA holds this developer's secrets in the macOS Keychain and brokers
+Multitool holds this developer's secrets in the macOS Keychain and brokers
 their use. Broker-produced fields do not expose vault-held values or secret
 names; you ask the broker to *use a named connection* (make an HTTP request
 through `github`, connect to `prod-db`) and the broker injects the credential
 on the upstream leg. Authorization is per **tool**: the user enables or
-disables each connection for agents in the AgentMFA app. An enabled call
+disables each connection for agents in the Multitool app. An enabled call
 executes immediately; a disabled call is refused with
 `403 denied_by_policy` — ask your user to enable the tool in the app. A
 new connection starts enabled for agents. A
@@ -237,7 +237,7 @@ outstanding data-plane capabilities, closes broker-owned Postgres sessions,
 and closes SSH agent sockets for every agent at once. It cannot terminate an
 SSH transport that already authenticated.
 
-**Label yourself.** Optionally send `X-AgentMFA-Client: <your-name>`
+**Label yourself.** Optionally send `X-Multitool-Client: <your-name>`
 (1-64 chars of `[A-Za-z0-9._-]`) on every call. It names you in the user's
 activity log and live-sessions view — attribution only, never
 authorization.
@@ -256,13 +256,13 @@ exposed. `endpoint` is where a call naming this connection goes (POST
 it). `wired` says whether agents may use the connection: an enabled call
 executes immediately, a disabled call is refused with
 `403 {{"reason": "denied_by_policy"}}`. Access is changed only by the user
-in the AgentMFA app — if you need a connection that is disabled, ask
+in the Multitool app — if you need a connection that is disabled, ask
 your user rather than retrying.
 
 ## 3. Confirmation, retries, and timeouts
 
 Most calls execute immediately. A connection the user switched
-confirmation on for is different: the call is **held** while AgentMFA asks
+confirmation on for is different: the call is **held** while Multitool asks
 them about it, for up to {approval_timeout} seconds. Approving it also
 covers that connection's next calls for a while, so a confirmed tool does
 not ask again on every request. Three answers are possible, and you see
@@ -276,7 +276,7 @@ only the outcome:
 
 `403 {{"reason": "approval_unavailable"}}` means the connection asks for
 confirmation but no answering surface is attached, or the bounded prompt
-queue is full. Retrying will not help until AgentMFA is attached or capacity
+queue is full. Retrying will not help until Multitool is attached or capacity
 is available.
 
 Set your HTTP client timeout to **at least {client_timeout} seconds**
@@ -349,7 +349,7 @@ the upstream leg is HTTP/1.1-only and does not decompress responses.
 A connection's **direct HTTP endpoint** relays responses as a stream, so that
 {response_cap}-byte cap does not apply to it: point a client at the endpoint's
 base URL to pull an artifact larger than the control plane can carry. Send
-`X-AgentMFA-Request-Id: <uuid>` on a mutating call there to get the same
+`X-Multitool-Request-Id: <uuid>` on a mutating call there to get the same
 idempotency `/v1/http` gives `request_id` — with the same trade the control
 plane makes, since a coalesced call has to be buffered to stay replayable and
 therefore takes the response cap back. Reads are never coalesced, so the header
@@ -377,7 +377,7 @@ rather than the combined `headers["set-cookie"]` value.
             "example": "PGPASSWORD=<ticket> psql \"<dsn>\""}}
 
 Run any unmodified client against the DSN. PGPASSWORD or a passfile keeps
-the ticket out of `ps`-visible argv and shell history. `mfa dsn <connection>`
+the ticket out of `ps`-visible argv and shell history. `multitool dsn <connection>`
 prints shell-safe PG* exports for this by default; its explicit
 `--format uri` compatibility mode embeds the ticket in argv:
 
@@ -473,15 +473,15 @@ host-key-mismatched signing requests.
 
 ## 7. MCP tool routing
 
-`mfa mcp` is a stdio adapter for MCP clients. It discovers the broker's
+`multitool mcp` is a stdio adapter for MCP clients. It discovers the broker's
 Streamable HTTP MCP endpoint and authenticates every request with this
 machine's shared key. The manifest advertises `mcp_url` while the MCP host is
 running (or `mcp_path` on a remotely served broker). Upstream MCP connections
 must themselves speak Streamable HTTP at their configured `mcp_path`;
 upstream stdio servers are not supported.
 
-Plain API connections appear as `agentmfa_<connection>_request`; Postgres and
-SSH connections appear as `agentmfa_<connection>_open`. An upstream MCP
+Plain API connections appear as `multitool_<connection>_request`; Postgres and
+SSH connections appear as `multitool_<connection>_open`. An upstream MCP
 connection contributes bounded names derived from both the connection and
 the upstream tool name. Its `allowed_tools` field, when present, is the
 curated upstream subset the broker enforces on every `tools/call`; absence
@@ -490,13 +490,13 @@ every non-tool capability: its resources, resource templates, and prompts
 are not published, and reads, prompt gets, and completions against them
 refuse rather than reach the upstream.
 
-Use `agentmfa_status` first when a tool is absent or an upstream failed.
-Large upstream catalogs keep overflow tools behind `agentmfa_search_tools`
-and `agentmfa_call_tool` rather than flooding `tools/list`.
-`agentmfa_connect` only files a request for the user to configure a service;
+Use `multitool_status` first when a tool is absent or an upstream failed.
+Large upstream catalogs keep overflow tools behind `multitool_search_tools`
+and `multitool_call_tool` rather than flooding `tools/list`.
+`multitool_connect` only files a request for the user to configure a service;
 it grants nothing.
 
-Native AgentMFA tools follow connection enable/disable and rename changes
+Native Multitool tools follow connection enable/disable and rename changes
 during a serving session and send `tools/list_changed`. Upstream MCP catalogs
 are discovered when the serving session starts; reconnect to refresh an
 upstream's tools, schemas, resources, or curated subset. Each upstream
@@ -505,7 +505,7 @@ A call to a stale catalog entry may therefore receive a 403 because the tool
 is no longer current; do not interpret that response alone as a policy denial.
 
 An upstream elicitation is relayed through the authenticated `/v1/elicit`
-callback and waits only when an AgentMFA request surface can display it.
+callback and waits only when a Multitool request surface can display it.
 There is no generic agent reason to call that callback directly. Serving
 session ids are bound to the broker's `client_id`, which is one shared
 machine identity—not a boundary between local agents. Treat a leaked
@@ -562,22 +562,22 @@ expiry rules in §§3, 5, and 6.
     )
 }
 
-/// The generated skill file (`mfa skill`): the same instructions
+/// The generated skill file (`multitool skill`): the same instructions
 /// content under skill frontmatter; generated output, not a hand-maintained
 /// artifact.
 pub fn skill_file(config: &BrokerConfig, paths: &Paths) -> String {
     format!(
         r#"---
-name: mfa
+name: multitool
 description: >-
   Broker credentialed HTTP, Postgres, SSH and upstream MCP access through the
-  local AgentMFA daemon. Use when a task needs an API key, database, SSH key,
+  local Multitool daemon. Use when a task needs an API key, database, SSH key,
   or MCP server the developer has configured. The broker does not directly
   expose the stored secret; access is authorization-gated. Start by reading
   the live instructions over the broker socket.
 ---
 
-<!-- Generated by `mfa skill`. Do not edit: regenerate instead.
+<!-- Generated by `multitool skill`. Do not edit: regenerate instead.
      The daemon serves the same content at /instructions; if this file and
      the daemon disagree, the daemon wins. -->
 
@@ -592,16 +592,16 @@ description: >-
 pub fn skill_file_for_broker(setup: &str) -> String {
     format!(
         r#"---
-name: mfa
+name: multitool
 description: >-
   Broker credentialed HTTP, Postgres, SSH and upstream MCP access through the
-  selected AgentMFA broker. Use when a task needs an API key, database, SSH
+  selected Multitool broker. Use when a task needs an API key, database, SSH
   key, or MCP server the developer has configured. The broker does not
   directly expose the stored secret; access is authorization-gated. Start by
   following the setup below to read the broker's live instructions.
 ---
 
-<!-- Generated by `mfa skill`. Do not edit: regenerate instead.
+<!-- Generated by `multitool skill`. Do not edit: regenerate instead.
      The selected broker's live /instructions document is authoritative. -->
 
 {}"#,
@@ -758,7 +758,7 @@ mod tests {
         for needle in [
             "curl --unix-socket ~/.aka/broker.sock",
             "~/.aka/token",
-            "X-AgentMFA-Client",
+            "X-Multitool-Client",
             "/v1/whoami",
             "store_at",
             "token_superseded",
@@ -784,9 +784,9 @@ mod tests {
             "/v1/pg/open",
             "/v1/ssh/open",
             "## 7. MCP tool routing",
-            "agentmfa_status",
-            "agentmfa_search_tools",
-            "agentmfa_call_tool",
+            "multitool_status",
+            "multitool_search_tools",
+            "multitool_call_tool",
             "upstream stdio servers are not supported",
             "reconnect to refresh",
             "`mcp-session-id` as usable",
@@ -859,7 +859,7 @@ mod tests {
     fn skill_file_embeds_instructions() {
         let cfg = BrokerConfig::default();
         let skill = skill_file(&cfg, &paths());
-        assert!(skill.starts_with("---\nname: mfa"));
+        assert!(skill.starts_with("---\nname: multitool"));
         assert!(skill.contains(&instructions(&cfg, &paths())));
     }
 
@@ -868,7 +868,7 @@ mod tests {
         let setup = "curl https://broker.example.dev/instructions";
         let skill = skill_file_for_broker(setup);
         assert!(skill.contains(setup));
-        assert!(skill.contains("selected AgentMFA broker"));
-        assert!(!skill.contains("local AgentMFA daemon"));
+        assert!(skill.contains("selected Multitool broker"));
+        assert!(!skill.contains("local Multitool daemon"));
     }
 }

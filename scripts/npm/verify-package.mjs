@@ -18,15 +18,15 @@ const repoRoot = path.resolve(
 const npmRoot = path.join(repoRoot, "npm");
 
 const PLATFORM_PACKAGES = {
-  "agentmfa-darwin-arm64": { os: "darwin", cpu: "arm64", format: "macho" },
-  "agentmfa-darwin-x64": { os: "darwin", cpu: "x64", format: "macho" },
-  "agentmfa-linux-arm64": { os: "linux", cpu: "arm64", format: "elf" },
-  "agentmfa-linux-x64": { os: "linux", cpu: "x64", format: "elf" },
+  "multitool-darwin-arm64": { os: "darwin", cpu: "arm64", format: "macho" },
+  "multitool-darwin-x64": { os: "darwin", cpu: "x64", format: "macho" },
+  "multitool-linux-arm64": { os: "linux", cpu: "arm64", format: "elf" },
+  "multitool-linux-x64": { os: "linux", cpu: "x64", format: "elf" },
 };
-const MAIN_PACKAGE = "agentmfa";
+const MAIN_PACKAGE = "multitool";
 const ALL_PACKAGES = [...Object.keys(PLATFORM_PACKAGES), MAIN_PACKAGE];
 const REQUIRED_NODE_ENGINE = ">=22";
-const publishedName = (directory) => directory;
+const publishedName = (directory) => `@aka-com/${directory}`;
 
 function fail(message) {
   throw new Error(`npm package verification failed: ${message}`);
@@ -118,33 +118,33 @@ function verifyPlatformPackage(directory, expectedVersion) {
     fail(`${name} must declare cpu ${expected.cpu}`);
   }
 
-  const binary = path.join(packageDir, "bin", "mfa");
+  const binary = path.join(packageDir, "bin", "multitool");
   try {
     accessSync(binary, constants.R_OK | constants.X_OK);
   } catch {
-    fail(`${name} is missing an executable bin/mfa; build and stage it first`);
+    fail(`${name} is missing an executable bin/multitool; build and stage it first`);
   }
-  if (!statSync(binary).isFile()) fail(`${name}/bin/mfa is not a regular file`);
+  if (!statSync(binary).isFile()) fail(`${name}/bin/multitool is not a regular file`);
 
   const identity = binaryIdentity(binary);
   if (identity.format !== expected.format || identity.cpu !== expected.cpu) {
     fail(
-      `${name}/bin/mfa is ${identity.format}-${identity.cpu}, expected ` +
+      `${name}/bin/multitool is ${identity.format}-${identity.cpu}, expected ` +
         `${expected.format}-${expected.cpu}`
     );
   }
 
   if (process.platform === expected.os && process.arch === expected.cpu) {
     const result = spawnSync(binary, ["--version"], { encoding: "utf8" });
-    if (result.error) fail(`${name}/bin/mfa --version: ${result.error.message}`);
+    if (result.error) fail(`${name}/bin/multitool --version: ${result.error.message}`);
     if (result.status !== 0) {
-      fail(`${name}/bin/mfa --version exited with status ${result.status}`);
+      fail(`${name}/bin/multitool --version exited with status ${result.status}`);
     }
     const actual = result.stdout.trim();
-    if (actual !== `mfa ${expectedVersion}`) {
+    if (actual !== `multitool ${expectedVersion}`) {
       fail(
-        `${name}/bin/mfa reports ${JSON.stringify(actual)}, expected ` +
-          `${JSON.stringify(`mfa ${expectedVersion}`)}`
+        `${name}/bin/multitool reports ${JSON.stringify(actual)}, expected ` +
+          `${JSON.stringify(`multitool ${expectedVersion}`)}`
       );
     }
   }
@@ -156,21 +156,26 @@ function verifyPlatformPackage(directory, expectedVersion) {
 
 function verifyMainPackage(expectedVersion) {
   const { packageDir, manifest } = verifyManifest(MAIN_PACKAGE, expectedVersion);
-  const launcher = path.join(packageDir, "bin", "agentmfa.js");
+  const launcher = path.join(packageDir, "bin", "multitool.js");
   try {
     accessSync(launcher, constants.R_OK);
   } catch {
-    fail("agentmfa is missing bin/agentmfa.js");
+    fail("@aka-com/multitool is missing bin/multitool.js");
+  }
+  for (const command of ["multitool", "mfa", "agentmfa"]) {
+    if (manifest.bin?.[command] !== "bin/multitool.js") {
+      fail(`@aka-com/multitool must expose the ${command} compatibility command`);
+    }
   }
   for (const directory of Object.keys(PLATFORM_PACKAGES)) {
     const name = publishedName(directory);
     if (manifest.optionalDependencies?.[name] !== expectedVersion) {
       fail(
-        `agentmfa optionalDependency ${name} must be pinned to ${expectedVersion}`
+        `@aka-com/multitool optionalDependency ${name} must be pinned to ${expectedVersion}`
       );
     }
   }
-  console.log(`verified agentmfa@${expectedVersion} launcher`);
+  console.log(`verified @aka-com/multitool@${expectedVersion} launcher`);
 }
 
 function packageNameFromEnvironment() {
