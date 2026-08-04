@@ -22,7 +22,12 @@ import type {
   McpAuthState,
   McpStatusReport,
   NotificationSettings,
+  OnePasswordField,
+  OnePasswordIntegration,
+  OnePasswordItem,
+  OnePasswordVault,
   RequestRecord,
+  SecretSummary,
   SessionSummary,
   Settings,
   Unlisten,
@@ -118,6 +123,7 @@ interface MockSecret {
   _value: string;
   created_at: string;
   updated_at: string;
+  source?: SecretSummary['source'];
 }
 
 interface MockConnection {
@@ -195,6 +201,7 @@ interface MockIdentity {
 
 interface MockDatabase {
   secrets: MockSecret[];
+  onepasswordIntegrations: OnePasswordIntegration[];
   connections: MockConnection[];
   access: MockAccess[];
   identity: MockIdentity;
@@ -239,7 +246,56 @@ interface MockArgs {
   endpointId?: string;
   orderedIds?: string[];
   settings: NotificationSettings;
+  label?: string;
+  method?: 'desktop_app' | 'service_account' | 'connect';
+  account?: string | null;
+  connectUrl?: string | null;
+  integrationId?: string;
+  vaultId?: string;
+  vaultLabel?: string;
+  itemId?: string;
+  itemLabel?: string;
+  sectionId?: string | null;
+  sectionLabel?: string | null;
+  fieldId?: string;
+  fieldLabel?: string;
 }
+
+const mockOnePasswordVaults: OnePasswordVault[] = [
+  { id: 'vault-work', title: 'Work' },
+  { id: 'vault-engineering', title: 'Engineering' },
+  { id: 'vault-shared', title: 'Shared Services' },
+];
+const mockOnePasswordItems: Record<string, OnePasswordItem[]> = {
+  'vault-work': [
+    { id: 'item-stripe', title: 'Stripe production', category: 'API Credential' },
+    { id: 'item-github', title: 'GitHub automation', category: 'Login' },
+  ],
+  'vault-engineering': [
+    { id: 'item-database', title: 'Production database', category: 'Database' },
+  ],
+  'vault-shared': [
+    { id: 'item-cloudflare', title: 'Cloudflare', category: 'API Credential' },
+  ],
+};
+const mockOnePasswordFields: Record<string, OnePasswordField[]> = {
+  'item-stripe': [
+    { id: 'username', title: 'username', section_id: null, section_title: null, field_type: 'string' },
+    { id: 'credential', title: 'API key', section_id: null, section_title: null, field_type: 'concealed' },
+    { id: 'webhook', title: 'Signing secret', section_id: 'webhooks', section_title: 'Webhooks', field_type: 'concealed' },
+  ],
+  'item-github': [
+    { id: 'username', title: 'username', section_id: null, section_title: null, field_type: 'string' },
+    { id: 'credential', title: 'password', section_id: null, section_title: null, field_type: 'concealed' },
+  ],
+  'item-database': [
+    { id: 'username', title: 'username', section_id: null, section_title: null, field_type: 'string' },
+    { id: 'password', title: 'password', section_id: null, section_title: null, field_type: 'concealed' },
+  ],
+  'item-cloudflare': [
+    { id: 'token', title: 'API token', section_id: null, section_title: null, field_type: 'concealed' },
+  ],
+};
 
 const db: MockDatabase = {
   secrets: [
@@ -251,6 +307,7 @@ const db: MockDatabase = {
     mkSecret('DEPLOY_SSH_KEY', '-----BEGIN OPENSSH PRIVATE KEY-----demo'),
     mkSecret('NOTION_MCP_TOKEN', 'ntn_demo_2f81c4a9b3e7'),
   ],
+  onepasswordIntegrations: [],
   connections: [],
   access: [],
   identity: {
@@ -271,8 +328,22 @@ const db: MockDatabase = {
     confirm_ssh_host_keys: false,
   },
 };
-function mkSecret(name: string, value: string): MockSecret {
-  return { id: uid(), name, _value: value, created_at: now(), updated_at: now() };
+function mkSecret(name: string, value: string, source?: SecretSummary['source']): MockSecret {
+  return { id: uid(), name, _value: value, created_at: now(), updated_at: now(), source };
+}
+function secretDto(secret: MockSecret): SecretSummary {
+  const names = db.connections
+    .filter((connection) => connection.secret_names.includes(secret.name))
+    .map((connection) => connection.name);
+  return {
+    id: secret.id,
+    name: secret.name,
+    used_by: names.length,
+    used_by_names: names,
+    created_at: secret.created_at,
+    updated_at: secret.updated_at,
+    source: secret.source ?? { kind: 'local' },
+  };
 }
 seedConnections();
 function seedConnections() {
@@ -753,6 +824,7 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
 // are reviewable in a plain browser.
 let mockBroker: import('./types').BrokerProfile = {
   mode: 'local', url: null, connected: true, error: null, has_saved_token: false,
+  capabilities: ['onepassword_provider_v1'],
 };
 let mockNotificationSettings: NotificationSettings = {
   mode: 'when_hidden',
@@ -782,6 +854,7 @@ function mockConnectRemote(url: string, token: string | null): unknown {
   }
   mockBroker = {
     mode: 'remote', url: trimmed, connected: true, error: null, has_saved_token: true,
+    capabilities: trimmed.includes('legacy') ? [] : ['onepassword_provider_v1'],
   };
   emit('aka://broker-changed', mockBroker);
   // A "flaky" broker connects, then drops the link shortly after — the
@@ -806,10 +879,76 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (mockFault('locked_vault')) {
         throw 'the encrypted vault could not be opened with this installation’s key';
       }
-      return db.secrets.map((s) => {
-        const names = db.connections.filter((c) => c.secret_names.includes(s.name)).map((c) => c.name);
-        return { id: s.id, name: s.name, used_by: names.length, used_by_names: names, created_at: s.created_at, updated_at: s.updated_at };
+      return db.secrets.map(secretDto);
+    case 'list_onepassword_integrations': return db.onepasswordIntegrations.slice();
+    case 'add_onepassword_integration': {
+      const label = args.label?.trim() ?? '';
+      const method = args.method;
+      if (!label) throw 'Enter a connection name';
+      if (!method) throw 'Choose a connection method';
+      if (db.onepasswordIntegrations.some((integration) =>
+        integration.label.toLowerCase() === label.toLowerCase())) throw 'That connection name is in use';
+      if (method === 'desktop_app' && !args.account?.trim()) throw 'Enter your 1Password account';
+      if (method !== 'desktop_app' && !args.token?.trim()) throw 'Enter a 1Password access token';
+      if (method === 'connect' && !args.connectUrl?.trim()) throw 'Enter the Connect server URL';
+      if (args.token?.includes('invalid')) throw '1Password rejected this access token';
+      const timestamp = now();
+      const integration: OnePasswordIntegration = {
+        id: uid(), label, kind: method,
+        account: method === 'desktop_app' ? args.account?.trim() : null,
+        connect_url: method === 'connect' ? args.connectUrl?.trim() : null,
+        created_at: timestamp, updated_at: timestamp,
+      };
+      db.onepasswordIntegrations.push(integration);
+      emit('aka://integrations-changed', {});
+      return integration;
+    }
+    case 'replace_onepassword_token': {
+      const integration = db.onepasswordIntegrations.find((candidate) => candidate.id === args.id);
+      if (!integration) throw 'That 1Password connection no longer exists';
+      if (!args.token?.trim()) throw 'Enter a 1Password access token';
+      if (args.token.includes('invalid')) throw '1Password rejected this access token';
+      integration.updated_at = nextVersion(integration.updated_at);
+      emit('aka://integrations-changed', {});
+      return { ...integration };
+    }
+    case 'delete_onepassword_integration': {
+      const linked = db.secrets.some((secret) =>
+        secret.source?.kind === 'one_password' && secret.source.integration_id === args.id);
+      if (linked) throw 'Remove its linked credentials before deleting this connection';
+      db.onepasswordIntegrations = db.onepasswordIntegrations
+        .filter((integration) => integration.id !== args.id);
+      emit('aka://integrations-changed', {});
+      return;
+    }
+    case 'onepassword_health': return { ok: true, detail: 'Connected to 1Password' };
+    case 'list_onepassword_vaults': return mockOnePasswordVaults.slice();
+    case 'list_onepassword_items': return (mockOnePasswordItems[args.vaultId ?? ''] ?? []).slice();
+    case 'list_onepassword_fields': return (mockOnePasswordFields[args.itemId ?? ''] ?? []).slice();
+    case 'add_onepassword_secret': {
+      const integration = db.onepasswordIntegrations
+        .find((candidate) => candidate.id === args.integrationId);
+      if (!integration) throw 'That 1Password connection no longer exists';
+      if (db.secrets.some((secret) => secret.name === args.name)) {
+        throw 'That stored name is already in use';
+      }
+      const secret = mkSecret(args.name, 'resolved-only-on-use', {
+        kind: 'one_password',
+        integration_id: integration.id,
+        integration_label: integration.label,
+        vault_id: args.vaultId ?? '',
+        vault_label: args.vaultLabel ?? '',
+        item_id: args.itemId ?? '',
+        item_label: args.itemLabel ?? '',
+        section_id: args.sectionId ?? null,
+        section_label: args.sectionLabel ?? null,
+        field_id: args.fieldId ?? '',
+        field_label: args.fieldLabel ?? '',
       });
+      db.secrets.push(secret);
+      emit('aka://secrets-changed', {});
+      return secretDto(secret);
+    }
     case 'list_connections':
       if (mockFault('partial_load')) throw 'the mock connection index could not be read';
       return db.connections.map(connDto);
@@ -837,6 +976,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         return {
           mode: 'local', url: null, connected: false,
           error: 'the local broker exited unexpectedly', has_saved_token: false,
+          capabilities: ['onepassword_provider_v1'],
         };
       }
       return { ...mockBroker };
@@ -855,6 +995,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       mockBroker = {
         mode: 'local', url: mockBroker.url, connected: true, error: null,
         has_saved_token: mockBroker.has_saved_token,
+        capabilities: ['onepassword_provider_v1'],
       };
       emit('aka://broker-changed', mockBroker);
       return { ...mockBroker };

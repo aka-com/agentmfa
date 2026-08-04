@@ -1340,6 +1340,7 @@ fn manage_error_exit_code(error: &ManageError) -> ExitCode {
         | ManageError::EndpointLimit { .. } => ExitCode::Conflict,
         ManageError::Unreachable { .. } => ExitCode::RemoteUnreachable,
         ManageError::OAuth { .. }
+        | ManageError::OnePassword { .. }
         | ManageError::Vault { .. }
         | ManageError::RemoteUnsupported { .. }
         | ManageError::Internal { .. } => ExitCode::Generic,

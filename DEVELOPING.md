@@ -171,6 +171,28 @@ online CLI commands go through the broker and do not touch the Keychain.
 
 ## Publishing
 
+### 1Password SDK helper
+
+The desktop-app and service-account resolvers use the official Go SDK through
+`multitool-onepassword`. Go 1.24 or newer is required. Build the helper for the
+host architecture with:
+
+```sh
+scripts/build-onepassword-sidecar.sh \
+  --target "$(rustc -vV | sed -n 's/^host: //p')" \
+  --output target/debug/multitool-onepassword
+```
+
+Set `MULTITOOL_ONEPASSWORD_SIDECAR` to that absolute path when the helper is
+not beside the broker executable. `scripts/build.sh` builds both macOS
+architectures, combines them for the universal app, and lets Tauri copy and
+sign the helper as nested code. `scripts/npm-dist.sh` stages the matching
+helper in every platform package.
+
+The Go SDK requires CGO because the helper includes desktop-app
+authentication. Linux cross-builds therefore use the same GNU/Zig C compiler
+selected by `scripts/npm-dist.sh`.
+
 Prerequisites: one-time macOS cross-linker setup: `brew install zig`
 
 1. Bump the workspace version in `Cargo.toml`; run

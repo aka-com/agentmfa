@@ -58,6 +58,9 @@ pub trait BrokerEvents: Send + Sync {
     /// Saved-secret metadata changed (add, rename, replace, or delete).
     fn secrets_changed(&self) {}
 
+    /// External credential-provider configuration changed.
+    fn integrations_changed(&self) {}
+
     /// A new audit entry was appended (drives the activity view).
     fn audit_appended(&self, _entry: &crate::audit::AuditEntry) {}
 

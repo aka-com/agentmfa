@@ -58,6 +58,7 @@ import {
 } from '/src/form-validation';
 import {
   LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
+  supportsOnePassword,
 } from '/src/broker';
 import { sameBrokerScope } from '/src/broker-scope';
 import {
@@ -65,6 +66,11 @@ import {
 } from '/src/samples';
 import type { SampleTool } from '/src/samples';
 import { activityIdentity } from '/src/activity';
+import {
+  onePasswordAliasError,
+  onePasswordSelectionKey,
+  suggestedOnePasswordAlias,
+} from '/src/onepassword';
 import { ACTIVITY_PAGE_LIMIT, refreshActivityPages } from '/src/activity-refresh';
 import { activeRequestCount, activeRequests, anchorExpiry, recentRequests } from '/src/requests';
 import { anchorEndpointExpiries } from '/src/endpoint-expiry';
@@ -88,6 +94,7 @@ import type {
   NotificationSettings,
   RequestRecord,
   SecretSummary,
+  OnePasswordIntegration,
   TestErrorKind,
 } from '/src/types';
 import {
@@ -189,6 +196,8 @@ function clearBrokerOwnedState(): void {
   state.mcpAuthOpenedUrl = null;
   state.mcpStatus = {};
   state.wiringTools = null;
+  state.onepasswordIntegrations = [];
+  state.onepasswordFlow = null;
   // View-local filters and panel state also describe the old broker's data:
   // an agent filter from broker A would silently empty broker B's activity.
   state.activityQuery = '';
@@ -217,12 +226,17 @@ function setSheet(sheet: SheetState | null): void {
 /** Change broker identity without ever showing the previous broker's data under it. */
 function setBrokerProfile(profile: BrokerProfile): void {
   const scopeChanged = !sameBrokerScope(state.broker, profile);
+  const lostOnePassword = supportsOnePassword(state.broker) && !supportsOnePassword(profile);
   if (scopeChanged) brokerEpoch += 1;
   if (scopeChanged) {
     removeBrokerQueries(state.broker);
     clearBrokerOwnedState();
   }
   state.broker = profile;
+  if (lostOnePassword) {
+    state.onepasswordIntegrations = [];
+    if (state.sheet?.kind === 'onepassword') closeSheet();
+  }
 }
 
 // With in-place reconciliation, scroll positions and focus normally survive
@@ -313,6 +327,7 @@ function markLocalBrokerUnavailable(): void {
 async function refresh(which: RefreshTarget = 'all'): Promise<boolean> {
   const jobs: Promise<boolean>[] = [];
   if (which === 'all' || which === 'secrets') jobs.push(load('secrets', 'list_secrets'));
+  if (which === 'all' && supportsOnePassword(state.broker)) jobs.push(loadOnePasswordIntegrations());
   if (which === 'all' || which === 'connections') jobs.push(load('connections', 'list_connections'));
   if (which === 'all' || which === 'identity') jobs.push(loadIdentity());
   if (which === 'all' || which === 'sessions') jobs.push(load('sessions', 'list_sessions'));
@@ -336,6 +351,26 @@ async function refresh(which: RefreshTarget = 'all'): Promise<boolean> {
   }
   render();
   return succeeded;
+}
+
+async function loadOnePasswordIntegrations(): Promise<boolean> {
+  const broker = state.broker;
+  const epoch = brokerEpoch;
+  if (!supportsOnePassword(broker)) {
+    state.onepasswordIntegrations = [];
+    return true;
+  }
+  try {
+    const integrations = await refetchBrokerQuery(broker, 'list_onepassword_integrations');
+    if (!brokerEpochIsCurrent(epoch)) return false;
+    state.onepasswordIntegrations = integrations;
+    return true;
+  } catch (error) {
+    console.error('list_onepassword_integrations', error);
+    // A transient provider/management read must not make already-configured
+    // connections disappear. Broker scope changes clear this state first.
+    return false;
+  }
 }
 
 async function loadActivity(preserveDepth: boolean): Promise<boolean> {
@@ -1065,7 +1100,9 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
     }
     if (state.confirm && state.confirm.kind === 'del-secret' && state.confirm.id === s.id) {
       return <tr key={s.id} className="confirm-row"><td colSpan={4}><div className="confirm-inline">
-        <span>Delete “{s.name}” from the macOS Keychain?</span>
+        <span>{s.source?.kind === 'one_password'
+          ? `Unlink “${s.name}” from Multitool? The 1Password item won’t be changed.`
+          : `Delete “${s.name}” from the macOS Keychain?`}</span>
         <button className="btn sm" data-act="confirm-cancel">Cancel</button>
         <button className="btn sm danger" data-act="del-secret-confirm" data-id={s.id}>Delete</button>
       </div></td></tr>;
@@ -1098,7 +1135,10 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
         })}</div>
     ) : <span className="used-by-empty">Not in use</span>;
     return <tr key={s.id}>
-      <td><div className="s-name">{s.name}</div></td>
+      <td><div className="s-name">{s.name}</div>
+        {s.source?.kind === 'one_password'
+          ? <div className="s-source"><Icon markup={ICONS.onepassword} />{s.source.integration_label}</div>
+          : null}</td>
       <td className="used-by-cell">{usedBy}</td>
       <td className="val"><span className="val-wrap">
         <span className={`val-slot ${copied ? 'is-copied' : ''}`}><code>{valText}</code>
@@ -1360,6 +1400,523 @@ async function addCatalogEntry(entry: CatalogEntry): Promise<void> {
   await openCatalogConnectionForm(entry, asApi ? 'bearer' : 'oauth', asApi);
 }
 
+function onePasswordMethodLabel(method: OnePasswordIntegration['kind']): string {
+  if (method === 'desktop_app') return '1Password app';
+  if (method === 'service_account') return 'Service account';
+  return 'Connect server';
+}
+
+function OnePasswordCatalogExpansion(): ReactNode {
+  if (!supportsOnePassword(state.broker)) {
+    return <div className="cat-conns onepassword-integrations">
+      <div className="muted-note">This remote broker needs an update before it can use 1Password.</div>
+    </div>;
+  }
+  return (
+    <div className="cat-conns onepassword-integrations">
+      {state.onepasswordIntegrations.length
+        ? state.onepasswordIntegrations.map((integration) => {
+            const linked = state.secrets.filter((secret) => secret.source?.kind === 'one_password'
+              && secret.source.integration_id === integration.id).length;
+            const detail = integration.account || integration.connect_url || onePasswordMethodLabel(integration.kind);
+            return <div className="onepassword-integration-row" key={integration.id}>
+              <span className="onepassword-integration-icon" aria-hidden="true">
+                <Icon markup={ICONS.onepassword} />
+              </span>
+              <span className="onepassword-integration-copy">
+                <b>{integration.label}</b>
+                <span>{detail} · {linked} linked {linked === 1 ? 'credential' : 'credentials'}</span>
+              </span>
+              <span className="onepassword-integration-actions">
+                <button className="btn sm" data-act="onepassword-browse"
+                  data-id={integration.id}>Browse</button>
+                {integration.kind !== 'desktop_app'
+                  ? <button className="btn sm" data-act="onepassword-update"
+                      data-id={integration.id}>Update credential</button>
+                  : null}
+                <button className="btn sm danger" data-act="onepassword-delete-ask"
+                  data-id={integration.id}>Remove</button>
+              </span>
+            </div>;
+          })
+        : <div className="muted-note">No 1Password connections yet.</div>}
+    </div>
+  );
+}
+
+async function openOnePasswordFlow(
+  integration?: OnePasswordIntegration,
+  intent: 'create' | 'browse' | 'update' = integration ? 'browse' : 'create',
+): Promise<void> {
+  if (!supportsOnePassword(state.broker)) return;
+  if (!await holdDropdownFormOpen()) return;
+  const method = integration?.kind ?? (state.broker.mode === 'local' ? 'desktop_app' : 'service_account');
+  state.onepasswordFlow = {
+    intent,
+    step: intent === 'browse' ? 2 : 1,
+    method,
+    label: integration?.label ?? '1Password',
+    account: integration?.account ?? '',
+    connectUrl: integration?.connect_url ?? '',
+    token: '',
+    integration: integration ?? null,
+    vaults: [],
+    vault: null,
+    items: [],
+    item: null,
+    fields: [],
+    selections: {},
+    busy: false,
+    error: null,
+  };
+  setSheet({ kind: 'onepassword', id: integration?.id });
+  render();
+  if (intent === 'browse') await loadOnePasswordVaults();
+}
+
+async function connectOnePassword(): Promise<void> {
+  const flow = state.onepasswordFlow;
+  if (!flow || flow.busy) return;
+  const updating = flow.intent === 'update' && flow.integration !== null;
+  const label = flow.label.trim();
+  const account = flow.account.trim();
+  const connectUrl = flow.connectUrl.trim();
+  const token = flow.token.trim();
+  if (updating && flow.method === 'desktop_app') flow.error = 'The 1Password app reconnects when you browse.';
+  else if (!label) flow.error = 'Enter a connection name.';
+  else if (flow.method === 'desktop_app' && !account) flow.error = 'Enter your 1Password account.';
+  else if (flow.method === 'connect' && !connectUrl) flow.error = 'Enter the Connect server URL.';
+  else if (flow.method !== 'desktop_app' && !token) flow.error = 'Enter a 1Password access token.';
+  else flow.error = null;
+  if (flow.error) { render(); return; }
+  const epoch = brokerEpoch;
+  flow.busy = true;
+  // Access tokens are write-only form values. Drop the UI copy as soon as
+  // the request is formed; the native/remote broker owns persistence.
+  flow.token = '';
+  render();
+  try {
+    if (updating) {
+      const integration = await invoke('replace_onepassword_token', {
+        id: flow.integration!.id,
+        token,
+      });
+      if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return;
+      state.onepasswordIntegrations = state.onepasswordIntegrations.map((candidate) =>
+        candidate.id === integration.id ? integration : candidate);
+      closeSheet();
+      toast('1Password credential updated');
+      return;
+    }
+    const integration = await invoke('add_onepassword_integration', {
+      label,
+      method: flow.method,
+      account: flow.method === 'desktop_app' ? account : null,
+      connectUrl: flow.method === 'connect' ? connectUrl : null,
+      token: flow.method === 'desktop_app' ? null : token,
+    });
+    if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return;
+    flow.integration = integration;
+    flow.step = 2;
+    state.onepasswordIntegrations = [
+      ...state.onepasswordIntegrations.filter((candidate) => candidate.id !== integration.id),
+      integration,
+    ];
+    await loadOnePasswordVaults();
+  } catch (error) {
+    if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return;
+    flow.busy = false;
+    flow.error = errorMessage(error);
+    render();
+  }
+}
+
+async function loadOnePasswordVaults(): Promise<boolean> {
+  const flow = state.onepasswordFlow;
+  const integration = flow?.integration;
+  if (!flow || !integration) return false;
+  const epoch = brokerEpoch;
+  flow.busy = true;
+  flow.error = null;
+  render();
+  try {
+    const vaults = await invoke('list_onepassword_vaults', { id: integration.id });
+    if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return false;
+    flow.vaults = vaults;
+    flow.busy = false;
+    render();
+    return true;
+  } catch (error) {
+    if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return false;
+    flow.busy = false;
+    flow.error = errorMessage(error);
+    render();
+    return false;
+  }
+}
+
+async function chooseOnePasswordVault(id: string): Promise<void> {
+  const flow = state.onepasswordFlow;
+  const integration = flow?.integration;
+  const vault = flow?.vaults.find((candidate) => candidate.id === id);
+  if (!flow || !integration || !vault || flow.busy) return;
+  const epoch = brokerEpoch;
+  flow.vault = vault;
+  flow.item = null;
+  flow.fields = [];
+  flow.busy = true;
+  flow.error = null;
+  render();
+  try {
+    const items = await invoke('list_onepassword_items', { id: integration.id, vaultId: vault.id });
+    if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow || flow.vault?.id !== vault.id) return;
+    flow.items = items;
+    flow.busy = false;
+    render();
+  } catch (error) {
+    if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return;
+    flow.busy = false;
+    flow.error = errorMessage(error);
+    render();
+  }
+}
+
+async function chooseOnePasswordItem(id: string): Promise<void> {
+  const flow = state.onepasswordFlow;
+  const integration = flow?.integration;
+  const vault = flow?.vault;
+  const item = flow?.items.find((candidate) => candidate.id === id);
+  if (!flow || !integration || !vault || !item || flow.busy) return;
+  const epoch = brokerEpoch;
+  flow.item = item;
+  flow.fields = [];
+  flow.busy = true;
+  flow.error = null;
+  render();
+  try {
+    const fields = await invoke('list_onepassword_fields', {
+      id: integration.id, vaultId: vault.id, itemId: item.id,
+    });
+    if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow || flow.item?.id !== item.id) return;
+    flow.fields = fields;
+    flow.busy = false;
+    render();
+  } catch (error) {
+    if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return;
+    flow.busy = false;
+    flow.error = errorMessage(error);
+    render();
+  }
+}
+
+function onePasswordSelectionErrors(): Map<string, string> {
+  const flow = state.onepasswordFlow;
+  if (!flow) return new Map();
+  const selections = Object.values(flow.selections);
+  const errors = new Map<string, string>();
+  for (const selection of selections) {
+    const unavailable = [
+      ...state.secrets.map((secret) => secret.name),
+      ...selections.filter((candidate) => candidate.key !== selection.key)
+        .map((candidate) => candidate.alias),
+    ];
+    const error = onePasswordAliasError(selection.alias, unavailable);
+    if (error) errors.set(selection.key, error);
+  }
+  return errors;
+}
+
+function toggleOnePasswordField(fieldId: string): void {
+  const flow = state.onepasswordFlow;
+  const vault = flow?.vault;
+  const item = flow?.item;
+  const field = flow?.fields.find((candidate) => candidate.id === fieldId);
+  if (!flow || !vault || !item || !field) return;
+  const key = onePasswordSelectionKey(vault, item, field);
+  if (flow.selections[key]) delete flow.selections[key];
+  else {
+    const unavailable = [
+      ...state.secrets.map((secret) => secret.name),
+      ...Object.values(flow.selections).map((selection) => selection.alias),
+    ];
+    flow.selections[key] = {
+      key, vault, item, field,
+      alias: suggestedOnePasswordAlias(item, field, unavailable),
+    };
+  }
+  flow.error = null;
+  render();
+}
+
+async function saveOnePasswordSelections(): Promise<void> {
+  const flow = state.onepasswordFlow;
+  const integration = flow?.integration;
+  if (!flow || !integration || flow.busy) return;
+  const selections = Object.values(flow.selections);
+  if (!selections.length || onePasswordSelectionErrors().size) return;
+  const epoch = brokerEpoch;
+  flow.busy = true;
+  flow.error = null;
+  render();
+  for (const selection of selections) {
+    try {
+      await invoke('add_onepassword_secret', {
+        name: selection.alias.trim(),
+        integrationId: integration.id,
+        vaultId: selection.vault.id,
+        vaultLabel: selection.vault.title,
+        itemId: selection.item.id,
+        itemLabel: selection.item.title,
+        sectionId: selection.field.section_id ?? null,
+        sectionLabel: selection.field.section_title ?? null,
+        fieldId: selection.field.id,
+        fieldLabel: selection.field.title,
+      });
+      if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return;
+      delete flow.selections[selection.key];
+    } catch (error) {
+      if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return;
+      flow.busy = false;
+      flow.error = `Couldn’t save ${selection.alias}: ${errorMessage(error)}`;
+      await refresh('secrets');
+      render();
+      return;
+    }
+  }
+  if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return;
+  const count = selections.length;
+  closeSheet();
+  await refresh('secrets');
+  toast(`Linked ${count} 1Password ${count === 1 ? 'credential' : 'credentials'}`);
+}
+
+function OnePasswordStepper({ step }: { step: 1 | 2 | 3 }): ReactNode {
+  return <ol className="onepassword-steps" aria-label="Connection progress">
+    {['Connect', 'Choose fields', 'Review'].map((label, index) => {
+      const number = index + 1;
+      return <li key={label} className={number === step ? 'current' : number < step ? 'done' : ''}>
+        <span>{number < step ? <Icon markup={ICONS.check} /> : number}</span>{label}
+      </li>;
+    })}
+  </ol>;
+}
+
+function OnePasswordMethodOptions(): ReactNode {
+  const flow = state.onepasswordFlow;
+  if (!flow) return null;
+  const methods = [
+    { id: 'desktop_app' as const, icon: 'onepasswordApp', title: '1Password app',
+      description: 'Authorize with the 1Password app on this Mac.' },
+    { id: 'service_account' as const, icon: 'onepasswordService', title: 'Service account',
+      description: 'Use a dedicated 1Password service account token.' },
+    { id: 'connect' as const, icon: 'onepasswordConnect', title: 'Connect server',
+      description: 'Connect through your 1Password Connect server.' },
+  ].filter((method) => state.broker.mode === 'local' || method.id !== 'desktop_app');
+  return <div className="onepassword-methods" role="radiogroup" aria-label="Connection method">
+    {methods.map((method) => <button key={method.id} type="button" role="radio"
+      aria-checked={flow.method === method.id}
+      className={`onepassword-method ${flow.method === method.id ? 'selected' : ''}`}
+      data-act="onepassword-method" data-method={method.id}>
+      <span className="onepassword-method-icon"><Icon markup={ICONS[method.icon]} /></span>
+      <span><b>{method.title}</b><small>{method.description}</small></span>
+    </button>)}
+  </div>;
+}
+
+function OnePasswordConnectStep(): ReactNode {
+  const flow = state.onepasswordFlow;
+  if (!flow) return null;
+  const local = state.broker.mode === 'local';
+  const updating = flow.intent === 'update';
+  return <>
+    {updating ? <div className="onepassword-update-summary">
+      <span className="onepassword-integration-icon" aria-hidden="true">
+        <Icon markup={ICONS.onepassword} />
+      </span>
+      <span><b>{flow.label}</b><small>{flow.connectUrl || onePasswordMethodLabel(flow.method)}</small></span>
+    </div> : <OnePasswordMethodOptions />}
+    <div className="onepassword-form">
+      {!updating ? <div className="f-row">
+        <label htmlFor="op-label">Connection name</label>
+        <input id="op-label" value={flow.label} placeholder="e.g. Work 1Password"
+          onChange={(event) => { flow.label = event.currentTarget.value; flow.error = null; render(); }} />
+      </div> : null}
+      {flow.method === 'desktop_app' ? <>
+        <div className="f-row">
+          <label htmlFor="op-account">Account</label>
+          <input id="op-account" value={flow.account} placeholder="Account name or UUID"
+            onChange={(event) => { flow.account = event.currentTarget.value; flow.error = null; render(); }} />
+        </div>
+        <p className="onepassword-method-hint">1Password will ask you to authorize Multitool.</p>
+      </> : null}
+      {flow.method === 'service_account' ? <>
+        <div className="f-row">
+          <label htmlFor="op-token">Service account token</label>
+          <input id="op-token" type="password" autoComplete="off" value={flow.token}
+            onChange={(event) => { flow.token = event.currentTarget.value; flow.error = null; render(); }} />
+        </div>
+        <p className="onepassword-method-hint">{local
+          ? "Credentials are stored in this Mac’s Keychain. Uses a dedicated read-only account that can't access Personal and Private vaults."
+          : "Credentials are stored in the remote broker’s secure vault. Uses a dedicated read-only account that can't access Personal and Private vaults."}</p>
+      </> : null}
+      {flow.method === 'connect' ? <>
+        {!updating ? <div className="f-row">
+          <label htmlFor="op-url">Connect server URL</label>
+          <input id="op-url" type="url" value={flow.connectUrl} placeholder="https://connect.example.com"
+            onChange={(event) => { flow.connectUrl = event.currentTarget.value; flow.error = null; render(); }} />
+        </div> : null}
+        <div className="f-row">
+          <label htmlFor="op-token">Connect access token</label>
+          <input id="op-token" type="password" autoComplete="off" value={flow.token}
+            onChange={(event) => { flow.token = event.currentTarget.value; flow.error = null; render(); }} />
+        </div>
+        <p className="onepassword-method-hint">HTTPS or a local 1Password Connect server is required.</p>
+      </> : null}
+    </div>
+    {flow.error ? <div className="form-global-error" role="alert">{flow.error}</div> : null}
+    <div className="sheet-actions onepassword-actions">
+      <button className="btn" data-act="sheet-cancel" disabled={flow.busy}>Cancel</button>
+      <button className="btn primary" data-act="onepassword-connect" disabled={flow.busy}>
+        {flow.busy ? (updating ? 'Updating…' : 'Connecting…')
+          : updating ? 'Update credential' : 'Continue'}
+      </button>
+    </div>
+  </>;
+}
+
+function OnePasswordBreadcrumb(): ReactNode {
+  const flow = state.onepasswordFlow;
+  if (!flow?.integration) return null;
+  return <nav className="onepassword-breadcrumb" aria-label="1Password location">
+    <span className="onepassword-breadcrumb-logo"><Icon markup={ICONS.onepassword} /></span>
+    {flow.vault
+      ? <button data-act="onepassword-show-vaults">{flow.integration.label}</button>
+      : <span>{flow.integration.label}</span>}
+    {flow.vault ? <><span className="onepassword-delimiter" aria-hidden="true">›</span>
+      {flow.item
+        ? <button data-act="onepassword-show-items">{flow.vault.title}</button>
+        : <span>{flow.vault.title}</span>}</> : null}
+    {flow.item ? <><span className="onepassword-delimiter" aria-hidden="true">›</span>
+      <span>{flow.item.title}</span></> : null}
+  </nav>;
+}
+
+function OnePasswordChooseStep(): ReactNode {
+  const flow = state.onepasswordFlow;
+  if (!flow) return null;
+  const selections = Object.values(flow.selections);
+  const errors = onePasswordSelectionErrors();
+  return <>
+    <OnePasswordBreadcrumb />
+    <div className="onepassword-browser">
+      <section className="onepassword-browser-list">
+        <h4>{flow.vault ? 'Items' : 'Vaults'}</h4>
+        {flow.busy ? <div className="onepassword-loading">Loading…</div>
+          : flow.vault
+          ? flow.items.map((item) => <button key={item.id}
+              className={flow.item?.id === item.id ? 'selected' : ''}
+              data-act="onepassword-item" data-id={item.id}>
+              <span>{item.title}</span><small>{item.category ?? 'Item'}</small>
+            </button>)
+          : flow.vaults.map((vault) => <button key={vault.id}
+              data-act="onepassword-vault" data-id={vault.id}>
+              <span>{vault.title}</span><Icon markup={ICONS.chevronRight} />
+            </button>)}
+      </section>
+      <section className="onepassword-fields">
+        <div className="onepassword-fields-head"><h4>Fields</h4><h4>Stored as</h4></div>
+        {!flow.item ? <div className="onepassword-fields-empty">Choose an item to see its fields.</div>
+          : flow.busy ? <div className="onepassword-fields-empty">Loading fields…</div>
+          : flow.fields.map((field) => {
+              const key = flow.vault && flow.item
+                ? onePasswordSelectionKey(flow.vault, flow.item, field) : '';
+              const selection = flow.selections[key];
+              return <div className={`onepassword-field ${selection ? 'selected' : ''}`} key={key}>
+                <label className="onepassword-field-check">
+                  <input type="checkbox" checked={Boolean(selection)}
+                    onChange={() => toggleOnePasswordField(field.id)} />
+                  <span><b>{field.title}</b>
+                    <small>{field.section_title || field.field_type}</small></span>
+                </label>
+                <div className="onepassword-alias">
+                  {selection ? <>
+                    <input aria-label={`Stored name for ${field.title}`} value={selection.alias}
+                      className={errors.has(key) ? 'err' : ''}
+                      onChange={(event) => {
+                        selection.alias = event.currentTarget.value;
+                        flow.error = null;
+                        render();
+                      }} />
+                    {errors.get(key) ? <span className="field-error">{errors.get(key)}</span> : null}
+                  </> : <span>—</span>}
+                </div>
+              </div>;
+            })}
+      </section>
+    </div>
+    {flow.error ? <div className="form-global-error" role="alert">
+      <b>Couldn’t load 1Password</b><span>{flow.error}</span>
+      <span className="onepassword-error-actions">
+        <button className="btn sm" data-act="onepassword-retry">Retry</button>
+        {flow.integration && flow.integration.kind !== 'desktop_app'
+          ? <button className="btn sm" data-act="onepassword-update"
+              data-id={flow.integration?.id}>Update credential</button>
+          : null}
+        <button className="btn sm danger" data-act="onepassword-delete-ask"
+          data-id={flow.integration?.id}>Remove connection</button>
+      </span>
+    </div> : null}
+    <div className="sheet-actions onepassword-actions">
+      <button className="btn" data-act="sheet-cancel">Cancel</button>
+      <button className="btn primary" data-act="onepassword-review"
+        disabled={!selections.length || errors.size > 0 || flow.busy}>Continue</button>
+    </div>
+  </>;
+}
+
+function OnePasswordReviewStep(): ReactNode {
+  const flow = state.onepasswordFlow;
+  if (!flow) return null;
+  const selections = Object.values(flow.selections);
+  return <>
+    <div className="onepassword-review-list">
+      {selections.map((selection) => <article key={selection.key} className="onepassword-review-row">
+        <span className="onepassword-review-icon"><Icon markup={ICONS.onepassword} /></span>
+        <span className="onepassword-review-copy">
+          <b>{selection.alias}</b>
+          <span>{selection.vault.title} <i>›</i> {selection.item.title} <i>›</i>
+            {selection.field.section_title ? ` ${selection.field.section_title} › ` : ' '}
+            {selection.field.title}</span>
+        </span>
+        <span className="onepassword-retrieved">Retrieved on use</span>
+      </article>)}
+    </div>
+    {flow.error ? <div className="form-global-error" role="alert">{flow.error}</div> : null}
+    <div className="sheet-actions onepassword-actions">
+      <button className="btn" data-act="onepassword-back" disabled={flow.busy}>Back</button>
+      <button className="btn primary" data-act="onepassword-save" disabled={flow.busy || !selections.length}>
+        {flow.busy ? 'Saving…' : `Save ${selections.length} linked ${selections.length === 1 ? 'credential' : 'credentials'}`}
+      </button>
+    </div>
+  </>;
+}
+
+function OnePasswordSheet(): ReactNode {
+  const flow = state.onepasswordFlow;
+  if (!flow) return null;
+  const updating = flow.intent === 'update';
+  return <>
+    <header className="onepassword-sheet-head">
+      <span className="onepassword-sheet-logo"><Icon markup={ICONS.onepassword} /></span>
+      <h3 id="onepassword-sheet-title">{updating ? 'Update 1Password credential' : 'Connect 1Password'}</h3>
+    </header>
+    {!updating ? <OnePasswordStepper step={flow.step} /> : null}
+    {flow.step === 1 ? <OnePasswordConnectStep />
+      : flow.step === 2 ? <OnePasswordChooseStep />
+      : <OnePasswordReviewStep />}
+  </>;
+}
+
 function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
   if (entry.disabled) {
     return (
@@ -1374,11 +1931,19 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
     );
   }
   const builtin = entry.via === 'builtin';
+  const onePassword = entry.id === 'onepassword-vault';
+  const onePasswordAvailable = !onePassword || supportsOnePassword(state.broker);
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
   const addLabel = catalogAddLabel(entry);
   let action: ReactNode = null;
-  if (!builtin && quickConnect) {
+  if (onePassword) {
+    action = <button className="btn cat-add" data-act="onepassword-open"
+      disabled={!onePasswordAvailable}
+      title={onePasswordAvailable ? undefined : 'Update this remote broker to use 1Password'}>
+      {onePasswordAvailable ? 'Connect' : 'Unavailable'}
+    </button>;
+  } else if (!builtin && quickConnect) {
     action = (
       <div className={`cat-connect-wrap ${actionMenuOpen ? 'open' : ''}`}>
         <div className="cat-connect-buttons">
@@ -1429,7 +1994,7 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
           : null}
         {action}
       </div>
-      {builtin ? <CredentialsExpansion /> : null}
+      {onePassword ? <OnePasswordCatalogExpansion /> : builtin ? <CredentialsExpansion /> : null}
     </div>
   );
 }
@@ -3214,6 +3779,22 @@ function DeleteConnectionConfirm(): ReactNode {
   );
 }
 
+function DeleteOnePasswordConfirm(): ReactNode {
+  const confirm = state.confirm;
+  if (!confirm || confirm.kind !== 'del-onepassword') return null;
+  const integration = state.onepasswordIntegrations.find((candidate) => candidate.id === confirm.id);
+  const name = integration?.label ?? 'this 1Password connection';
+  return <>
+    <h3 id="del-onepassword-title">Remove {name}?</h3>
+    <p>Multitool will remove the connection credential. No 1Password items will be changed.</p>
+    <div className="sheet-actions">
+      <button className="btn" data-act="confirm-cancel">Cancel</button>
+      <button className="btn danger" data-act="onepassword-delete-confirm"
+        data-id={String(confirm.id ?? '')}>Remove</button>
+    </div>
+  </>;
+}
+
 function RotateKeyConfirm(): ReactNode {
   if (state.confirm?.kind !== 'rotate-key') return null;
   const subject = state.broker.mode === 'local' ? 'this computer’s' : 'the broker’s';
@@ -3248,6 +3829,14 @@ function ConfirmSheet(): ReactNode {
       </Sheet>
     );
   }
+  if (kind === 'del-onepassword') {
+    return (
+      <Sheet titleId="del-onepassword-title" className="wide confirm-sheet"
+        backdropAction="confirm-cancel">
+        <DeleteOnePasswordConfirm />
+      </Sheet>
+    );
+  }
   if (kind === 'rotate-key') {
     return (
       <Sheet titleId="rotate-key-title" className="wide confirm-sheet"
@@ -3268,6 +3857,10 @@ function Sheets(): ReactNode {
       return <Sheet titleId="secret-sheet-title" className="wide"><SecretSheet editing={false} /></Sheet>;
     case 'edit-secret':
       return <Sheet titleId="secret-sheet-title" className="wide"><SecretSheet editing /></Sheet>;
+    case 'onepassword':
+      return <Sheet titleId="onepassword-sheet-title" className="wide onepassword-sheet">
+        <OnePasswordSheet />
+      </Sheet>;
     case 'add-conn':
       return <ConnectionSheets editing={false} />;
     case 'edit-conn':
@@ -3780,9 +4373,11 @@ function setDraftField(key: keyof ConnectionDraft & string, errKey: string, valu
 
 function SecretSheet({ editing }: { editing: boolean }): ReactNode {
   const d = state.draft;
+  const secret = editing ? state.secrets.find((candidate) => candidate.id === state.sheet?.id) : null;
+  const linked = secret?.source?.kind === 'one_password' ? secret.source : null;
   return (
     <>
-      <h3 id="secret-sheet-title">{editing ? 'Edit secret' : 'Add secret'}</h3>
+      <h3 id="secret-sheet-title">{linked ? 'Edit linked credential' : editing ? 'Edit secret' : 'Add secret'}</h3>
       <div className="f-row">
         <label htmlFor="f-name">Name</label>
         <input id="f-name" className={fieldCls('name')} placeholder="e.g. STRIPE_API_KEY"
@@ -3790,7 +4385,11 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
           onChange={(e) => setDraftField('name', 'name', e.currentTarget.value)} />
         <FieldError k="name" />
       </div>
-      <div className="f-row">
+      {linked ? <div className="linked-secret-source">
+        <span><Icon markup={ICONS.onepassword} /></span>
+        <div><b>{linked.integration_label}</b>
+          <small>{linked.vault_label} › {linked.item_label} › {linked.field_label}</small></div>
+      </div> : <div className="f-row">
         <label htmlFor="f-value">{editing ? 'New value (saved to macOS Keychain)' : 'Value'}</label>
         <input id="f-value" className={fieldCls('value')} type="password"
           placeholder={editing ? '' : 'Your secret (saved in Keychain)'}
@@ -3800,7 +4399,7 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
             setDraftField('value', 'value', e.currentTarget.value);
           }} />
         <FieldError k="value" />
-      </div>
+      </div>}
       <FormGlobalError />
       <div className="sheet-actions">
         <button className="btn" data-act="sheet-cancel">Cancel</button>
@@ -5306,7 +5905,7 @@ function isProtectedFormSheet(sheet: SheetState | null = state.sheet): boolean {
   return sheet?.kind === 'add-secret' || sheet?.kind === 'edit-secret'
     || sheet?.kind === 'add-conn' || sheet?.kind === 'edit-conn'
     || sheet?.kind === 'mcp-auth' || sheet?.kind === 'approval'
-    || sheet?.kind === 'elicitation';
+    || sheet?.kind === 'elicitation' || sheet?.kind === 'onepassword';
 }
 
 // Test a connection broker-side and pin the result to its catalog row.
@@ -5920,6 +6519,7 @@ function closeSheet() {
   }
   state.mcpAuth = null;
   state.wiringTools = null;
+  state.onepasswordFlow = null;
   state.approvalHostKeyProvenance = null;
   setSheet(null);
   state.draft = {};
@@ -6370,8 +6970,13 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
     }
     case 'del-secret-confirm':
-      if (await run(() => invoke('delete_secret', { id }))) {
-        state.confirm = null; toast('🗑 Removed from macOS Keychain'); await refresh('secrets');
+      {
+        const linked = state.secrets.find((secret) => secret.id === id)?.source?.kind === 'one_password';
+        if (await run(() => invoke('delete_secret', { id }))) {
+          state.confirm = null;
+          toast(linked ? 'Unlinked from Multitool' : '🗑 Removed from macOS Keychain');
+          await refresh('secrets');
+        }
       }
       break;
     case 'show-connection':
@@ -6557,6 +7162,107 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       if (entry) await addCatalogEntry(entry);
       break;
     }
+    case 'onepassword-open':
+      await openOnePasswordFlow();
+      break;
+    case 'onepassword-browse': {
+      const integration = state.onepasswordIntegrations.find((candidate) => candidate.id === id);
+      if (integration) await openOnePasswordFlow(integration);
+      break;
+    }
+    case 'onepassword-update': {
+      const integration = state.onepasswordIntegrations.find((candidate) => candidate.id === id)
+        ?? state.onepasswordFlow?.integration;
+      if (!integration || integration.kind === 'desktop_app') break;
+      if (state.sheet?.kind === 'onepassword') closeSheet();
+      await openOnePasswordFlow(integration, 'update');
+      break;
+    }
+    case 'onepassword-delete-ask': {
+      const integration = state.onepasswordIntegrations.find((candidate) => candidate.id === id)
+        ?? state.onepasswordFlow?.integration;
+      if (!integration) break;
+      if (state.sheet?.kind === 'onepassword') closeSheet();
+      state.confirm = { kind: 'del-onepassword', id: integration.id };
+      render();
+      break;
+    }
+    case 'onepassword-delete-confirm':
+      if (await run(() => invoke('delete_onepassword_integration', { id }))) {
+        state.confirm = null;
+        state.onepasswordIntegrations = state.onepasswordIntegrations
+          .filter((integration) => integration.id !== id);
+        toast('1Password connection removed');
+        await refresh('secrets');
+      }
+      break;
+    case 'onepassword-method': {
+      const flow = state.onepasswordFlow;
+      const method = btn.dataset.method;
+      if (!flow || (method !== 'desktop_app' && method !== 'service_account' && method !== 'connect')) break;
+      if (state.broker.mode === 'remote' && method === 'desktop_app') break;
+      flow.method = method;
+      flow.token = '';
+      flow.error = null;
+      render();
+      break;
+    }
+    case 'onepassword-connect':
+      await connectOnePassword();
+      break;
+    case 'onepassword-show-vaults': {
+      const flow = state.onepasswordFlow;
+      if (!flow) break;
+      flow.vault = null;
+      flow.item = null;
+      flow.items = [];
+      flow.fields = [];
+      flow.error = null;
+      render();
+      break;
+    }
+    case 'onepassword-show-items': {
+      const flow = state.onepasswordFlow;
+      if (!flow) break;
+      flow.item = null;
+      flow.fields = [];
+      flow.error = null;
+      render();
+      break;
+    }
+    case 'onepassword-vault':
+      await chooseOnePasswordVault(id);
+      break;
+    case 'onepassword-item':
+      await chooseOnePasswordItem(id);
+      break;
+    case 'onepassword-retry': {
+      const flow = state.onepasswordFlow;
+      if (!flow) break;
+      if (flow.item) await chooseOnePasswordItem(flow.item.id);
+      else if (flow.vault) await chooseOnePasswordVault(flow.vault.id);
+      else await loadOnePasswordVaults();
+      break;
+    }
+    case 'onepassword-review': {
+      const flow = state.onepasswordFlow;
+      if (!flow || !Object.keys(flow.selections).length || onePasswordSelectionErrors().size) break;
+      flow.step = 3;
+      flow.error = null;
+      render();
+      break;
+    }
+    case 'onepassword-back': {
+      const flow = state.onepasswordFlow;
+      if (!flow) break;
+      flow.step = 2;
+      flow.error = null;
+      render();
+      break;
+    }
+    case 'onepassword-save':
+      await saveOnePasswordSelections();
+      break;
     case 'connect-sample':
       await connectSampleTool(id);
       break;
@@ -7871,6 +8577,10 @@ async function boot() {
     ]);
     render();
   });
+  await listen('aka://integrations-changed', async () => {
+    await loadOnePasswordIntegrations();
+    render();
+  });
   await listen('aka://activity-appended', (ev) => receiveActivity(ev.payload));
   await listen('aka://mcp-auth-changed', (ev) => receiveMcpAuth(ev.payload));
   await listen('aka://connect-requested', (ev) => {
@@ -7909,6 +8619,7 @@ async function boot() {
     setSheet(null);
     state.draft = {};
     state.elicitValues = {};
+    state.onepasswordFlow = null;
     state.sheetErrors = {};
     state.sheetBaseline = null;
     state.confirmDiscard = false;

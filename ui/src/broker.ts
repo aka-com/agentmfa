@@ -5,13 +5,20 @@
 
 import type { BrokerProfile, ConnectionType } from './types';
 
+export const ONEPASSWORD_PROVIDER_CAPABILITY = 'onepassword_provider_v1';
+
 export const LOCAL_BROKER: BrokerProfile = {
   mode: 'local',
   url: null,
   connected: true,
   error: null,
   has_saved_token: false,
+  capabilities: [ONEPASSWORD_PROVIDER_CAPABILITY],
 };
+
+export function supportsOnePassword(profile: BrokerProfile): boolean {
+  return profile.capabilities.includes(ONEPASSWORD_PROVIDER_CAPABILITY);
+}
 
 /** The switcher's label: "Local" for this machine, or the remote host. */
 export function brokerLabel(profile: BrokerProfile): string {

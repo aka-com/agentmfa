@@ -15,6 +15,10 @@ import type {
   McpStatusReport,
   McpToolInfo,
   NotificationSettings,
+  OnePasswordField,
+  OnePasswordIntegration,
+  OnePasswordItem,
+  OnePasswordVault,
   RequestRecord,
   SecretSummary,
   SessionSummary,
@@ -36,10 +40,39 @@ export type Tab = typeof TABS[number];
 export interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings'
     | 'clear-activity' | 'elicitation' | 'approval' | 'mcp-auth' | 'wiring-tools'
-    | 'endpoint-issued';
+    | 'endpoint-issued' | 'onepassword';
   id?: string;
   expectedUpdatedAt?: string;
   endpoint?: IssuedEndpoint;
+}
+
+export type OnePasswordMethod = 'desktop_app' | 'service_account' | 'connect';
+
+export interface OnePasswordFieldSelection {
+  key: string;
+  vault: OnePasswordVault;
+  item: OnePasswordItem;
+  field: OnePasswordField;
+  alias: string;
+}
+
+export interface OnePasswordFlowState {
+  intent: 'create' | 'browse' | 'update';
+  step: 1 | 2 | 3;
+  method: OnePasswordMethod;
+  label: string;
+  account: string;
+  connectUrl: string;
+  token: string;
+  integration: OnePasswordIntegration | null;
+  vaults: OnePasswordVault[];
+  vault: OnePasswordVault | null;
+  items: OnePasswordItem[];
+  item: OnePasswordItem | null;
+  fields: OnePasswordField[];
+  selections: Record<string, OnePasswordFieldSelection>;
+  busy: boolean;
+  error: string | null;
 }
 
 export interface ConfirmState {
@@ -178,6 +211,8 @@ export interface AppState {
   remoteSetup: RemoteSetupState;
   localUsername: string;
   secrets: SecretSummary[];
+  onepasswordIntegrations: OnePasswordIntegration[];
+  onepasswordFlow: OnePasswordFlowState | null;
   connections: ConnectionSummary[];
   identity: IdentityInfo | null;
   sessions: SessionSummary[];
@@ -298,6 +333,8 @@ function createInitialState(): AppState {
     },
     localUsername: '',
     secrets: [],
+    onepasswordIntegrations: [],
+    onepasswordFlow: null,
     connections: [],
     identity: null,
     sessions: [],

@@ -1701,7 +1701,7 @@
   letter-spacing: .07em; text-transform: uppercase;
 }
 /* Label the value itself, not the eye/action controls at the right edge. */
-.cat-conns .sec-table th:nth-child(3) { text-align: left; }
+.cat-conns .sec-table th:nth-child(3) { text-align: right; }
 /* The tray dropdown has no 64px text spine to align with — its rows start
    at the card padding, and with no eye/action controls after the value the
    label right-aligns over the values it names. */
@@ -1721,6 +1721,246 @@
 .credentials-expansion .cat-add-secret:hover { background: var(--hover); }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
+
+/* ---------------------------- 1Password vault --------------------------- */
+.onepassword-integrations { background: transparent; }
+.onepassword-integration-row {
+  display: flex; align-items: center; gap: 10px; min-height: 48px;
+  padding: 8px 14px 8px 64px; border-bottom: 1px solid var(--line-soft);
+}
+.onepassword-integration-row:last-child { border-bottom: 0; }
+.onepassword-integration-icon,
+.onepassword-review-icon {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 28px; height: 28px; border-radius: 8px;
+  background: var(--accent-wash-2); color: var(--accent-ink);
+}
+.onepassword-integration-icon svg,
+.onepassword-review-icon svg { width: 15px; height: 15px; }
+.onepassword-integration-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.onepassword-integration-copy b { font-size: 0.8125rem; }
+.onepassword-integration-copy span {
+  overflow: hidden; color: var(--muted); font-size: 0.71875rem;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.onepassword-integration-actions,
+.onepassword-error-actions {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.onepassword-integration-actions { flex: 0 0 auto; }
+.s-source {
+  display: flex; align-items: center; gap: 4px; margin-top: 2px;
+  color: var(--muted); font-size: 0.65625rem;
+}
+.s-source svg { width: 11px; height: 11px; }
+.linked-secret-source {
+  display: flex; align-items: center; gap: 10px; margin: 2px 0 10px; padding: 10px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--wash);
+}
+.linked-secret-source > span { display: inline-flex; color: var(--accent-ink); }
+.linked-secret-source > span svg { width: 17px; height: 17px; }
+.linked-secret-source div { display: flex; flex-direction: column; min-width: 0; }
+.linked-secret-source b { font-size: 0.78125rem; }
+.linked-secret-source small {
+  overflow: hidden; color: var(--muted); font-size: 0.6875rem;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+
+.sheet.onepassword-sheet {
+  top: 28px; width: 760px; max-width: calc(100% - 28px); padding: 0;
+  overflow: hidden;
+}
+.onepassword-sheet-head {
+  display: flex; align-items: center; gap: 10px; padding: 16px 18px 10px;
+}
+.onepassword-sheet-head h3 { margin: 0; font-size: 1rem; }
+.onepassword-sheet-logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 9px;
+  background: var(--accent-wash-2); color: var(--accent-ink);
+}
+.onepassword-sheet-logo svg { width: 18px; height: 18px; }
+.onepassword-steps {
+  display: grid; grid-template-columns: repeat(3, 1fr); margin: 0; padding: 4px 18px 14px;
+  border-bottom: 1px solid var(--line-soft); list-style: none;
+}
+.onepassword-steps li {
+  position: relative; display: flex; align-items: center; gap: 7px;
+  color: var(--muted); font-size: 0.71875rem; font-weight: 600;
+}
+.onepassword-steps li::after {
+  content: ''; flex: 1; margin: 0 10px; border-top: 1px solid var(--line);
+}
+.onepassword-steps li:last-child::after { margin-right: 0; }
+.onepassword-steps li > span {
+  z-index: 1; display: inline-flex; align-items: center; justify-content: center;
+  width: 21px; height: 21px; border: 1px solid var(--line); border-radius: 50%;
+  background: var(--panel); color: var(--muted); font-size: 0.65625rem;
+}
+.onepassword-steps li > span svg { width: 11px; height: 11px; }
+.onepassword-steps li.current { color: var(--ink); }
+.onepassword-steps li.current > span {
+  border-color: var(--accent); background: var(--accent); color: white;
+}
+.onepassword-steps li.done { color: var(--ink-2); }
+.onepassword-steps li.done > span {
+  border-color: var(--ok-solid); background: var(--ok-solid); color: white;
+}
+
+.onepassword-methods {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 10px; padding: 16px 18px 12px;
+}
+.onepassword-update-summary {
+  display: flex; align-items: center; gap: 10px; margin: 16px 18px 12px; padding: 11px 12px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--wash);
+}
+.onepassword-update-summary > span:last-child {
+  display: flex; flex-direction: column; min-width: 0;
+}
+.onepassword-update-summary b { font-size: 0.8125rem; }
+.onepassword-update-summary small {
+  overflow: hidden; color: var(--muted); font-size: 0.71875rem;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.onepassword-method {
+  display: flex; align-items: flex-start; gap: 10px; min-height: 82px; padding: 12px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--card-bg);
+  color: var(--ink); font: inherit; text-align: left; cursor: pointer;
+}
+.onepassword-method:hover { border-color: var(--line-strong); background: var(--hover); }
+.onepassword-method:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.onepassword-method.selected {
+  border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-wash-2);
+}
+.onepassword-method-icon {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 32px; height: 32px; border-radius: 8px;
+  background: var(--chip-bg); color: var(--ink-2);
+}
+.onepassword-method.selected .onepassword-method-icon {
+  background: var(--accent-wash-2); color: var(--accent-ink);
+}
+.onepassword-method b { display: block; font-size: 0.8125rem; }
+.onepassword-method small {
+  display: block; margin-top: 3px; color: var(--muted); font-size: 0.71875rem; line-height: 1.35;
+}
+.onepassword-form { padding: 0 18px; }
+.onepassword-form .f-row { max-width: 520px; }
+.onepassword-method-hint {
+  max-width: 620px; margin: -2px 0 12px; color: var(--muted);
+  font-size: 0.75rem; line-height: 1.45;
+}
+.onepassword-sheet .form-global-error {
+  margin-right: 18px; margin-bottom: 16px; margin-left: 18px;
+}
+.onepassword-error-actions { margin-top: 7px; }
+.onepassword-actions {
+  min-height: 58px; margin-top: 0; padding: 12px 18px;
+  border-top: 1px solid var(--line-soft); background: var(--wash);
+}
+
+.onepassword-breadcrumb {
+  display: flex; align-items: center; gap: 7px; min-height: 42px; padding: 8px 18px;
+  border-bottom: 1px solid var(--line-soft); color: var(--ink-2); font-size: 0.78125rem;
+}
+.onepassword-breadcrumb-logo { display: inline-flex; color: var(--accent-ink); }
+.onepassword-breadcrumb-logo svg { width: 15px; height: 15px; }
+.onepassword-breadcrumb button {
+  padding: 0; border: 0; background: transparent; color: var(--accent-text);
+  font: inherit; cursor: pointer;
+}
+.onepassword-breadcrumb button:hover { text-decoration: underline; }
+.onepassword-delimiter { color: var(--muted-2); font-size: 1rem; line-height: 1; }
+.onepassword-browser {
+  display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 300px;
+  max-height: min(430px, calc(100vh - 220px)); overflow: hidden;
+}
+.onepassword-browser h4 {
+  margin: 0; color: var(--muted); font-size: 0.65625rem; font-weight: 700;
+  letter-spacing: .07em; text-transform: uppercase;
+}
+.onepassword-browser-list {
+  overflow-y: auto; padding: 12px 10px; border-right: 1px solid var(--line-soft);
+  background: var(--wash);
+}
+.onepassword-browser-list h4 { padding: 0 8px 8px; }
+.onepassword-browser-list > button {
+  display: flex; align-items: center; width: 100%; gap: 7px; padding: 8px;
+  border: 0; border-radius: 7px; background: transparent; color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.onepassword-browser-list > button:hover,
+.onepassword-browser-list > button.selected { background: var(--hover); }
+.onepassword-browser-list > button > span { flex: 1; min-width: 0; font-size: 0.78125rem; }
+.onepassword-browser-list > button > small { color: var(--muted); font-size: 0.65625rem; }
+.onepassword-browser-list > button > svg { width: 12px; height: 12px; color: var(--muted); }
+.onepassword-loading { padding: 8px; color: var(--muted); font-size: 0.78125rem; }
+.onepassword-fields { overflow-y: auto; padding: 12px 14px; }
+.onepassword-fields-head {
+  display: grid; grid-template-columns: minmax(180px, 1fr) minmax(210px, .9fr);
+  gap: 14px; padding: 0 10px 8px;
+}
+.onepassword-fields-empty {
+  display: flex; align-items: center; justify-content: center; min-height: 220px;
+  color: var(--muted); font-size: 0.78125rem;
+}
+.onepassword-field {
+  display: grid; grid-template-columns: minmax(180px, 1fr) minmax(210px, .9fr);
+  align-items: start; gap: 14px; min-height: 52px; padding: 9px 10px;
+  border-top: 1px solid var(--line-soft);
+}
+.onepassword-field.selected { background: var(--accent-wash); }
+.onepassword-field-check { display: flex; align-items: flex-start; gap: 9px; min-width: 0; cursor: pointer; }
+.onepassword-field-check input { margin-top: 3px; accent-color: var(--accent); }
+.onepassword-field-check span { min-width: 0; }
+.onepassword-field-check b { display: block; font-size: 0.78125rem; overflow-wrap: anywhere; }
+.onepassword-field-check small {
+  display: block; margin-top: 1px; color: var(--muted); font-size: 0.65625rem;
+}
+.onepassword-alias > input {
+  width: 100%; min-height: 30px; padding: 5px 7px; border: 1px solid var(--line-field);
+  border-radius: 6px; background: var(--field-bg); color: var(--ink);
+  font: 0.75rem ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.onepassword-alias > input:focus { outline: 2px solid rgba(10,124,255,.35); border-color: var(--accent); }
+.onepassword-alias > input.err { border-color: var(--danger); outline: none; }
+.onepassword-alias > span { display: inline-block; padding-top: 5px; color: var(--muted-2); }
+.onepassword-alias .field-error { line-height: 1.25; }
+
+.onepassword-review-list {
+  display: flex; flex-direction: column; gap: 8px; min-height: 240px;
+  max-height: min(430px, calc(100vh - 220px)); overflow-y: auto; padding: 18px;
+}
+.onepassword-review-row {
+  display: flex; align-items: center; gap: 11px; padding: 12px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--card-bg);
+}
+.onepassword-review-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.onepassword-review-copy b { font: 600 0.78125rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+.onepassword-review-copy span {
+  margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 0.71875rem;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.onepassword-review-copy i { color: var(--muted-2); font-style: normal; }
+.onepassword-retrieved {
+  flex: 0 0 auto; padding: 4px 9px; border-radius: 999px;
+  background: var(--accent-wash-2); color: var(--accent-ink);
+  font-size: 0.65625rem; font-weight: 700; white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .onepassword-methods { grid-template-columns: 1fr; }
+  .onepassword-method { min-height: 0; }
+  .onepassword-browser { grid-template-columns: 1fr; max-height: calc(100vh - 220px); overflow-y: auto; }
+  .onepassword-browser-list { max-height: 150px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
+  .onepassword-fields { overflow: visible; }
+  .onepassword-fields-head,
+  .onepassword-field { grid-template-columns: minmax(130px, 1fr) minmax(145px, .9fr); }
+  .onepassword-integration-row { padding-left: 14px; }
+  .onepassword-integration-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .onepassword-retrieved { display: none; }
+}
 /* The dropdown catalog search sits just above the list (its own flex/gap
    context is the list's, so restore the spacing it had as a catalog child). */
 .dd-cat-search { margin-bottom: 12px; }

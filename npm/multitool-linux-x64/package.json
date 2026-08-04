@@ -8,7 +8,8 @@
     "url": "git+https://github.com/aka-com/multitool.git"
   },
   "files": [
-    "bin/multitool"
+    "bin/multitool",
+    "bin/multitool-onepassword"
   ],
   "engines": {
     "node": ">=22"

@@ -460,10 +460,9 @@ export const CATALOG: CatalogEntry[] = [
     id: 'onepassword-vault',
     name: '1Password Vault',
     icon: 'onepassword',
-    description: 'Bring secrets from your 1Password vaults',
+    description: 'Use secrets from your 1Password vaults',
     section: 'Secrets',
     via: 'builtin',
-    disabled: true,
     keywords: ['1password', 'vault', 'op'],
   },
 ];

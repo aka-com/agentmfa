@@ -158,6 +158,9 @@ for target in "${targets[@]}"; do
 
   install -d "npm/$platform_pkg/bin"
   install -m 0755 "$bin_dir/multitool" "npm/$platform_pkg/bin/multitool"
+  bash "$script_dir/build-onepassword-sidecar.sh" \
+    --target "$target" \
+    --output "npm/$platform_pkg/bin/multitool-onepassword"
   echo "staged $bin_dir/multitool -> npm/$platform_pkg/bin/multitool"
   node scripts/npm/verify-package.mjs "npm/$platform_pkg"
 

@@ -301,6 +301,15 @@ impl FormError {
                 "Couldn’t save to macOS Keychain",
                 Some(message),
             ),
+            ManageError::OnePassword {
+                provider_code,
+                message,
+            } => Self::global(
+                "system",
+                "onepassword",
+                format!("1Password: {message}"),
+                Some(provider_code),
+            ),
             ManageError::RemoteUnsupported { feature } => Self::global(
                 "system",
                 "remote_unsupported",
@@ -357,6 +366,161 @@ pub async fn list_secrets(state: State<'_, AppState>) -> CmdResult<Vec<aka_api::
         .list_secrets()
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_onepassword_integrations(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<aka_api::OnePasswordIntegrationDto>> {
+    state
+        .brokers
+        .backend()
+        .list_onepassword_integrations()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn add_onepassword_integration(
+    state: State<'_, AppState>,
+    label: String,
+    method: String,
+    account: Option<String>,
+    connect_url: Option<String>,
+    token: Option<String>,
+) -> CmdResult<aka_api::OnePasswordIntegrationDto> {
+    let auth = match method.as_str() {
+        "desktop_app" => aka_core::onepassword::OnePasswordAuth::DesktopApp {
+            account: account.unwrap_or_default(),
+        },
+        "service_account" => aka_core::onepassword::OnePasswordAuth::ServiceAccount,
+        "connect" => aka_core::onepassword::OnePasswordAuth::Connect {
+            base_url: connect_url.unwrap_or_default(),
+        },
+        _ => return Err("unknown 1Password authentication method".into()),
+    };
+    state
+        .brokers
+        .backend()
+        .add_onepassword_integration(label, auth, token.map(Zeroizing::new))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn replace_onepassword_token(
+    state: State<'_, AppState>,
+    id: String,
+    token: String,
+) -> CmdResult<aka_api::OnePasswordIntegrationDto> {
+    state
+        .brokers
+        .backend()
+        .replace_onepassword_token(parse_id(&id)?, Zeroizing::new(token))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_onepassword_integration(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<()> {
+    state
+        .brokers
+        .backend()
+        .delete_onepassword_integration(parse_id(&id)?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn onepassword_health(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<aka_api::OnePasswordHealthDto> {
+    state
+        .brokers
+        .backend()
+        .onepassword_health(parse_id(&id)?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn list_onepassword_vaults(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<aka_api::OnePasswordVaultDto>> {
+    state
+        .brokers
+        .backend()
+        .onepassword_vaults(parse_id(&id)?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn list_onepassword_items(
+    state: State<'_, AppState>,
+    id: String,
+    vault_id: String,
+) -> CmdResult<Vec<aka_api::OnePasswordItemDto>> {
+    state
+        .brokers
+        .backend()
+        .onepassword_items(parse_id(&id)?, vault_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn list_onepassword_fields(
+    state: State<'_, AppState>,
+    id: String,
+    vault_id: String,
+    item_id: String,
+) -> CmdResult<Vec<aka_api::OnePasswordFieldDto>> {
+    state
+        .brokers
+        .backend()
+        .onepassword_fields(parse_id(&id)?, vault_id, item_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn add_onepassword_secret(
+    state: State<'_, AppState>,
+    name: String,
+    integration_id: String,
+    vault_id: String,
+    vault_label: String,
+    item_id: String,
+    item_label: String,
+    section_id: Option<String>,
+    section_label: Option<String>,
+    field_id: String,
+    field_label: String,
+) -> CmdResult<aka_api::SecretDto> {
+    let reference = aka_core::onepassword::OnePasswordSecretRef {
+        integration_id: parse_id(&integration_id)?,
+        vault_id,
+        vault_label,
+        item_id,
+        item_label,
+        section_id,
+        section_label,
+        field_id,
+        field_label,
+    };
+    state
+        .brokers
+        .backend()
+        .add_onepassword_secret(name, reference)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1965,6 +2129,15 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         retry_remote_broker,
         switch_broker_local,
         list_secrets,
+        list_onepassword_integrations,
+        add_onepassword_integration,
+        replace_onepassword_token,
+        delete_onepassword_integration,
+        onepassword_health,
+        list_onepassword_vaults,
+        list_onepassword_items,
+        list_onepassword_fields,
+        add_onepassword_secret,
         list_connections,
         get_identity,
         list_sessions,

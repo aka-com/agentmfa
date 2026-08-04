@@ -13,6 +13,7 @@ use aka_core::paths::Paths;
 use aka_core::vault::MemoryVault;
 use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 struct TestEvents;
 
@@ -120,6 +121,166 @@ fn api_spec(name: &str, template: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn onepassword_integrations_and_links_cross_the_manage_boundary_without_values() {
+    let h = harness().await;
+    let connect = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let connect_address = connect.local_addr().unwrap();
+    let connect_server = tokio::spawn(async move {
+        for _ in 0..5 {
+            let (mut stream, _) = connect.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            let authorized = request.contains("Bearer connect-token")
+                || request.contains("Bearer replacement-token");
+            let (status, body) = if authorized {
+                ("200 OK", r#"[{"id":"vault1","name":"Production"}]"#)
+            } else {
+                ("401 Unauthorized", r#"{"message":"unauthorized"}"#)
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+
+    let (status, rejected) = h
+        .manage(
+            "POST",
+            "/v1/manage/integrations",
+            Some(json!({
+                "label": "Rejected",
+                "method": "connect",
+                "base_url": format!("http://{connect_address}"),
+                "token": "bad-token",
+            })),
+        )
+        .await;
+    assert_eq!(status, 502, "{rejected}");
+    assert_eq!(rejected["provider_code"], "auth_failed");
+    let (status, integrations) = h.manage("GET", "/v1/manage/integrations", None).await;
+    assert_eq!(status, 200, "{integrations}");
+    assert!(integrations.as_array().unwrap().is_empty());
+
+    let (status, integration) = h
+        .manage(
+            "POST",
+            "/v1/manage/integrations",
+            Some(json!({
+                "label": "Work",
+                "method": "connect",
+                "base_url": format!("http://{connect_address}"),
+                "token": "connect-token",
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{integration}");
+    let integration_id = integration["id"].as_str().unwrap();
+    assert_eq!(integration["kind"], "connect");
+    assert!(integration.get("token").is_none());
+
+    let (status, integrations) = h.manage("GET", "/v1/manage/integrations", None).await;
+    assert_eq!(status, 200, "{integrations}");
+    assert_eq!(integrations.as_array().unwrap().len(), 1);
+    assert!(!integrations.to_string().contains("secret-value"));
+
+    let (status, linked) = h
+        .manage(
+            "POST",
+            "/v1/manage/integrations/onepassword/secrets",
+            Some(json!({
+                "name": "GITHUB_TOKEN",
+                "integration_id": integration_id,
+                "vault_id": "vault1",
+                "vault_label": "Production",
+                "item_id": "item1",
+                "item_label": "GitHub",
+                "field_id": "password",
+                "field_label": "password",
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{linked}");
+    assert_eq!(linked["source"]["kind"], "one_password");
+    assert!(linked.get("value").is_none());
+    let secret_id = linked["id"].as_str().unwrap();
+
+    let (status, error) = h
+        .manage(
+            "PUT",
+            &format!("/v1/manage/integrations/{integration_id}/token"),
+            Some(json!({ "token": "bad-replacement" })),
+        )
+        .await;
+    assert_eq!(status, 502, "{error}");
+    assert_eq!(error["provider_code"], "auth_failed");
+    assert!(!error.to_string().contains("bad-replacement"));
+
+    // A rejected replacement never overwrites the credential that was
+    // already working.
+    let (status, vaults) = h
+        .manage(
+            "GET",
+            &format!("/v1/manage/integrations/{integration_id}/vaults"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{vaults}");
+    assert_eq!(vaults[0]["id"], "vault1");
+
+    let (status, updated) = h
+        .manage(
+            "PUT",
+            &format!("/v1/manage/integrations/{integration_id}/token"),
+            Some(json!({ "token": "replacement-token" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{updated}");
+
+    let (status, error) = h
+        .manage(
+            "DELETE",
+            &format!("/v1/manage/integrations/{integration_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 409, "{error}");
+    assert_eq!(error["provider_code"], "integration_in_use");
+
+    let (status, _) = h
+        .manage("DELETE", &format!("/v1/manage/secrets/{secret_id}"), None)
+        .await;
+    assert_eq!(status, 200);
+    let (status, _) = h
+        .manage(
+            "DELETE",
+            &format!("/v1/manage/integrations/{integration_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    let entries = h.broker.audit.recent(20);
+    assert!(entries
+        .iter()
+        .any(|entry| { entry.kind == aka_core::audit::AuditKind::OnePasswordSecretLinked }));
+    assert!(entries
+        .iter()
+        .any(|entry| { entry.kind == aka_core::audit::AuditKind::OnePasswordIntegrationDeleted }));
+    connect_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn manage_routes_require_the_management_token() {
     let h = harness().await;
 
@@ -158,6 +319,9 @@ async fn manage_routes_require_the_management_token() {
     assert!(body["capabilities"].as_array().is_some_and(|items| items
         .iter()
         .any(|item| { item.as_str() == Some(aka_api::APPROVAL_SURFACE_CAPABILITY) })));
+    assert!(body["capabilities"].as_array().is_some_and(|items| items
+        .iter()
+        .any(|item| { item.as_str() == Some(aka_api::ONEPASSWORD_PROVIDER_CAPABILITY) })));
     let auth_failures: Vec<_> = h
         .broker
         .audit

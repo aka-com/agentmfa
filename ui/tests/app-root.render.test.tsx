@@ -113,6 +113,194 @@ test('the application root boots against the mock bridge', () => {
   assert.ok(testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }));
 });
 
+test('the 1Password sheet links a field through all three steps', { timeout: 8_000 }, async () => {
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="secrets"]')!,
+  );
+  const open = await testingLibrary.waitFor(() => {
+    const button = document.querySelector<HTMLButtonElement>('button[data-act="onepassword-open"]');
+    assert.ok(button);
+    return button;
+  });
+  testingLibrary.fireEvent.click(open);
+
+  const dialog = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Connect 1Password',
+  });
+  assert.ok(dialog.querySelector('.onepassword-sheet-logo svg'));
+  assert.equal(dialog.querySelectorAll('.onepassword-method-icon svg').length, 3);
+  assert.equal(dialog.textContent?.includes('Link vault fields to this Mac'), false);
+
+  testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#op-account')!, {
+    target: { value: 'Work' },
+  });
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="onepassword-connect"]')!,
+  );
+  const vault = await testingLibrary.waitFor(() => {
+    const button = dialog.querySelector<HTMLButtonElement>(
+      'button[data-act="onepassword-vault"][data-id="vault-work"]',
+    );
+    assert.ok(button);
+    return button;
+  });
+  testingLibrary.fireEvent.click(vault);
+  const item = await testingLibrary.waitFor(() => {
+    const button = dialog.querySelector<HTMLButtonElement>(
+      'button[data-act="onepassword-item"][data-id="item-stripe"]',
+    );
+    assert.ok(button);
+    return button;
+  });
+  testingLibrary.fireEvent.click(item);
+  const checkbox = await testingLibrary.waitFor(() => {
+    const input = dialog.querySelector<HTMLInputElement>('.onepassword-field input[type="checkbox"]');
+    assert.ok(input);
+    return input;
+  });
+  testingLibrary.fireEvent.click(checkbox);
+  const alias = dialog.querySelector<HTMLInputElement>('.onepassword-alias input');
+  assert.ok(alias?.value);
+  assert.ok(dialog.textContent?.includes('Stored as'));
+
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="onepassword-review"]')!,
+  );
+  await testingLibrary.waitFor(() => {
+    assert.ok(dialog.textContent?.includes('Retrieved on use'));
+    assert.equal(dialog.textContent?.includes('Resolved only when an agent uses them'), false);
+  });
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="onepassword-save"]')!,
+  );
+  // The save handler publishes both integration and secret events before its
+  // own final refresh. Let that deliberately concurrent work settle before
+  // asserting the closed sheet and newly linked row.
+  await new Promise((resolve) => nativeSetTimeout(resolve, 100));
+  assert.equal(document.querySelector('.onepassword-sheet'), null);
+  assert.ok(document.body.textContent?.includes(alias.value));
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="connections"]')!,
+  );
+});
+
+test('1Password credentials can recover and connections can be removed', { timeout: 8_000 }, async () => {
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="secrets"]')!,
+  );
+  testingLibrary.fireEvent.click(
+    await testingLibrary.waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>('button[data-act="onepassword-open"]');
+      assert.ok(button);
+      return button;
+    }),
+  );
+  let dialog = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Connect 1Password',
+  });
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-method="service_account"]')!,
+  );
+  testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#op-label')!, {
+    target: { value: 'Recovery Account' },
+  });
+  testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#op-token')!, {
+    target: { value: 'invalid-token' },
+  });
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="onepassword-connect"]')!,
+  );
+  await testingLibrary.waitFor(() => {
+    assert.match(dialog.querySelector('[role="alert"]')?.textContent ?? '', /rejected/i);
+  });
+
+  testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#op-token')!, {
+    target: { value: 'valid-token' },
+  });
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="onepassword-connect"]')!,
+  );
+  await testingLibrary.waitFor(() => {
+    assert.ok(dialog.querySelector('button[data-act="onepassword-vault"]'));
+  });
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="sheet-cancel"]')!,
+  );
+
+  const row = await testingLibrary.waitFor(() => {
+    const candidate = [...document.querySelectorAll<HTMLElement>('.onepassword-integration-row')]
+      .find((element) => element.querySelector('b')?.textContent === 'Recovery Account');
+    assert.ok(candidate);
+    return candidate;
+  });
+  testingLibrary.fireEvent.click(
+    row.querySelector<HTMLButtonElement>('button[data-act="onepassword-update"]')!,
+  );
+  dialog = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Update 1Password credential',
+  });
+  assert.equal(dialog.querySelector('.onepassword-steps'), null);
+  testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#op-token')!, {
+    target: { value: 'replacement-token' },
+  });
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="onepassword-connect"]')!,
+  );
+  await testingLibrary.waitFor(() => assert.ok(!document.querySelector('.onepassword-sheet')));
+
+  const updatedRow = await testingLibrary.waitFor(() => {
+    const candidate = [...document.querySelectorAll<HTMLElement>('.onepassword-integration-row')]
+      .find((element) => element.querySelector('b')?.textContent === 'Recovery Account');
+    assert.ok(candidate);
+    return candidate;
+  });
+  testingLibrary.fireEvent.click(
+    updatedRow.querySelector<HTMLButtonElement>('button[data-act="onepassword-delete-ask"]')!,
+  );
+  const confirm = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Remove Recovery Account?',
+  });
+  testingLibrary.fireEvent.click(
+    confirm.querySelector<HTMLButtonElement>('button[data-act="onepassword-delete-confirm"]')!,
+  );
+  await testingLibrary.waitFor(() => {
+    assert.equal(
+      [...document.querySelectorAll<HTMLElement>('.onepassword-integration-row')]
+        .some((element) => element.querySelector('b')?.textContent === 'Recovery Account'),
+      false,
+    );
+  });
+});
+
+test('legacy remote brokers disable the 1Password surface', async () => {
+  const mock = await import('../src/mock-bridge');
+  await mock.invoke('connect_remote_broker', {
+    url: 'https://legacy.example.test',
+    token: 'akamgr_test',
+  });
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="secrets"]')!,
+  );
+  const connect = await testingLibrary.waitFor(() => {
+    const button = document.querySelector<HTMLButtonElement>('button[data-act="onepassword-open"]');
+    assert.ok(button);
+    assert.equal(button.disabled, true);
+    return button;
+  });
+  assert.equal(connect.textContent?.trim(), 'Unavailable');
+  assert.match(document.body.textContent ?? '', /remote broker needs an update/i);
+
+  await mock.invoke('switch_broker_local');
+  await testingLibrary.waitFor(() => {
+    const button = document.querySelector<HTMLButtonElement>('button[data-act="onepassword-open"]');
+    assert.ok(button);
+    assert.equal(button.disabled, false);
+  });
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="connections"]')!,
+  );
+});
+
 test('dismissed sample tools can be restored from settings', async () => {
   testingLibrary.fireEvent.click(
     testingLibrary.getByRole(document.body, 'button', { name: 'Hide sample tools' }),

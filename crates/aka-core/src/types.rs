@@ -18,6 +18,20 @@ pub struct SecretMeta {
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub source: SecretSource,
+}
+
+/// Where a secret is resolved. External references contain identifiers and
+/// display metadata only; their value is always fetched after authorization.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SecretSource {
+    #[default]
+    Local,
+    OnePassword {
+        reference: Box<crate::onepassword::OnePasswordSecretRef>,
+    },
 }
 
 /// The wire vocabulary is `api` / `pg` / `ssh`, the same taxonomy the

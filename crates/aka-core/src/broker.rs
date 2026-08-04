@@ -639,6 +639,9 @@ impl Broker {
     ) -> Result<SecretMeta> {
         let _gate = self.config_gate.lock().unwrap();
         let mut meta = self.store.secret_by_id(id)?;
+        if new_value.is_some() && !matches!(meta.source, crate::types::SecretSource::Local) {
+            return Err(CoreError::ExternalSecretReadOnly);
+        }
         let mut changes = Vec::new();
         let mut rename: Option<(String, String, usize)> = None;
         if let Some(new_name) = new_name {
@@ -708,15 +711,119 @@ impl Broker {
         // The in-app confirm is the gate: an unused secret grants nothing,
         // so deleting it is destructive to the user's own material only.
         let meta = self.store.delete_secret(id)?;
+        let detail = if matches!(meta.source, crate::types::SecretSource::Local) {
+            "Removed from Keychain"
+        } else {
+            "Unlinked from Multitool; no 1Password items were changed"
+        };
         self.audit.append(
             AuditEntry::new(
                 AuditKind::SecretDeleted,
                 format!("Secret deleted: {}", meta.name),
             )
-            .detail("Removed from Keychain"),
+            .detail(detail),
         );
         self.events.secrets_changed();
         Ok(meta)
+    }
+
+    pub fn ui_add_onepassword_integration(
+        &self,
+        id: Uuid,
+        label: &str,
+        auth: crate::onepassword::OnePasswordAuth,
+        token: Option<SecretValue>,
+    ) -> Result<crate::onepassword::OnePasswordIntegration> {
+        let integration = self
+            .store
+            .add_onepassword_integration_with_id(id, label, auth, token)?;
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::OnePasswordIntegrationAdded,
+                format!("1Password integration added: {}", integration.label),
+            )
+            .field(
+                "authentication",
+                format!("{:?}", integration.auth.kind_dto()).to_ascii_lowercase(),
+            ),
+        );
+        self.events.integrations_changed();
+        Ok(integration)
+    }
+
+    pub fn ui_replace_onepassword_token(
+        &self,
+        id: &Uuid,
+        token: SecretValue,
+    ) -> Result<crate::onepassword::OnePasswordIntegration> {
+        let integration = self.store.replace_onepassword_token(id, token)?;
+        self.audit.append(AuditEntry::new(
+            AuditKind::OnePasswordIntegrationUpdated,
+            format!(
+                "1Password integration credential rotated: {}",
+                integration.label
+            ),
+        ));
+        self.events.integrations_changed();
+        Ok(integration)
+    }
+
+    pub fn ui_delete_onepassword_integration(
+        &self,
+        id: &Uuid,
+    ) -> Result<crate::onepassword::OnePasswordIntegration> {
+        let integration = self.store.delete_onepassword_integration(id)?;
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::OnePasswordIntegrationDeleted,
+                format!("1Password integration removed: {}", integration.label),
+            )
+            .detail("Removed from Multitool; no 1Password items were changed"),
+        );
+        self.events.integrations_changed();
+        Ok(integration)
+    }
+
+    pub fn ui_add_onepassword_secret(
+        &self,
+        name: &str,
+        reference: crate::onepassword::OnePasswordSecretRef,
+    ) -> Result<SecretMeta> {
+        let meta = self.store.add_onepassword_secret(name, reference)?;
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::OnePasswordSecretLinked,
+                format!("Secret linked from 1Password: {name}"),
+            )
+            .detail("The value remains in 1Password and is resolved when used"),
+        );
+        self.events.secrets_changed();
+        Ok(meta)
+    }
+
+    pub async fn onepassword_health(&self, id: &Uuid) -> Result<aka_api::OnePasswordHealthDto> {
+        self.store.onepassword_health(id).await
+    }
+
+    pub async fn onepassword_vaults(&self, id: &Uuid) -> Result<Vec<aka_api::OnePasswordVaultDto>> {
+        self.store.onepassword_vaults(id).await
+    }
+
+    pub async fn onepassword_items(
+        &self,
+        id: &Uuid,
+        vault_id: &str,
+    ) -> Result<Vec<aka_api::OnePasswordItemDto>> {
+        self.store.onepassword_items(id, vault_id).await
+    }
+
+    pub async fn onepassword_fields(
+        &self,
+        id: &Uuid,
+        vault_id: &str,
+        item_id: &str,
+    ) -> Result<Vec<aka_api::OnePasswordFieldDto>> {
+        self.store.onepassword_fields(id, vault_id, item_id).await
     }
 
     /// Core-side reveal: only the short prefix ever leaves.

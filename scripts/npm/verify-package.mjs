@@ -134,6 +134,26 @@ function verifyPlatformPackage(directory, expectedVersion) {
     );
   }
 
+  const sidecar = path.join(packageDir, "bin", "multitool-onepassword");
+  try {
+    accessSync(sidecar, constants.R_OK | constants.X_OK);
+  } catch {
+    fail(`${name} is missing an executable bin/multitool-onepassword`);
+  }
+  if (!statSync(sidecar).isFile()) {
+    fail(`${name}/bin/multitool-onepassword is not a regular file`);
+  }
+  const sidecarIdentity = binaryIdentity(sidecar);
+  if (
+    sidecarIdentity.format !== expected.format ||
+    sidecarIdentity.cpu !== expected.cpu
+  ) {
+    fail(
+      `${name}/bin/multitool-onepassword is ${sidecarIdentity.format}-${sidecarIdentity.cpu}, expected ` +
+        `${expected.format}-${expected.cpu}`
+    );
+  }
+
   if (process.platform === expected.os && process.arch === expected.cpu) {
     const result = spawnSync(binary, ["--version"], { encoding: "utf8" });
     if (result.error) fail(`${name}/bin/multitool --version: ${result.error.message}`);

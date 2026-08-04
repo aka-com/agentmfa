@@ -22,6 +22,9 @@ pub const APPROVAL_SURFACE_V1: &str = "request-inbox-v1";
 /// Entry in `/v1/manage/whoami.capabilities` that distinguishes a legacy
 /// broker from a proxy that removed the surface-negotiation response.
 pub const APPROVAL_SURFACE_CAPABILITY: &str = "request_surface_v1";
+/// Manage-plane support for provider configuration, catalog browsing, and
+/// live-linked 1Password secret references.
+pub const ONEPASSWORD_PROVIDER_CAPABILITY: &str = "onepassword_provider_v1";
 /// Response header acknowledging how a manage-event stream was classified.
 pub const APPROVAL_SURFACE_STATUS_HEADER: &str = "x-aka-approval-surface-status";
 pub const APPROVAL_SURFACE_STATUS_ACTIVE: &str = "active";
@@ -117,6 +120,10 @@ pub enum ManageError {
     OAuth {
         message: String,
     },
+    OnePassword {
+        provider_code: String,
+        message: String,
+    },
     Vault {
         message: String,
     },
@@ -206,6 +213,12 @@ impl std::fmt::Display for ManageError {
                 "enable this tool for agents before issuing a direct endpoint"
             ),
             Self::OAuth { message } => write!(f, "OAuth: {message}"),
+            Self::OnePassword {
+                provider_code,
+                message,
+            } => {
+                write!(f, "1Password ({provider_code}): {message}")
+            }
             Self::Vault { message } => write!(f, "keychain: {message}"),
             Self::RemoteUnsupported { feature } => write!(
                 f,
@@ -237,6 +250,87 @@ pub struct SecretDto {
     pub used_by_names: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub source: SecretSourceDto,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SecretSourceDto {
+    #[default]
+    Local,
+    OnePassword {
+        #[serde(flatten)]
+        reference: Box<OnePasswordSecretSourceDto>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnePasswordSecretSourceDto {
+    pub integration_id: String,
+    pub integration_label: String,
+    pub vault_id: String,
+    pub vault_label: String,
+    pub item_id: String,
+    pub item_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_label: Option<String>,
+    pub field_id: String,
+    pub field_label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnePasswordIntegrationKindDto {
+    DesktopApp,
+    ServiceAccount,
+    Connect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnePasswordIntegrationDto {
+    pub id: String,
+    pub label: String,
+    pub kind: OnePasswordIntegrationKindDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_url: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnePasswordHealthDto {
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnePasswordVaultDto {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnePasswordItemDto {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnePasswordFieldDto {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_title: Option<String>,
+    pub field_type: String,
 }
 
 /// Non-secret OAuth coordinates, so the UI can label the connection and
@@ -752,6 +846,7 @@ pub enum ManageEvent {
     WiringsChanged,
     ConnectionsChanged,
     SecretsChanged,
+    IntegrationsChanged,
     ActivityAppended {
         entry: ActivityDto,
     },

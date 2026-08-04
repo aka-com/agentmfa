@@ -16,6 +16,16 @@ COPY crates ./crates
 # and needs a webview toolchain we don't want in a server image).
 RUN cargo build --release -p multitool
 
+# The official 1Password SDK helper used for service-account integrations.
+# The SDK currently compiles its desktop-app option behind CGO even when a
+# hosted broker selects service-account authentication at runtime.
+FROM golang:1.26-bookworm AS onepassword
+WORKDIR /src/sidecars/onepassword
+COPY sidecars/onepassword/go.mod sidecars/onepassword/go.sum ./
+RUN go mod download
+COPY sidecars/onepassword/main.go ./
+RUN CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o /multitool-onepassword .
+
 # --- runtime: slim glibc image ---
 FROM debian:bookworm-slim AS runtime
 # Testing an SSH tool authenticates a stock OpenSSH client against the target,
@@ -26,6 +36,7 @@ RUN apt-get update \
     && useradd --create-home --uid 10001 aka \
     && mkdir -p /var/lib/aka && chown aka:aka /var/lib/aka
 COPY --from=rust /src/target/release/multitool /usr/local/bin/multitool
+COPY --from=onepassword /multitool-onepassword /usr/local/bin/multitool-onepassword
 
 USER aka
 ENV HOME=/home/aka

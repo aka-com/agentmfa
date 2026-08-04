@@ -155,6 +155,19 @@ if [[ "$(uname)" == "Darwin" ]]; then
   # needs both std targets installed; `rustup target add` is a no-op when
   # they already are.
   rustup target add aarch64-apple-darwin x86_64-apple-darwin
+  sidecar_dir="$repo_root/src-tauri/binaries"
+  mkdir -p "$sidecar_dir"
+  bash "$script_dir/build-onepassword-sidecar.sh" \
+    --target aarch64-apple-darwin \
+    --output "$sidecar_dir/multitool-onepassword-aarch64-apple-darwin"
+  bash "$script_dir/build-onepassword-sidecar.sh" \
+    --target x86_64-apple-darwin \
+    --output "$sidecar_dir/multitool-onepassword-x86_64-apple-darwin"
+  lipo -create \
+    "$sidecar_dir/multitool-onepassword-aarch64-apple-darwin" \
+    "$sidecar_dir/multitool-onepassword-x86_64-apple-darwin" \
+    -output "$sidecar_dir/multitool-onepassword-universal-apple-darwin"
+  chmod 0755 "$sidecar_dir/multitool-onepassword-universal-apple-darwin"
   target_args=(--target universal-apple-darwin)
 fi
 

@@ -31,9 +31,10 @@ use crate::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, AuditStatementsBody, ConfirmBody,
     ConnectionAddBody, ConnectionConfigPatchBody, ConnectionRenameBody, ConnectionUpdateBody,
     ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody, EndpointExpiryBody,
-    EndpointRequireAuthBody,
-    ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody,
-    OAuthStartBody, ResponseCredentialsBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
+    EndpointRequireAuthBody, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody,
+    OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, OnePasswordIntegrationAddBody,
+    OnePasswordSecretAddBody, OnePasswordTokenBody, ResponseCredentialsBody, SecretAddBody,
+    SecretEditBody, SettingsPatchBody,
 };
 
 /// Bearer authentication against the management token.
@@ -125,6 +126,29 @@ fn manage_error_response(error: ManageError) -> Response {
         ManageError::RemoteUnsupported { .. } => StatusCode::NOT_IMPLEMENTED,
         ManageError::InvalidManageToken { .. } => StatusCode::UNAUTHORIZED,
         ManageError::Unreachable { .. } => StatusCode::BAD_GATEWAY,
+        ManageError::OnePassword { provider_code, .. }
+            if matches!(
+                provider_code.as_str(),
+                "integration_not_found" | "not_found"
+            ) =>
+        {
+            StatusCode::NOT_FOUND
+        }
+        ManageError::OnePassword { provider_code, .. } if provider_code == "integration_in_use" => {
+            StatusCode::CONFLICT
+        }
+        ManageError::OnePassword { provider_code, .. }
+            if matches!(
+                provider_code.as_str(),
+                "invalid_configuration" | "invalid_request" | "linked_secret_read_only"
+            ) =>
+        {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        ManageError::OnePassword { provider_code, .. } if provider_code == "rate_limited" => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        ManageError::OnePassword { .. } => StatusCode::BAD_GATEWAY,
         ManageError::OAuth { .. } | ManageError::Vault { .. } | ManageError::Internal { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
@@ -161,6 +185,26 @@ pub fn router() -> Router<AppState> {
         .route("/secrets/{id}", patch(edit_secret).delete(delete_secret))
         .route("/secrets/{id}/reveal-prefix", post(reveal_secret_prefix))
         .route("/secrets/{id}/copy-value", post(secret_value_for_copy))
+        .route(
+            "/integrations",
+            get(list_onepassword_integrations).post(add_onepassword_integration),
+        )
+        .route(
+            "/integrations/onepassword/secrets",
+            post(add_onepassword_secret),
+        )
+        .route("/integrations/{id}", delete(delete_onepassword_integration))
+        .route("/integrations/{id}/token", put(replace_onepassword_token))
+        .route("/integrations/{id}/health", get(onepassword_health))
+        .route("/integrations/{id}/vaults", get(onepassword_vaults))
+        .route(
+            "/integrations/{id}/vaults/{vault_id}/items",
+            get(onepassword_items),
+        )
+        .route(
+            "/integrations/{id}/vaults/{vault_id}/items/{item_id}/fields",
+            get(onepassword_fields),
+        )
         .route("/connections", get(list_connections).post(add_connection))
         .route("/connections/test-draft", post(test_connection_draft))
         .route("/connections/reorder", post(reorder_connections))
@@ -191,7 +235,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/connections/{id}/endpoint/copy", post(copy_endpoint))
         .route("/connections/{id}/endpoint/renew", post(renew_endpoint))
-        .route("/connections/{id}/endpoint/expiry", post(set_endpoint_expiry))
+        .route(
+            "/connections/{id}/endpoint/expiry",
+            post(set_endpoint_expiry),
+        )
         .route(
             "/connections/{id}/endpoint/require-auth",
             post(set_endpoint_require_auth),
@@ -246,7 +293,10 @@ async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Respons
         "ok": true,
         "version": state.broker.config.version,
         "client_id": state.broker.identity.client_id(),
-        "capabilities": [aka_api::APPROVAL_SURFACE_CAPABILITY],
+        "capabilities": [
+            aka_api::APPROVAL_SURFACE_CAPABILITY,
+            aka_api::ONEPASSWORD_PROVIDER_CAPABILITY,
+        ],
         "approval_surface_attached": state.broker.events.has_approval_surface(),
     }))
 }
@@ -648,6 +698,92 @@ async fn secret_value_for_copy(
         }
     }
     respond(result.map(|value| json!({ "value": value.to_string() })))
+}
+
+/* -------------------------- 1Password provider -------------------------- */
+
+async fn list_onepassword_integrations(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+) -> Response {
+    respond(state.manage.list_onepassword_integrations().await)
+}
+
+async fn add_onepassword_integration(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    ApiJson(body): ApiJson<OnePasswordIntegrationAddBody>,
+) -> Response {
+    let (auth, token) = body.authentication.into_parts();
+    respond(
+        state
+            .manage
+            .add_onepassword_integration(body.label, auth, token)
+            .await,
+    )
+}
+
+async fn replace_onepassword_token(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<OnePasswordTokenBody>,
+) -> Response {
+    respond(
+        state
+            .manage
+            .replace_onepassword_token(id, Zeroizing::new(body.token))
+            .await,
+    )
+}
+
+async fn delete_onepassword_integration(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    respond(state.manage.delete_onepassword_integration(id).await)
+}
+
+async fn onepassword_health(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    respond(state.manage.onepassword_health(id).await)
+}
+
+async fn onepassword_vaults(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    respond(state.manage.onepassword_vaults(id).await)
+}
+
+async fn onepassword_items(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path((id, vault_id)): Path<(Uuid, String)>,
+) -> Response {
+    respond(state.manage.onepassword_items(id, vault_id).await)
+}
+
+async fn onepassword_fields(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path((id, vault_id, item_id)): Path<(Uuid, String, String)>,
+) -> Response {
+    respond(state.manage.onepassword_fields(id, vault_id, item_id).await)
+}
+
+async fn add_onepassword_secret(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    ApiJson(body): ApiJson<OnePasswordSecretAddBody>,
+) -> Response {
+    let (name, reference) = body.into_reference();
+    respond(state.manage.add_onepassword_secret(name, reference).await)
 }
 
 /* ----------------------------- connections -------------------------------- */

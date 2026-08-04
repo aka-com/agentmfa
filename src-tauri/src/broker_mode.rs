@@ -33,6 +33,10 @@ pub struct BrokerProfileInfo {
     /// A saved management token exists for `url`, so the connect form can
     /// offer to reuse it.
     pub has_saved_token: bool,
+    /// Optional management features advertised by the active broker.
+    /// Legacy remote brokers omit the 1Password capability and the shell
+    /// keeps that surface disabled instead of issuing unsupported calls.
+    pub capabilities: Vec<String>,
 }
 
 impl BrokerProfileInfo {
@@ -43,8 +47,23 @@ impl BrokerProfileInfo {
             connected: true,
             error: None,
             has_saved_token: false,
+            capabilities: vec![aka_api::ONEPASSWORD_PROVIDER_CAPABILITY.into()],
         }
     }
+}
+
+fn advertised_capabilities(whoami: &serde_json::Value) -> Vec<String> {
+    let mut capabilities: Vec<String> = whoami
+        .get("capabilities")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect();
+    capabilities.sort();
+    capabilities.dedup();
+    capabilities
 }
 
 /// The persisted mode choice (`shell.json` in the app data dir). The token
@@ -254,6 +273,7 @@ impl BrokerState {
                 connected: false,
                 error: None,
                 has_saved_token,
+                capabilities: Vec::new(),
             }),
             tokens,
             data_dir,
@@ -367,7 +387,8 @@ impl BrokerState {
             RemoteBackend::new(config).with_opener(Arc::new(crate::events::open_consent_url)),
         );
         let epoch = self.begin_transition();
-        backend.whoami().await.map_err(|error| error.to_string())?;
+        let whoami = backend.whoami().await.map_err(|error| error.to_string())?;
+        let capabilities = advertised_capabilities(&whoami);
         // The probe succeeded: persist, swap, and (re)arm the link — unless
         // another transition began while the probe was in flight (the user
         // switched to this Mac, retried, or connected elsewhere); the later
@@ -399,6 +420,7 @@ impl BrokerState {
                 connected: true,
                 error: None,
                 has_saved_token: true,
+                capabilities,
             };
             self.set_profile(app, profile.clone());
             (profile, stale_local)
@@ -643,6 +665,25 @@ impl BrokerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broker_capabilities_are_read_from_whoami_and_legacy_is_empty() {
+        let advertised = advertised_capabilities(&serde_json::json!({
+            "capabilities": [
+                "zeta",
+                aka_api::ONEPASSWORD_PROVIDER_CAPABILITY,
+                aka_api::ONEPASSWORD_PROVIDER_CAPABILITY
+            ]
+        }));
+        assert_eq!(
+            advertised,
+            vec![
+                aka_api::ONEPASSWORD_PROVIDER_CAPABILITY.to_string(),
+                "zeta".into()
+            ]
+        );
+        assert!(advertised_capabilities(&serde_json::json!({ "version": "legacy" })).is_empty());
+    }
 
     #[test]
     fn older_shell_config_defaults_to_private_background_notifications() {

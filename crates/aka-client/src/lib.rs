@@ -18,8 +18,9 @@ pub mod events;
 
 use aka_api::{
     ActivityDto, ActivityPageDto, ApprovalDecisionDto, ApprovalDto, ApprovalSnapshotDto,
-    ApprovalSurfaceDto, ConnectionDto, IdentityDto, IssuedEndpointDto, ManageError, RequestDto,
-    SecretDto, SessionDto, SettingsDto,
+    ApprovalSurfaceDto, ConnectionDto, IdentityDto, IssuedEndpointDto, ManageError,
+    OnePasswordFieldDto, OnePasswordHealthDto, OnePasswordIntegrationDto, OnePasswordItemDto,
+    OnePasswordVaultDto, RequestDto, SecretDto, SessionDto, SettingsDto,
 };
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
@@ -27,9 +28,10 @@ use aka_core::manage::{
     ConfirmBody, ConnectionAddBody, ConnectionConfigPatch, ConnectionConfigPatchBody,
     ConnectionRenameBody, ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody,
     ElicitationResponseBody, EndpointExpiryBody, EndpointRequireAuthBody, ManageResult,
-    ManagementBackend,
-    McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody,
-    ResponseCredentialsBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
+    ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody,
+    OAuthStartBody, OnePasswordAuthenticationBody, OnePasswordIntegrationAddBody,
+    OnePasswordSecretAddBody, OnePasswordTokenBody, ResponseCredentialsBody, SecretAddBody,
+    SecretEditBody, SettingsPatchBody,
 };
 use aka_core::store::ConnectionSpec;
 use aka_core::types::SecretValue;
@@ -697,6 +699,126 @@ impl ManagementBackend for RemoteBackend {
         // The broker audits the copy at value release; there is no
         // honor-system note to send.
         Ok(())
+    }
+
+    async fn list_onepassword_integrations(&self) -> ManageResult<Vec<OnePasswordIntegrationDto>> {
+        self.get("/v1/manage/integrations").await
+    }
+
+    async fn add_onepassword_integration(
+        &self,
+        label: String,
+        auth: aka_core::onepassword::OnePasswordAuth,
+        token: Option<SecretValue>,
+    ) -> ManageResult<OnePasswordIntegrationDto> {
+        let authentication = match auth {
+            aka_core::onepassword::OnePasswordAuth::DesktopApp { account } => {
+                OnePasswordAuthenticationBody::DesktopApp { account }
+            }
+            aka_core::onepassword::OnePasswordAuth::ServiceAccount => {
+                OnePasswordAuthenticationBody::ServiceAccount {
+                    token: token
+                        .ok_or_else(|| ManageError::OnePassword {
+                            provider_code: "invalid_configuration".into(),
+                            message: "a service-account token is required".into(),
+                        })?
+                        .to_string(),
+                }
+            }
+            aka_core::onepassword::OnePasswordAuth::Connect { base_url } => {
+                OnePasswordAuthenticationBody::Connect {
+                    base_url,
+                    token: token
+                        .ok_or_else(|| ManageError::OnePassword {
+                            provider_code: "invalid_configuration".into(),
+                            message: "a Connect access token is required".into(),
+                        })?
+                        .to_string(),
+                }
+            }
+        };
+        self.post(
+            "/v1/manage/integrations",
+            &OnePasswordIntegrationAddBody {
+                label,
+                authentication,
+            },
+        )
+        .await
+    }
+
+    async fn replace_onepassword_token(
+        &self,
+        id: Uuid,
+        token: SecretValue,
+    ) -> ManageResult<OnePasswordIntegrationDto> {
+        self.put(
+            &format!("/v1/manage/integrations/{id}/token"),
+            &OnePasswordTokenBody {
+                token: token.to_string(),
+            },
+        )
+        .await
+    }
+
+    async fn delete_onepassword_integration(&self, id: Uuid) -> ManageResult<()> {
+        self.delete(&format!("/v1/manage/integrations/{id}")).await
+    }
+
+    async fn onepassword_health(&self, id: Uuid) -> ManageResult<OnePasswordHealthDto> {
+        self.get(&format!("/v1/manage/integrations/{id}/health"))
+            .await
+    }
+
+    async fn onepassword_vaults(&self, id: Uuid) -> ManageResult<Vec<OnePasswordVaultDto>> {
+        self.get(&format!("/v1/manage/integrations/{id}/vaults"))
+            .await
+    }
+
+    async fn onepassword_items(
+        &self,
+        id: Uuid,
+        vault_id: String,
+    ) -> ManageResult<Vec<OnePasswordItemDto>> {
+        self.get(&format!(
+            "/v1/manage/integrations/{id}/vaults/{vault_id}/items"
+        ))
+        .await
+    }
+
+    async fn onepassword_fields(
+        &self,
+        id: Uuid,
+        vault_id: String,
+        item_id: String,
+    ) -> ManageResult<Vec<OnePasswordFieldDto>> {
+        self.get(&format!(
+            "/v1/manage/integrations/{id}/vaults/{vault_id}/items/{item_id}/fields"
+        ))
+        .await
+    }
+
+    async fn add_onepassword_secret(
+        &self,
+        name: String,
+        reference: aka_core::onepassword::OnePasswordSecretRef,
+    ) -> ManageResult<SecretDto> {
+        self.post(
+            "/v1/manage/integrations/onepassword/secrets",
+            &OnePasswordSecretAddBody {
+                name,
+                integration_id: reference.integration_id,
+                vault_id: reference.vault_id,
+                vault_label: reference.vault_label,
+                item_id: reference.item_id,
+                item_label: reference.item_label,
+                section_id: reference.section_id,
+                section_label: reference.section_label,
+                field_id: reference.field_id,
+                field_label: reference.field_label,
+            },
+        )
+        .await
     }
 
     async fn list_connections(&self) -> ManageResult<Vec<ConnectionDto>> {

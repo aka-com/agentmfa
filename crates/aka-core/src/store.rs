@@ -23,11 +23,15 @@ use crate::error::{ConnectionField, CoreError};
 #[cfg(any(test, feature = "test-harness"))]
 use crate::events::NoopEvents;
 use crate::integrity::StateIntegrity;
+use crate::onepassword::{
+    validate_integration, validate_reference, OnePasswordAuth, OnePasswordIntegration,
+    OnePasswordResolver, OnePasswordSecretRef,
+};
 use crate::paths::Paths;
 use crate::template::{is_valid_secret_name, Template};
 use crate::types::{
-    reveal_prefix, Connection, ConnectionConfig, ConnectionKind, SecretMeta, SecretValue, Settings,
-    SignerSpec,
+    reveal_prefix, Connection, ConnectionConfig, ConnectionKind, SecretMeta, SecretSource,
+    SecretValue, Settings, SignerSpec,
 };
 use crate::vault::{SecretVault, VaultAttrs};
 use crate::Result;
@@ -48,6 +52,8 @@ fn next_connection_updated_at(previous: &chrono::DateTime<Utc>) -> chrono::DateT
 struct IndexState {
     #[serde(default)]
     secrets: Vec<SecretMeta>,
+    #[serde(default)]
+    onepassword_integrations: Vec<OnePasswordIntegration>,
     #[serde(default, deserialize_with = "connections_dropping_retired_kinds")]
     connections: Vec<Connection>,
     #[serde(default)]
@@ -63,6 +69,7 @@ impl Default for IndexState {
     fn default() -> Self {
         Self {
             secrets: Vec::new(),
+            onepassword_integrations: Vec::new(),
             connections: Vec::new(),
             settings: None,
             access_generation: 0,
@@ -165,11 +172,31 @@ pub struct ConnectionSpec {
 pub struct Store {
     paths: Paths,
     vault: Arc<dyn SecretVault>,
+    onepassword: Arc<OnePasswordResolver>,
     integrity: Arc<StateIntegrity>,
     state: Mutex<IndexState>,
     /// Tools this build could not load because their kind was retired, as
     /// `name (kind)`. Captured at open so the broker can audit the loss.
     retired_connections_dropped: Vec<String>,
+}
+
+fn validate_onepassword_token_input(auth: &OnePasswordAuth, token: Option<&str>) -> Result<()> {
+    if auth.requires_token() && token.is_none_or(|token| token.trim().is_empty()) {
+        return Err(CoreError::InvalidOnePasswordIntegration(
+            "a non-empty 1Password access token is required".into(),
+        ));
+    }
+    if !auth.requires_token() && token.is_some() {
+        return Err(CoreError::InvalidOnePasswordIntegration(
+            "desktop-app integrations do not accept an access token".into(),
+        ));
+    }
+    if token.is_some_and(|token| token.len() > 16 * 1024) {
+        return Err(CoreError::InvalidOnePasswordIntegration(
+            "the 1Password access token is too large".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl Store {
@@ -205,6 +232,7 @@ impl Store {
         }
         Ok(Self {
             paths,
+            onepassword: Arc::new(OnePasswordResolver::new(vault.clone())),
             vault,
             integrity,
             state: Mutex::new(state),
@@ -275,6 +303,7 @@ impl Store {
             name: name.to_string(),
             created_at: now,
             updated_at: now,
+            source: SecretSource::Local,
         };
         self.vault.set(
             &meta.id,
@@ -358,18 +387,21 @@ impl Store {
             (secret.clone(), secret.created_at)
         };
         self.persist(&next)?;
-        // Keep the Keychain label aligned with the index.
-        if let Err(error) = self.vault.set_attrs(
-            id,
-            &VaultAttrs {
-                name: new_name.to_string(),
-                created_at,
-            },
-        ) {
-            if let Err(rollback) = self.persist(&state) {
-                tracing::error!("failed to roll back index after vault error: {rollback}");
+        // A linked secret is only an alias in Multitool; there is no local
+        // vault item and renaming it must not mutate 1Password.
+        if matches!(meta.source, SecretSource::Local) {
+            if let Err(error) = self.vault.set_attrs(
+                id,
+                &VaultAttrs {
+                    name: new_name.to_string(),
+                    created_at,
+                },
+            ) {
+                if let Err(rollback) = self.persist(&state) {
+                    tracing::error!("failed to roll back index after vault error: {rollback}");
+                }
+                return Err(error);
             }
-            return Err(error);
         }
         *state = next;
         Ok((meta, rewritten))
@@ -378,6 +410,14 @@ impl Store {
     /// Replace a secret's value (the Edit sheet's write-only field).
     pub fn replace_secret_value(&self, id: &Uuid, value: SecretValue) -> Result<SecretMeta> {
         let mut state = self.state.lock().unwrap();
+        if state
+            .secrets
+            .iter()
+            .find(|secret| &secret.id == id)
+            .is_some_and(|secret| !matches!(secret.source, SecretSource::Local))
+        {
+            return Err(CoreError::ExternalSecretReadOnly);
+        }
         let mut next = state.clone();
         let secret = next
             .secrets
@@ -424,11 +464,13 @@ impl Store {
         let mut next = state.clone();
         let meta = next.secrets.remove(pos);
         self.persist(&next)?;
-        if let Err(error) = self.vault.delete(id) {
-            if let Err(rollback) = self.persist(&state) {
-                tracing::error!("failed to roll back index after vault error: {rollback}");
+        if matches!(meta.source, SecretSource::Local) {
+            if let Err(error) = self.vault.delete(id) {
+                if let Err(rollback) = self.persist(&state) {
+                    tracing::error!("failed to roll back index after vault error: {rollback}");
+                }
+                return Err(error);
             }
-            return Err(error);
         }
         *state = next;
         Ok(meta)
@@ -445,8 +487,14 @@ impl Store {
     /// upstream credential injection and the clipboard-copy command. There
     /// is deliberately no Tauri command that returns this to the webview.
     pub async fn secret_value(&self, id: &Uuid) -> Result<SecretValue> {
-        self.secret_by_id(id)?;
-        self.vault.get(id).await
+        let meta = self.secret_by_id(id)?;
+        match meta.source {
+            SecretSource::Local => self.vault.get(id).await,
+            SecretSource::OnePassword { reference } => {
+                let integration = self.onepassword_integration(&reference.integration_id)?;
+                self.onepassword.resolve(&integration, &reference).await
+            }
+        }
     }
 
     pub async fn secret_value_by_name(&self, name: &str) -> Result<SecretValue> {
@@ -454,7 +502,318 @@ impl Store {
             .secret_by_name(name)
             .ok_or(CoreError::SecretNotFound)?
             .id;
-        self.vault.get(&id).await
+        self.secret_value(&id).await
+    }
+
+    /* -------------------------- 1Password links ------------------------- */
+
+    pub fn list_onepassword_integrations(&self) -> Vec<OnePasswordIntegration> {
+        let mut integrations = self.state.lock().unwrap().onepassword_integrations.clone();
+        integrations.sort_by(|left, right| left.label.cmp(&right.label));
+        integrations
+    }
+
+    pub fn onepassword_integration(&self, id: &Uuid) -> Result<OnePasswordIntegration> {
+        self.state
+            .lock()
+            .unwrap()
+            .onepassword_integrations
+            .iter()
+            .find(|integration| &integration.id == id)
+            .cloned()
+            .ok_or(CoreError::OnePasswordIntegrationNotFound)
+    }
+
+    pub fn invalidate_onepassword_integration(&self, id: &Uuid) {
+        self.onepassword.invalidate(id);
+    }
+
+    pub fn add_onepassword_integration(
+        &self,
+        label: &str,
+        auth: OnePasswordAuth,
+        token: Option<SecretValue>,
+    ) -> Result<OnePasswordIntegration> {
+        self.add_onepassword_integration_with_id(Uuid::new_v4(), label, auth, token)
+    }
+
+    pub fn add_onepassword_integration_with_id(
+        &self,
+        id: Uuid,
+        label: &str,
+        auth: OnePasswordAuth,
+        token: Option<SecretValue>,
+    ) -> Result<OnePasswordIntegration> {
+        validate_integration(label, &auth)?;
+        validate_onepassword_token_input(&auth, token.as_ref().map(|token| token.as_str()))?;
+        let mut state = self.state.lock().unwrap();
+        if state
+            .onepassword_integrations
+            .iter()
+            .any(|integration| integration.label.eq_ignore_ascii_case(label.trim()))
+        {
+            return Err(CoreError::InvalidOnePasswordIntegration(
+                "that integration label is already in use".into(),
+            ));
+        }
+        let now = Utc::now();
+        let integration = OnePasswordIntegration {
+            id,
+            label: label.trim().to_string(),
+            auth,
+            created_at: now,
+            updated_at: now,
+        };
+        if let Some(token) = token.as_ref() {
+            self.vault.set(
+                &integration.id,
+                &VaultAttrs {
+                    name: format!("1Password integration: {}", integration.label),
+                    created_at: now,
+                },
+                token,
+            )?;
+        }
+        let mut next = state.clone();
+        next.onepassword_integrations.push(integration.clone());
+        if let Err(error) = self.persist(&next) {
+            if integration.auth.requires_token() {
+                if let Err(rollback) = self.vault.delete(&integration.id) {
+                    tracing::error!(
+                        "failed to roll back 1Password integration token {}: {rollback}",
+                        integration.id
+                    );
+                }
+            }
+            return Err(error);
+        }
+        *state = next;
+        Ok(integration)
+    }
+
+    /// Validate a not-yet-persisted integration with its final ID. SDK
+    /// sessions created by this probe can therefore be reused immediately
+    /// after the metadata/token commit instead of prompting twice.
+    pub async fn validate_new_onepassword_integration(
+        &self,
+        id: Uuid,
+        label: &str,
+        auth: &OnePasswordAuth,
+        token: Option<&str>,
+    ) -> Result<()> {
+        validate_integration(label, auth)?;
+        validate_onepassword_token_input(auth, token)?;
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .onepassword_integrations
+            .iter()
+            .any(|integration| integration.label.eq_ignore_ascii_case(label.trim()))
+        {
+            return Err(CoreError::InvalidOnePasswordIntegration(
+                "that integration label is already in use".into(),
+            ));
+        }
+        let now = Utc::now();
+        let candidate = OnePasswordIntegration {
+            id,
+            label: label.trim().to_string(),
+            auth: auth.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        let result = self
+            .onepassword
+            .validate_credentials(&candidate, token)
+            .await;
+        if result.is_err() {
+            self.onepassword.invalidate(&id);
+        }
+        result
+    }
+
+    /// Probe a replacement token under a temporary SDK process before
+    /// overwriting the credential that currently works.
+    pub async fn validate_onepassword_replacement_token(
+        &self,
+        id: &Uuid,
+        token: &str,
+    ) -> Result<()> {
+        let integration = self.onepassword_integration(id)?;
+        validate_onepassword_token_input(&integration.auth, Some(token))?;
+        if !integration.auth.requires_token() {
+            return Err(CoreError::InvalidOnePasswordIntegration(
+                "desktop-app integrations do not store an access token".into(),
+            ));
+        }
+        let temporary_id = Uuid::new_v4();
+        let candidate = OnePasswordIntegration {
+            id: temporary_id,
+            ..integration
+        };
+        let result = self
+            .onepassword
+            .validate_credentials(&candidate, Some(token))
+            .await;
+        self.onepassword.invalidate(&temporary_id);
+        result
+    }
+
+    pub fn replace_onepassword_token(
+        &self,
+        id: &Uuid,
+        token: SecretValue,
+    ) -> Result<OnePasswordIntegration> {
+        if token.trim().is_empty() {
+            return Err(CoreError::InvalidOnePasswordIntegration(
+                "a non-empty 1Password access token is required".into(),
+            ));
+        }
+        if token.len() > 16 * 1024 {
+            return Err(CoreError::InvalidOnePasswordIntegration(
+                "the 1Password access token is too large".into(),
+            ));
+        }
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        let integration = next
+            .onepassword_integrations
+            .iter_mut()
+            .find(|integration| &integration.id == id)
+            .ok_or(CoreError::OnePasswordIntegrationNotFound)?;
+        if !integration.auth.requires_token() {
+            return Err(CoreError::InvalidOnePasswordIntegration(
+                "desktop-app integrations do not store an access token".into(),
+            ));
+        }
+        integration.updated_at = Utc::now();
+        let updated = integration.clone();
+        self.persist(&next)?;
+        if let Err(error) = self.vault.set(
+            id,
+            &VaultAttrs {
+                name: format!("1Password integration: {}", updated.label),
+                created_at: updated.created_at,
+            },
+            &token,
+        ) {
+            if let Err(rollback) = self.persist(&state) {
+                tracing::error!("failed to roll back 1Password token metadata: {rollback}");
+            }
+            return Err(error);
+        }
+        *state = next;
+        self.onepassword.invalidate(id);
+        Ok(updated)
+    }
+
+    pub fn delete_onepassword_integration(&self, id: &Uuid) -> Result<OnePasswordIntegration> {
+        let mut state = self.state.lock().unwrap();
+        let users: Vec<String> = state
+            .secrets
+            .iter()
+            .filter_map(|secret| match &secret.source {
+                SecretSource::OnePassword { reference } if &reference.integration_id == id => {
+                    Some(secret.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if !users.is_empty() {
+            return Err(CoreError::OnePasswordIntegrationInUse(users));
+        }
+        let position = state
+            .onepassword_integrations
+            .iter()
+            .position(|integration| &integration.id == id)
+            .ok_or(CoreError::OnePasswordIntegrationNotFound)?;
+        let mut next = state.clone();
+        let integration = next.onepassword_integrations.remove(position);
+        self.persist(&next)?;
+        if integration.auth.requires_token() {
+            match self.vault.delete(id) {
+                Ok(()) | Err(CoreError::SecretNotFound) => {}
+                Err(error) => {
+                    if let Err(rollback) = self.persist(&state) {
+                        tracing::error!(
+                            "failed to roll back 1Password integration deletion: {rollback}"
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        *state = next;
+        self.onepassword.invalidate(id);
+        Ok(integration)
+    }
+
+    pub fn add_onepassword_secret(
+        &self,
+        name: &str,
+        reference: OnePasswordSecretRef,
+    ) -> Result<SecretMeta> {
+        if !is_valid_secret_name(name) {
+            return Err(CoreError::InvalidSecretName(name.to_string()));
+        }
+        validate_reference(&reference)?;
+        let mut state = self.state.lock().unwrap();
+        if state.secrets.iter().any(|secret| secret.name == name) {
+            return Err(CoreError::SecretNameTaken(name.to_string()));
+        }
+        if !state
+            .onepassword_integrations
+            .iter()
+            .any(|integration| integration.id == reference.integration_id)
+        {
+            return Err(CoreError::OnePasswordIntegrationNotFound);
+        }
+        let now = Utc::now();
+        let meta = SecretMeta {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            created_at: now,
+            updated_at: now,
+            source: SecretSource::OnePassword {
+                reference: Box::new(reference),
+            },
+        };
+        let mut next = state.clone();
+        next.secrets.push(meta.clone());
+        self.commit(&mut state, next)?;
+        Ok(meta)
+    }
+
+    pub async fn onepassword_health(&self, id: &Uuid) -> Result<aka_api::OnePasswordHealthDto> {
+        let integration = self.onepassword_integration(id)?;
+        self.onepassword.health(&integration).await
+    }
+
+    pub async fn onepassword_vaults(&self, id: &Uuid) -> Result<Vec<aka_api::OnePasswordVaultDto>> {
+        let integration = self.onepassword_integration(id)?;
+        self.onepassword.list_vaults(&integration).await
+    }
+
+    pub async fn onepassword_items(
+        &self,
+        id: &Uuid,
+        vault_id: &str,
+    ) -> Result<Vec<aka_api::OnePasswordItemDto>> {
+        let integration = self.onepassword_integration(id)?;
+        self.onepassword.list_items(&integration, vault_id).await
+    }
+
+    pub async fn onepassword_fields(
+        &self,
+        id: &Uuid,
+        vault_id: &str,
+        item_id: &str,
+    ) -> Result<Vec<aka_api::OnePasswordFieldDto>> {
+        let integration = self.onepassword_integration(id)?;
+        self.onepassword
+            .list_fields(&integration, vault_id, item_id)
+            .await
     }
 
     /// Resolve every secret the template references, then render it. The
@@ -1064,6 +1423,7 @@ fn prepare_connection_with_secret(
         name: secret_name.to_string(),
         created_at: now,
         updated_at: now,
+        source: SecretSource::Local,
     };
     let mut next = state.clone();
     next.secrets.push(meta.clone());
@@ -1575,6 +1935,54 @@ mod tests {
             session_token_ref: None,
         });
         spec
+    }
+
+    #[tokio::test]
+    async fn onepassword_links_are_metadata_not_local_vault_values() {
+        let (store, vault, _dir) = store().await;
+        let baseline = vault.len();
+        let integration = store
+            .add_onepassword_integration(
+                "Work",
+                OnePasswordAuth::DesktopApp {
+                    account: "Work".into(),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(vault.len(), baseline);
+        let linked = store
+            .add_onepassword_secret(
+                "GITHUB_TOKEN",
+                OnePasswordSecretRef {
+                    integration_id: integration.id,
+                    vault_id: "vault1".into(),
+                    vault_label: "Production".into(),
+                    item_id: "item1".into(),
+                    item_label: "GitHub".into(),
+                    section_id: None,
+                    section_label: None,
+                    field_id: "password".into(),
+                    field_label: "password".into(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(linked.source, SecretSource::OnePassword { .. }));
+        assert_eq!(vault.len(), baseline);
+        assert!(matches!(
+            store.replace_secret_value(&linked.id, val("copy")),
+            Err(CoreError::ExternalSecretReadOnly)
+        ));
+        assert!(matches!(
+            store.delete_onepassword_integration(&integration.id),
+            Err(CoreError::OnePasswordIntegrationInUse(_))
+        ));
+        store.rename_secret(&linked.id, "GITHUB_TOKEN_2").unwrap();
+        store.delete_secret(&linked.id).unwrap();
+        store
+            .delete_onepassword_integration(&integration.id)
+            .unwrap();
+        assert_eq!(vault.len(), baseline);
     }
 
     #[tokio::test]

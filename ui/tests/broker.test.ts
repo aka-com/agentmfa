@@ -7,6 +7,7 @@ import {
   brokerTakeover,
   brokerTone,
   remoteEndpointCaution,
+  supportsOnePassword,
 } from '../src/broker';
 import type { BrokerProfile } from '../src/types';
 
@@ -17,9 +18,16 @@ function remote(overrides: Partial<BrokerProfile> = {}): BrokerProfile {
     connected: true,
     error: null,
     has_saved_token: true,
+    capabilities: ['onepassword_provider_v1'],
     ...overrides,
   };
 }
+
+test('1Password requires the broker capability', () => {
+  assert.equal(supportsOnePassword(LOCAL_BROKER), true);
+  assert.equal(supportsOnePassword(remote()), true);
+  assert.equal(supportsOnePassword(remote({ capabilities: [] })), false);
+});
 
 test('the switcher labels local mode and remote hosts', () => {
   assert.equal(brokerLabel(LOCAL_BROKER), 'Local');

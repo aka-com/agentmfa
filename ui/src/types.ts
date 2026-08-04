@@ -7,6 +7,55 @@ export interface SecretSummary {
   used_by_names: string[];
   created_at: string;
   updated_at: string;
+  source?:
+    | { kind: 'local' }
+    | {
+        kind: 'one_password';
+        integration_id: string;
+        integration_label: string;
+        vault_id: string;
+        vault_label: string;
+        item_id: string;
+        item_label: string;
+        section_id?: string | null;
+        section_label?: string | null;
+        field_id: string;
+        field_label: string;
+      };
+}
+
+export interface OnePasswordIntegration {
+  id: string;
+  label: string;
+  kind: 'desktop_app' | 'service_account' | 'connect';
+  account?: string | null;
+  connect_url?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OnePasswordHealth {
+  ok: boolean;
+  detail: string;
+}
+
+export interface OnePasswordVault {
+  id: string;
+  title: string;
+}
+
+export interface OnePasswordItem {
+  id: string;
+  title: string;
+  category?: string | null;
+}
+
+export interface OnePasswordField {
+  id: string;
+  title: string;
+  section_id?: string | null;
+  section_title?: string | null;
+  field_type: string;
 }
 
 /**
@@ -349,6 +398,8 @@ export interface BrokerProfile {
   error: string | null;
   /** A saved management token exists for `url`. */
   has_saved_token: boolean;
+  /** Optional management features advertised by the active broker. */
+  capabilities: string[];
 }
 
 export interface Settings {
@@ -577,6 +628,41 @@ export interface CommandMap {
   retry_remote_broker: CommandSpec<undefined, BrokerProfile>;
   switch_broker_local: CommandSpec<undefined, BrokerProfile>;
   list_secrets: CommandSpec<undefined, SecretSummary[]>;
+  list_onepassword_integrations: CommandSpec<undefined, OnePasswordIntegration[]>;
+  add_onepassword_integration: CommandSpec<{
+    label: string;
+    method: 'desktop_app' | 'service_account' | 'connect';
+    account?: string | null;
+    connectUrl?: string | null;
+    token?: string | null;
+  }, OnePasswordIntegration>;
+  replace_onepassword_token: CommandSpec<
+    { id: string; token: string },
+    OnePasswordIntegration
+  >;
+  delete_onepassword_integration: CommandSpec<{ id: string }, void>;
+  onepassword_health: CommandSpec<{ id: string }, OnePasswordHealth>;
+  list_onepassword_vaults: CommandSpec<{ id: string }, OnePasswordVault[]>;
+  list_onepassword_items: CommandSpec<
+    { id: string; vaultId: string },
+    OnePasswordItem[]
+  >;
+  list_onepassword_fields: CommandSpec<
+    { id: string; vaultId: string; itemId: string },
+    OnePasswordField[]
+  >;
+  add_onepassword_secret: CommandSpec<{
+    name: string;
+    integrationId: string;
+    vaultId: string;
+    vaultLabel: string;
+    itemId: string;
+    itemLabel: string;
+    sectionId?: string | null;
+    sectionLabel?: string | null;
+    fieldId: string;
+    fieldLabel: string;
+  }, SecretSummary>;
   list_connections: CommandSpec<undefined, ConnectionSummary[]>;
   get_identity: CommandSpec<undefined, IdentityInfo>;
   list_sessions: CommandSpec<undefined, SessionSummary[]>;
@@ -680,6 +766,7 @@ export interface EventMap {
   'aka://agents-changed': Record<string, never>;
   'aka://connections-changed': Record<string, never>;
   'aka://secrets-changed': Record<string, never>;
+  'aka://integrations-changed': Record<string, never>;
   'aka://wirings-changed': Record<string, never>;
   'aka://sessions-changed': Record<string, never>;
   'aka://elicitations-changed': Record<string, never>;

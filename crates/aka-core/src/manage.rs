@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 use aka_api::{
     AccessDto, ActivityDto, ApprovalDecisionDto, ApprovalDto, ConnectionDto, ElicitationDto,
-    EndpointChip, IdentityDto, IssuedEndpointDto, ManageError, OAuthDto, RequestDto, SecretDto,
-    SessionDto, SettingsDto,
+    EndpointChip, IdentityDto, IssuedEndpointDto, ManageError, OAuthDto, OnePasswordFieldDto,
+    OnePasswordHealthDto, OnePasswordIntegrationDto, OnePasswordItemDto, OnePasswordVaultDto,
+    RequestDto, SecretDto, SessionDto, SettingsDto,
 };
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -41,6 +42,26 @@ impl From<CoreError> for ManageError {
             CoreError::ConnectionNameTaken(name) => Self::ConnectionNameTaken { name },
             CoreError::ConnectionTargetTaken(name) => Self::ConnectionTargetTaken { name },
             CoreError::SecretNotFound => Self::SecretNotFound,
+            CoreError::OnePasswordIntegrationNotFound => Self::OnePassword {
+                provider_code: "integration_not_found".into(),
+                message: "no such 1Password integration".into(),
+            },
+            CoreError::OnePasswordIntegrationInUse(secrets) => Self::OnePassword {
+                provider_code: "integration_in_use".into(),
+                message: format!("the integration is used by: {}", secrets.join(", ")),
+            },
+            CoreError::InvalidOnePasswordIntegration(message) => Self::OnePassword {
+                provider_code: "invalid_configuration".into(),
+                message,
+            },
+            CoreError::OnePassword { code, message } => Self::OnePassword {
+                provider_code: code,
+                message,
+            },
+            CoreError::ExternalSecretReadOnly => Self::OnePassword {
+                provider_code: "linked_secret_read_only".into(),
+                message: "linked 1Password secrets are read-only".into(),
+            },
             CoreError::ConnectionNotFound => Self::ConnectionNotFound,
             CoreError::ConnectionChanged => Self::ConnectionChanged,
             CoreError::ApprovalConnectionChanged => Self::ApprovalConnectionChanged,
@@ -84,6 +105,10 @@ pub fn secret_dto(broker: &Broker, meta: &SecretMeta) -> SecretDto {
         used_by_names: names,
         created_at: meta.created_at.to_rfc3339(),
         updated_at: meta.updated_at.to_rfc3339(),
+        source: crate::onepassword::source_dto(
+            &meta.source,
+            &broker.store.list_onepassword_integrations(),
+        ),
     }
 }
 
@@ -146,10 +171,7 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                 kind: e.kind.as_str().to_string(),
                 dsn,
                 require_auth: e.require_auth,
-                expires_at: e
-                    .expires_at
-                    .map(|at| at.to_rfc3339())
-                    .unwrap_or_default(),
+                expires_at: e.expires_at.map(|at| at.to_rfc3339()).unwrap_or_default(),
                 expires_in_secs: e.expires_at.map(secs_until),
             }
         }),
@@ -789,6 +811,11 @@ impl crate::events::BrokerEvents for FanoutEvents {
         self.bus.emit(aka_api::ManageEvent::SecretsChanged);
     }
 
+    fn integrations_changed(&self) {
+        self.inner.integrations_changed();
+        self.bus.emit(aka_api::ManageEvent::IntegrationsChanged);
+    }
+
     fn audit_appended(&self, entry: &AuditEntry) {
         self.inner.audit_appended(entry);
         self.bus.emit(aka_api::ManageEvent::ActivityAppended {
@@ -903,6 +930,83 @@ pub struct SecretEditBody {
     pub new_name: Option<String>,
     #[serde(default)]
     pub new_value: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct OnePasswordIntegrationAddBody {
+    pub label: String,
+    #[serde(flatten)]
+    pub authentication: OnePasswordAuthenticationBody,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
+pub enum OnePasswordAuthenticationBody {
+    DesktopApp { account: String },
+    ServiceAccount { token: String },
+    Connect { base_url: String, token: String },
+}
+
+impl OnePasswordAuthenticationBody {
+    pub fn into_parts(
+        self,
+    ) -> (
+        crate::onepassword::OnePasswordAuth,
+        Option<crate::types::SecretValue>,
+    ) {
+        match self {
+            Self::DesktopApp { account } => (
+                crate::onepassword::OnePasswordAuth::DesktopApp { account },
+                None,
+            ),
+            Self::ServiceAccount { token } => (
+                crate::onepassword::OnePasswordAuth::ServiceAccount,
+                Some(zeroize::Zeroizing::new(token)),
+            ),
+            Self::Connect { base_url, token } => (
+                crate::onepassword::OnePasswordAuth::Connect { base_url },
+                Some(zeroize::Zeroizing::new(token)),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct OnePasswordTokenBody {
+    pub token: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct OnePasswordSecretAddBody {
+    pub name: String,
+    pub integration_id: Uuid,
+    pub vault_id: String,
+    pub vault_label: String,
+    pub item_id: String,
+    pub item_label: String,
+    #[serde(default)]
+    pub section_id: Option<String>,
+    #[serde(default)]
+    pub section_label: Option<String>,
+    pub field_id: String,
+    pub field_label: String,
+}
+
+impl OnePasswordSecretAddBody {
+    pub fn into_reference(self) -> (String, crate::onepassword::OnePasswordSecretRef) {
+        let reference = crate::onepassword::OnePasswordSecretRef {
+            integration_id: self.integration_id,
+            vault_id: self.vault_id,
+            vault_label: self.vault_label,
+            item_id: self.item_id,
+            item_label: self.item_label,
+            section_id: self.section_id,
+            section_label: self.section_label,
+            field_id: self.field_id,
+            field_label: self.field_label,
+        };
+        (self.name, reference)
+    }
 }
 
 /// `POST /v1/manage/connections`: the spec plus, for connection-first
@@ -1309,6 +1413,39 @@ pub trait ManagementBackend: Send + Sync {
     async fn secret_value_for_copy(&self, id: Uuid) -> ManageResult<SecretValue>;
     async fn note_secret_copied(&self, id: Uuid) -> ManageResult<()>;
 
+    /* 1Password integrations */
+    async fn list_onepassword_integrations(&self) -> ManageResult<Vec<OnePasswordIntegrationDto>>;
+    async fn add_onepassword_integration(
+        &self,
+        label: String,
+        auth: crate::onepassword::OnePasswordAuth,
+        token: Option<SecretValue>,
+    ) -> ManageResult<OnePasswordIntegrationDto>;
+    async fn replace_onepassword_token(
+        &self,
+        id: Uuid,
+        token: SecretValue,
+    ) -> ManageResult<OnePasswordIntegrationDto>;
+    async fn delete_onepassword_integration(&self, id: Uuid) -> ManageResult<()>;
+    async fn onepassword_health(&self, id: Uuid) -> ManageResult<OnePasswordHealthDto>;
+    async fn onepassword_vaults(&self, id: Uuid) -> ManageResult<Vec<OnePasswordVaultDto>>;
+    async fn onepassword_items(
+        &self,
+        id: Uuid,
+        vault_id: String,
+    ) -> ManageResult<Vec<OnePasswordItemDto>>;
+    async fn onepassword_fields(
+        &self,
+        id: Uuid,
+        vault_id: String,
+        item_id: String,
+    ) -> ManageResult<Vec<OnePasswordFieldDto>>;
+    async fn add_onepassword_secret(
+        &self,
+        name: String,
+        reference: crate::onepassword::OnePasswordSecretRef,
+    ) -> ManageResult<SecretDto>;
+
     /* connections */
     async fn list_connections(&self) -> ManageResult<Vec<ConnectionDto>>;
     async fn add_connection(&self, spec: ConnectionSpec) -> ManageResult<()>;
@@ -1557,6 +1694,109 @@ impl ManagementBackend for LocalBackend {
 
     async fn note_secret_copied(&self, id: Uuid) -> ManageResult<()> {
         Ok(self.broker.ui_note_secret_copied(&id)?)
+    }
+
+    async fn list_onepassword_integrations(&self) -> ManageResult<Vec<OnePasswordIntegrationDto>> {
+        Ok(self
+            .broker
+            .store
+            .list_onepassword_integrations()
+            .iter()
+            .map(crate::onepassword::OnePasswordIntegration::dto)
+            .collect())
+    }
+
+    async fn add_onepassword_integration(
+        &self,
+        label: String,
+        auth: crate::onepassword::OnePasswordAuth,
+        token: Option<SecretValue>,
+    ) -> ManageResult<OnePasswordIntegrationDto> {
+        let id = Uuid::new_v4();
+        self.broker
+            .store
+            .validate_new_onepassword_integration(
+                id,
+                &label,
+                &auth,
+                token.as_ref().map(|token| token.as_str()),
+            )
+            .await
+            .map_err(ManageError::from)?;
+        let result = self
+            .blocking(move |broker| {
+                broker
+                    .ui_add_onepassword_integration(id, &label, auth, token)
+                    .map(|integration| integration.dto())
+            })
+            .await;
+        if result.is_err() {
+            self.broker.store.invalidate_onepassword_integration(&id);
+        }
+        result
+    }
+
+    async fn replace_onepassword_token(
+        &self,
+        id: Uuid,
+        token: SecretValue,
+    ) -> ManageResult<OnePasswordIntegrationDto> {
+        self.broker
+            .store
+            .validate_onepassword_replacement_token(&id, token.as_str())
+            .await
+            .map_err(ManageError::from)?;
+        self.blocking(move |broker| {
+            broker
+                .ui_replace_onepassword_token(&id, token)
+                .map(|integration| integration.dto())
+        })
+        .await
+    }
+
+    async fn delete_onepassword_integration(&self, id: Uuid) -> ManageResult<()> {
+        self.blocking(move |broker| broker.ui_delete_onepassword_integration(&id).map(|_| ()))
+            .await
+    }
+
+    async fn onepassword_health(&self, id: Uuid) -> ManageResult<OnePasswordHealthDto> {
+        Ok(self.broker.onepassword_health(&id).await?)
+    }
+
+    async fn onepassword_vaults(&self, id: Uuid) -> ManageResult<Vec<OnePasswordVaultDto>> {
+        Ok(self.broker.onepassword_vaults(&id).await?)
+    }
+
+    async fn onepassword_items(
+        &self,
+        id: Uuid,
+        vault_id: String,
+    ) -> ManageResult<Vec<OnePasswordItemDto>> {
+        Ok(self.broker.onepassword_items(&id, &vault_id).await?)
+    }
+
+    async fn onepassword_fields(
+        &self,
+        id: Uuid,
+        vault_id: String,
+        item_id: String,
+    ) -> ManageResult<Vec<OnePasswordFieldDto>> {
+        Ok(self
+            .broker
+            .onepassword_fields(&id, &vault_id, &item_id)
+            .await?)
+    }
+
+    async fn add_onepassword_secret(
+        &self,
+        name: String,
+        reference: crate::onepassword::OnePasswordSecretRef,
+    ) -> ManageResult<SecretDto> {
+        self.blocking(move |broker| {
+            let meta = broker.ui_add_onepassword_secret(&name, reference)?;
+            Ok(secret_dto(&broker, &meta))
+        })
+        .await
     }
 
     async fn list_connections(&self) -> ManageResult<Vec<ConnectionDto>> {

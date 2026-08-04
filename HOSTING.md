@@ -66,6 +66,31 @@ Direct-endpoint secrets are standing broker credentials. Treat them like API
 keys, transport them only over the trusted network described above, and
 reissue them after suspected exposure.
 
+## 1Password-backed secrets
+
+Linked 1Password fields are resolved on the broker host after authorization;
+the managing desktop never lends its local 1Password session to a remote
+broker. Use one of these hosted configurations:
+
+- A read-only service-account token scoped to a dedicated vault. Multitool
+  stores the token in its platform vault and sends it once to the packaged SDK
+  helper over an inherited pipe. The token is never an argument or environment
+  variable.
+- A read-only 1Password Connect token plus an HTTPS Connect origin. Plain HTTP
+  is accepted only for a loopback Connect server. The broker talks to Connect
+  directly, refuses redirects, bounds responses, and keeps field values out of
+  catalog and management DTOs.
+
+The Linux image and npm platform packages include `multitool-onepassword`
+beside the broker executable. A custom deployment must do the same or set
+`MULTITOOL_ONEPASSWORD_SIDECAR` to an absolute helper path. Connect-only
+deployments do not start the helper.
+
+Give each broker its own service-account or Connect token. Rotating an
+integration token takes effect without rewriting linked secrets; deleting an
+integration is refused until its links are removed. Deleting a link never
+deletes or edits the upstream 1Password item.
+
 ## Recommended topology
 
 1. Run one broker per trust domain under a dedicated OS account.

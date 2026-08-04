@@ -16,10 +16,23 @@ pub const EVT_AGENTS: &str = "aka://agents-changed";
 pub const EVT_WIRINGS: &str = "aka://wirings-changed";
 pub const EVT_CONNECTIONS: &str = "aka://connections-changed";
 pub const EVT_SECRETS: &str = "aka://secrets-changed";
+pub const EVT_INTEGRATIONS: &str = "aka://integrations-changed";
 pub const EVT_ACTIVITY: &str = "aka://activity-appended";
 pub const EVT_ACTIVITY_CHANGED: &str = "aka://activity-changed";
 pub const EVT_MCP_AUTH: &str = "aka://mcp-auth-changed";
 pub const EVT_CONNECT_REQUESTED: &str = "aka://connect-requested";
+
+const RESYNC_TOPICS: &[&str] = &[
+    EVT_CONNECTIONS,
+    EVT_SECRETS,
+    EVT_INTEGRATIONS,
+    EVT_SESSIONS,
+    EVT_WIRINGS,
+    EVT_AGENTS,
+    EVT_ACTIVITY_CHANGED,
+    EVT_APPROVALS,
+    EVT_ELICITATIONS,
+];
 pub const EVT_APPROVALS: &str = "aka://approvals-changed";
 pub const EVT_ELICITATIONS: &str = "aka://elicitations-changed";
 
@@ -56,6 +69,10 @@ impl BrokerEvents for TauriEvents {
 
     fn secrets_changed(&self) {
         let _ = self.app.emit(EVT_SECRETS, ());
+    }
+
+    fn integrations_changed(&self) {
+        let _ = self.app.emit(EVT_INTEGRATIONS, ());
     }
 
     fn audit_appended(&self, entry: &AuditEntry) {
@@ -184,6 +201,9 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
         ManageEvent::SecretsChanged => {
             let _ = app.emit(EVT_SECRETS, ());
         }
+        ManageEvent::IntegrationsChanged => {
+            let _ = app.emit(EVT_INTEGRATIONS, ());
+        }
         ManageEvent::ActivityAppended { entry } => {
             let _ = app.emit(EVT_ACTIVITY, entry);
         }
@@ -211,16 +231,7 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
         // The stream (re)connected or dropped notifications: refetch
         // everything rather than trusting incremental state.
         ManageEvent::Resync => {
-            for topic in [
-                EVT_CONNECTIONS,
-                EVT_SECRETS,
-                EVT_SESSIONS,
-                EVT_WIRINGS,
-                EVT_AGENTS,
-                EVT_ACTIVITY_CHANGED,
-                EVT_APPROVALS,
-                EVT_ELICITATIONS,
-            ] {
+            for topic in RESYNC_TOPICS {
                 let _ = app.emit(topic, ());
             }
         }
@@ -230,6 +241,11 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resync_refreshes_integrations() {
+        assert!(RESYNC_TOPICS.contains(&EVT_INTEGRATIONS));
+    }
 
     #[test]
     fn browser_urls_require_https_off_machine() {

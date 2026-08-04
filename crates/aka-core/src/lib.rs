@@ -32,6 +32,7 @@ pub mod mcp_auth;
 pub mod mcp_host;
 pub(crate) mod mcp_refresh;
 pub mod oauth;
+pub mod onepassword;
 pub mod paths;
 pub mod policy;
 pub mod ratelimit;

@@ -21,6 +21,21 @@ pub enum CoreError {
     #[error("no such secret")]
     SecretNotFound,
 
+    #[error("no such 1Password integration")]
+    OnePasswordIntegrationNotFound,
+
+    #[error("1Password integration is used by secret(s): {}", .0.join(", "))]
+    OnePasswordIntegrationInUse(Vec<String>),
+
+    #[error("invalid 1Password integration: {0}")]
+    InvalidOnePasswordIntegration(String),
+
+    #[error("1Password ({code}): {message}")]
+    OnePassword { code: String, message: String },
+
+    #[error("linked 1Password secrets are read-only")]
+    ExternalSecretReadOnly,
+
     #[error("no such tool")]
     ConnectionNotFound,
 
