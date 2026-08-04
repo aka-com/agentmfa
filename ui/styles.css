@@ -83,6 +83,9 @@
   /* surfaces */
   --surface: rgba(246, 246, 249, 0.98);
   --main-surface: rgba(249, 249, 252, 0.98);
+  /* Corner radius of the tray panel. Shared by everything that has to stop at
+     the panel's edge, so the rounding cannot drift between them. */
+  --dropdown-radius: 13px;
   --panel: #fbfbfd;                     /* sheets, popovers */
   --field-bg: #fff;
   --code-block-bg: #fff;
@@ -177,10 +180,26 @@
   overflow: hidden;
 }.surface.dropdown-surface{
   background: var(--surface);
-  border-radius: 13px;
+  border-radius: var(--dropdown-radius);
   box-shadow: var(--shadow-float);
   backdrop-filter: blur(24px) saturate(170%);
   -webkit-backdrop-filter: blur(24px) saturate(170%);
+  /* .surface's overflow: hidden clips to the padding box, but WKWebView gives
+     the scroll pane (and any other backdrop-filtered or promoted descendant)
+     its own compositing layer, and those layers take the clip rect without its
+     radius. Whatever ends the panel — the last scrolled row, the Secrets
+     status bar — therefore paints square into the two bottom corners, which
+     read as opaque against the desktop the transparent window should show
+     there. The top corners escape it because the header does not scroll. A
+     clip-path applies in the compositor, where those layers do observe it. */
+  clip-path: inset(0 round var(--dropdown-radius));
+}
+  /* Second line of defence for the same corners: the band that ends the panel
+     carries the radius itself, so its background stops on the curve even
+     without the clip above. */
+.dropdown-surface > :last-child{
+  border-bottom-left-radius: var(--dropdown-radius);
+  border-bottom-right-radius: var(--dropdown-radius);
 }
   /* ---- brand mark (sidebar) --------------------------------------------- */
 .dd-appicon{
@@ -1042,6 +1061,12 @@
   /* ---- sheets ----------------------------------------------------------- */
 .sheet-backdrop{ position: fixed; inset: 0; z-index: 8; background: var(--backdrop); }
   .sheet-backdrop.over-sheet{ z-index: 10; }
+  /* The scrims cover the window edge to edge, and in the tray they are laid
+     over a rounded, transparent panel — sitting outside the surface, they miss
+     its clip, so without the radius they fill in its corners. The sibling
+     selector is what scopes this to the dropdown chrome: both scrims render
+     next to the surface, and only the tray's surface is rounded. */
+  .dropdown-surface ~ .sheet-backdrop{ border-radius: var(--dropdown-radius); }
   .sheet.discard-confirm{ z-index: 11; top: 96px; }
   .sheet{
   position: fixed; left: 14px; right: 14px; top: 34px; z-index: 9;
@@ -2396,6 +2421,8 @@
   align-items: flex-start; justify-content: center; padding: 12vh 16px 16px; }
 .palette-backdrop{ position: absolute; inset: 0; border: 0;
   background: var(--backdrop); cursor: default; }
+/* Rounded in the tray for the same reason as .sheet-backdrop. */
+.dropdown-surface ~ .palette-layer .palette-backdrop{ border-radius: var(--dropdown-radius); }
 .add-palette{ position: relative; width: 480px; max-width: 100%; max-height: 70vh;
   display: flex; flex-direction: column;
   background: var(--panel); border: 1px solid var(--line-mid); border-radius: 12px;
