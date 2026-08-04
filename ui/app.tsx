@@ -114,6 +114,7 @@ import {
   ENDPOINTABLE,
   EndpointAuthRow,
   EndpointExpiryRow,
+  EndpointOptionsMenu,
   EndpointStrip,
 } from '/src/features/endpoint-view';
 import { ConnectedToolsList } from '/src/features/connected-tools-list';
@@ -2189,11 +2190,8 @@ function ConnectionMenuItems({ connection: c }: {
   const test = state.connTests[c.id];
   const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
   const running = c.mcp_path ? Boolean(mcpStatus?.running) : Boolean(test?.running);
-  const endpointExpired = c.agent_access.endpoint?.expires_in_secs === 0
-    || Boolean(
-      c.agent_access.endpoint?.expires_at
-      && new Date(c.agent_access.endpoint.expires_at).getTime() <= Date.now(),
-    );
+  // Renew / rotate / revoke live on the Connect section's ⋯ menu, next to
+  // the address they manage — not on the tool's general options menu.
   return <>
     <button className="menu-item"
       data-act={c.mcp_path ? 'mcp-status' : 'test-conn'} data-id={c.id} disabled={running}>
@@ -2205,23 +2203,6 @@ function ConnectionMenuItems({ connection: c }: {
     <button className="menu-item danger" data-act="del-conn-ask" data-id={c.id}>
       <Icon markup={ICONS.trash} /> Delete tool
     </button>
-    {c.agent_access.enabled && c.agent_access.endpoint
-      ? <>
-          <div className="menu-divider" role="separator"></div>
-          {c.agent_access.endpoint.expires_at
-            ? <button className="menu-item" data-act="renew-endpoint"
-                data-conn={c.id}>
-                <Icon markup={ICONS.clockAlert} /> Renew connection address
-              </button>
-            : null}
-          {!endpointExpired
-            ? <button className="menu-item" data-act="reissue-endpoint-ask"
-                data-conn={c.id}><Icon markup={ICONS.refresh} /> Rotate connection address</button>
-            : null}
-          <button className="menu-item danger" data-act="revoke-endpoint-ask"
-            data-conn={c.id}><Icon markup={ICONS.x} /> Revoke connection address</button>
-        </>
-      : null}
   </>;
 }
 
@@ -2380,6 +2361,42 @@ function ConnectionAdvancedSection({ connection: c }: {
   </div>;
 }
 
+/** Fact rows for the selected tool (host, user, credential, …). Same
+ * disclosure pattern as Advanced so the pane stays short by default. */
+function ConnectionDetailsSection({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
+  const factRows = connectionFactRows(c);
+  if (!factRows.length) return null;
+  const open = state.connDetailDetailsOpen === c.id;
+  const live = liveCount(c);
+  return <div className="cd-sec cd-details">
+    <button className="adv-toggle" data-act="toggle-connection-details"
+      data-id={c.id} aria-expanded={open} aria-controls={`connection-details-${c.id}`}>
+      <span className="adv-toggle-icon" aria-hidden="true">
+        <Icon markup={ICONS.chevronDown} />
+      </span>
+      Details
+    </button>
+    {open
+      ? <div className="cd-details-body" id={`connection-details-${c.id}`}>
+          <div className="cd-facts">{factRows.map(([key, value]) =>
+            <div key={key} className="cd-fact">
+              <span className="cd-fact-k">{key}</span><code className="cd-fact-v">{value}</code>
+            </div>)}
+          </div>
+          {live
+            ? <div className="cd-live">{live} live session{live === 1 ? '' : 's'} ·{' '}
+                <button className="cd-live-link" data-act="tab" data-tab="activity">
+                  View in Activity Log
+                </button>
+              </div>
+            : null}
+        </div>
+      : null}
+  </div>;
+}
+
 function McpStatus({ connection: c }: { connection: ConnectionSummary }): ReactNode {
   const status = c.mcp_path ? state.mcpStatus[c.id] : undefined;
   const report = status && !status.running && !status.error ? status.report : undefined;
@@ -2456,19 +2473,23 @@ function ConnectionDetail({ connection: c }: {
     ? 'Connect to this server'
     : 'Connect to this service';
   const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
-    ? <div className="cd-sec">
-        <div className="cd-connect-lbl"><span>{connectTitle}</span></div>
+    ? <div className="cd-sec cd-connect">
+        <div className="cd-connect-lbl">
+          <span>{connectTitle}</span>
+          <EndpointOptionsMenu connection={c} />
+        </div>
         <EndpointStrip connection={c} withFormats />
       </div>
     : null;
   const mcpSection = enabled && c.mcp_path
-    ? <div className="cd-sec">
-        <div className="cd-connect-lbl"><span>Multitool MCP</span></div>
+    ? <div className="cd-sec cd-connect">
+        <div className="cd-connect-lbl">
+          <span>Connect to Multitool MCP</span>
+          {ENDPOINTABLE[c.type] ? <EndpointOptionsMenu connection={c} /> : null}
+        </div>
         {ENDPOINTABLE[c.type] ? <EndpointStrip connection={c} /> : null}
       </div>
     : null;
-  const factRows = connectionFactRows(c);
-  const live = liveCount(c);
   return <>
     <div className="cd-head">
       <span className={`cat-ico kind-${connectionKind(c)}`} aria-hidden="true">
@@ -2493,23 +2514,7 @@ function ConnectionDetail({ connection: c }: {
     {c.mcp_path ? <>{mcpSection}{endpointSection}</> : <>{endpointSection}{mcpSection}</>}
     <ConfirmationSection connection={c} />
     <ConnectionAdvancedSection connection={c} />
-    {factRows.length
-      ? <div className="cd-sec">
-          <div className="cd-connect-lbl"><span>Details</span></div>
-          <div className="cd-facts">{factRows.map(([key, value]) =>
-            <div key={key} className="cd-fact">
-              <span className="cd-fact-k">{key}</span><code className="cd-fact-v">{value}</code>
-            </div>)}
-          </div>
-          {live
-            ? <div className="cd-live">{live} live session{live === 1 ? '' : 's'} ·{' '}
-                <button className="cd-live-link" data-act="tab" data-tab="activity">
-                  View in Activity Log
-                </button>
-              </div>
-            : null}
-        </div>
-      : null}
+    <ConnectionDetailsSection connection={c} />
     <McpStatus connection={c} />
   </>;
 }
@@ -6693,9 +6698,7 @@ function requestCloseSheet(): void {
 }
 
 /* --------------------------------- events -------------------------------- */
-/** Keep the pointer-anchored tool menu wholly inside the current viewport.
- * Measuring the rendered menu handles both the short base menu and the
- * taller variant with direct-connection actions. */
+/** Keep the pointer-anchored tool menu wholly inside the current viewport. */
 function positionConnContextMenu(): void {
   const point = state.connMenuPoint;
   const wrap = document.querySelector<HTMLElement>('.conn-context-menu-wrap');
@@ -6808,6 +6811,11 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.epOptsMenuOpen && !target?.closest('.ep-opts-wrap')) {
+    state.epOptsMenuOpen = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.formMenuOpen && !target?.closest('.cred-select') && !target?.closest('.cred-menu')) {
     state.formMenuOpen = null;
     if (!btn) { render(); return; }
@@ -6829,6 +6837,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.connMenuOpen = null;
       state.connMenuPoint = null;
       state.epMenuOpen = null;
+      state.epOptsMenuOpen = null;
       // The slide-over is a transient view; coming back to Tools starts
       // at the list, not with the panel already over it.
       state.connDetailOpen = false;
@@ -6946,6 +6955,8 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'toggle-conn-menu':
       state.connMenuPoint = null;
       state.connMenuOpen = state.connMenuOpen === id ? null : id;
+      state.epOptsMenuOpen = null;
+      state.epMenuOpen = null;
       render();
       break;
     case 'issue-endpoint':
@@ -6969,12 +6980,14 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'reissue-endpoint-ask':
       state.connMenuOpen = null;
       state.connMenuPoint = null;
+      state.epOptsMenuOpen = null;
       state.confirm = { kind: 'reissue-endpoint', id: btn.dataset.conn || '' };
       render();
       break;
     case 'renew-endpoint': {
       state.connMenuOpen = null;
       state.connMenuPoint = null;
+      state.epOptsMenuOpen = null;
       const connectionId = btn.dataset.conn || '';
       if (await run(() => invoke('renew_endpoint', { connectionId }))) {
         toast('Connection address renewed for 30 days');
@@ -6987,6 +7000,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'revoke-endpoint-ask':
       state.connMenuOpen = null;
       state.connMenuPoint = null;
+      state.epOptsMenuOpen = null;
       state.confirm = { kind: 'revoke-endpoint', id: btn.dataset.conn || '' };
       render();
       break;
@@ -7002,14 +7016,25 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       }
       break;
     }
-    case 'expand-endpoint': {
+    case 'toggle-endpoint': {
       const id = btn.dataset.conn;
-      if (id) { state.epExpanded[id] = true; render(); }
+      if (id) {
+        state.epExpanded = { ...state.epExpanded, [id]: !state.epExpanded[id] };
+        render();
+      }
       break;
     }
     case 'toggle-ep-menu': {
       const id = btn.dataset.conn ?? null;
       state.epMenuOpen = state.epMenuOpen === id ? null : id;
+      state.epOptsMenuOpen = null;
+      render();
+      break;
+    }
+    case 'toggle-ep-opts-menu': {
+      const id = btn.dataset.conn ?? null;
+      state.epOptsMenuOpen = state.epOptsMenuOpen === id ? null : id;
+      state.epMenuOpen = null;
       render();
       break;
     }
@@ -7237,6 +7262,10 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
     case 'toggle-connection-advanced':
       state.connDetailAdvancedOpen = state.connDetailAdvancedOpen === id ? null : id;
+      render();
+      break;
+    case 'toggle-connection-details':
+      state.connDetailDetailsOpen = state.connDetailDetailsOpen === id ? null : id;
       render();
       break;
     case 'open-add-palette':
@@ -8432,6 +8461,7 @@ function handleAppKeyDown(e: KeyboardEvent): void {
       return;
     }
     if (state.epMenuOpen) { state.epMenuOpen = null; render(); return; }
+    if (state.epOptsMenuOpen) { state.epOptsMenuOpen = null; render(); return; }
     // The detail slide-over only exists in the narrow layout; in the wide
     // layout the flag is inert and Escape passes through.
     if (state.connDetailOpen && window.matchMedia(NARROW_LAYOUT).matches) {
@@ -8754,6 +8784,8 @@ async function boot() {
     state.addPalette = null;
     state.connMenuOpen = null;
     state.connMenuPoint = null;
+    state.epMenuOpen = null;
+    state.epOptsMenuOpen = null;
     render();
   });
 }

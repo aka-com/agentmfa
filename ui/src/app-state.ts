@@ -241,6 +241,8 @@ export interface AppState {
   reveal: Record<string, string>;
   epExpanded: Record<string, boolean>;
   epMenuOpen: string | null;
+  /** ⋯ menu on the Connect section label (renew / rotate / revoke address). */
+  epOptsMenuOpen: string | null;
   sshSockets: Record<string, string>;
   sheet: SheetState | null;
   draft: ConnectionDraft;
@@ -250,6 +252,8 @@ export interface AppState {
   formMenuOpen: string | null;
   connAdvancedOpen: boolean;
   connDetailAdvancedOpen: string | null;
+  /** Per-connection open state for the Details disclosure under Advanced. */
+  connDetailDetailsOpen: string | null;
   connType: ConnectionType;
   connEntryName: string | null;
   connPreset: ConnectionPreset | null;
@@ -358,6 +362,7 @@ function createInitialState(): AppState {
     reveal: {},
     epExpanded: {},
     epMenuOpen: null,
+    epOptsMenuOpen: null,
     sshSockets: {},
     sheet: null,
     draft: {},
@@ -367,6 +372,7 @@ function createInitialState(): AppState {
     formMenuOpen: null,
     connAdvancedOpen: false,
     connDetailAdvancedOpen: null,
+    connDetailDetailsOpen: null,
     connType: 'api',
     connEntryName: null,
     connPreset: null,

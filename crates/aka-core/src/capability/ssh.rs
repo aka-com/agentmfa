@@ -790,10 +790,10 @@ pub async fn test_reachability(
     let has_key = SshSigner::load_optional(store, connection).await?.is_some();
     let stream = tokio::net::TcpStream::connect((host.as_str(), *port))
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             TestError::new(
                 TestErrorKind::Unreachable,
-                format!("Could not reach {host}:{port}: {e}"),
+                format!("Could not reach {host}:{port}"),
             )
         })?;
     let banner = read_version_banner(stream).await?;
@@ -985,7 +985,6 @@ fn grade_login(
         host,
         port,
         user,
-        destination,
         ..
     } = &connection.config
     else {
@@ -1080,21 +1079,12 @@ fn grade_login(
         || log_lower.contains("connection timed out")
         || log_lower.contains("operation timed out")
         || log_lower.contains("no route to host")
+        || log_lower.contains("nodename nor servname provided")
+        || log_lower.contains("name or service not known")
     {
-        // Named here because it is the one unreachable case the broker causes
-        // rather than observes: the test (and every emitted invocation) sets
-        // `ProxyJump=none`, since the agent cannot authenticate a jump hop.
-        let jump_hint = if destination.is_some() {
-            " If this destination is only reachable through a ProxyJump host, \
-             Multitool cannot broker it: the jump hop is a separate SSH login \
-             against the jump host, and a tool pins one host key. Import the \
-             jump host as its own tool and connect in two hops."
-        } else {
-            ""
-        };
         return Err(TestError::new(
             TestErrorKind::Unreachable,
-            format!("Could not reach {host}:{port}.{jump_hint}"),
+            format!("Could not reach {host}:{port}"),
         ));
     }
     Err(TestError::new(

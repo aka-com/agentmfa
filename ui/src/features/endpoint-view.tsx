@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { state } from '../app-state';
 import { ENDPOINT_FORMATS } from '../endpoint-formats';
-import { endpointExpired } from '../endpoint-expiry';
+import { endpointExpired, expiredAgoLabel } from '../endpoint-expiry';
 import { directEndpointAddress, sshDirectCommand } from '../connect-agents';
 import { AppIcon } from '../icon';
 import type { ConnectionSummary, ConnectionType } from '../types';
@@ -70,6 +70,64 @@ function EndpointCopyMenu({ connection: c, address, copyTitle }: {
   </div>;
 }
 
+/**
+ * Lifecycle actions for an issued direct endpoint: renew (when expiry is
+ * opted in), rotate, revoke. Lives on the "Connect to this…" section label
+ * rather than the tool's general ⋯ menu so address management stays next to
+ * the address itself.
+ */
+export function EndpointOptionsMenu({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
+  const endpoint = c.agent_access.endpoint;
+  if (!endpoint || !ENDPOINTABLE[c.type]) return null;
+  const open = state.epOptsMenuOpen === c.id;
+  const expired = endpointExpired(endpoint.expires_at, endpoint.expires_in_secs);
+  const expiryDate = new Date(endpoint.expires_at);
+  // Empty expires_at means expiry is off (the default) — no date or Renew.
+  const expiryOn = Boolean(endpoint.expires_at) && !Number.isNaN(expiryDate.getTime());
+  const dateLabel = expiryOn
+    ? `${expired ? 'Expired' : 'Expires'} ${expiryDate.toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      })}`
+    : null;
+  return <div className="tile-menu-wrap ep-opts-wrap">
+    <button className={`icon-btn tile-menu-btn ${open ? 'on' : ''}`}
+      title="Connection address options"
+      aria-label={`Connection address options for ${c.name}`}
+      aria-haspopup="menu" aria-expanded={open}
+      data-act="toggle-ep-opts-menu" data-conn={c.id}>
+      <AppIcon icon={ICONS.ellipsis} />
+    </button>
+    {open
+      ? <div className="tile-menu ep-opts-menu" role="menu"
+          aria-label={`Connection address options for ${c.name}`}>
+          {dateLabel
+            ? <div className="menu-meta" role="presentation">{dateLabel}</div>
+            : null}
+          {expiryOn
+            ? <button className="menu-item" role="menuitem"
+                data-act="renew-endpoint" data-conn={c.id}>
+                <AppIcon icon={ICONS.clockAlert} /> Renew connection address
+              </button>
+            : null}
+          {!expired
+            ? <button className="menu-item" role="menuitem"
+                data-act="reissue-endpoint-ask" data-conn={c.id}>
+                <AppIcon icon={ICONS.refresh} /> Rotate connection address
+              </button>
+            : null}
+          <button className="menu-item danger" role="menuitem"
+            data-act="revoke-endpoint-ask" data-conn={c.id}>
+            <AppIcon icon={ICONS.x} /> Revoke connection address
+          </button>
+        </div>
+      : null}
+  </div>;
+}
+
 export function EndpointStrip({ connection: c, withFormats = false }: {
   connection: ConnectionSummary;
   withFormats?: boolean;
@@ -84,17 +142,11 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
   }
   const copied = state.copied === `ep:${c.id}`;
   const expired = endpointExpired(endpoint.expires_at, endpoint.expires_in_secs);
-  const expiryDate = new Date(endpoint.expires_at);
-  // An endpoint without a deadline (expiry toggled off — the default)
-  // carries an empty expires_at; it gets no expiry line at all.
-  const expiryKnown = !Number.isNaN(expiryDate.getTime());
-  const expiryLabel = expired
-    ? 'Expired'
-    : `Expires ${expiryDate.toLocaleDateString(undefined, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      })}`;
+  // Future deadlines live in the section's ⋯ menu. The strip only surfaces
+  // a problem: the address has already stopped working.
+  const expiredLabel = expired
+    ? expiredAgoLabel(endpoint.expires_at, endpoint.expires_in_secs)
+    : '';
   const expanded = Boolean(state.epExpanded[c.id]);
   const endpointAddress = directEndpointAddress(c.type, endpoint, state.sshSockets[c.id]);
   const endpointText = endpointAddress
@@ -116,32 +168,24 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
   let address: ReactNode;
   if (!endpointText) {
     address = <span className="ep-addr ep-addr-hidden">Connection address unavailable</span>;
-  } else if (expanded) {
-    address = <div className="ep-field">
-      <code className="ep-addr"><BreakableAddress address={endpointText} /></code>
-      {copyButton}
-    </div>;
   } else {
-    address = <div className="ep-field collapsed">
-      <button className="ep-addr ep-addr-masked" title="Show the full address"
-        aria-label={`Show the full connection address for ${c.name}`}
-        aria-expanded={false} data-act="expand-endpoint" data-conn={c.id}>
-        {maskedEndpoint(endpointText)}
+    // Both states share BreakableAddress + overflow-wrap: break-word so the
+    // layout does not jump when the secret is revealed; only the secret
+    // characters change. Click toggles reveal either way.
+    const shown = expanded ? endpointText : maskedEndpoint(endpointText);
+    address = <div className={`ep-field${expanded ? '' : ' collapsed'}`}>
+      <button className="ep-addr" title={expanded ? 'Hide the secret in the address' : 'Show the full address'}
+        aria-label={`${expanded ? 'Hide' : 'Show'} the full connection address for ${c.name}`}
+        aria-expanded={expanded} data-act="toggle-endpoint" data-conn={c.id}>
+        <BreakableAddress address={shown} />
       </button>
       {copyButton}
     </div>;
   }
   return <>
     <div className="ep-strip">{address}</div>
-    {expiryKnown || expired
-      ? <div className={`ep-expiry ${expired ? 'expired' : ''}`}>
-          <span>{expiryLabel}</span>
-          {expiryKnown
-            ? <button className="btn ghost sm" data-act="renew-endpoint" data-conn={c.id}>
-                {expired ? 'Renew address' : 'Renew'}
-              </button>
-            : null}
-        </div>
+    {expiredLabel
+      ? <div className="ep-expiry expired"><span>{expiredLabel}</span></div>
       : null}
   </>;
 }

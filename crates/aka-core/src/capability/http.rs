@@ -1119,7 +1119,13 @@ fn test_request_error(error: reqwest::Error, host: &str) -> TestError {
         TestErrorKind::Timeout => format!("The server at {host} did not answer in time"),
         _ => format!("The request to {host} failed"),
     };
-    TestError::new(kind, format!("{cause}: {}", error.without_url()))
+    // Unreachable / timeout already name the host; raw transport prose
+    // (resolver strings, "error sending request for url…") only dilutes them.
+    let detail = match kind {
+        TestErrorKind::Unreachable | TestErrorKind::Timeout => cause,
+        _ => format!("{cause}: {}", error.without_url()),
+    };
+    TestError::new(kind, detail)
 }
 
 fn broker_error(status: u16, reason: ErrorReason, detail: impl Into<String>) -> ExecOutcome {

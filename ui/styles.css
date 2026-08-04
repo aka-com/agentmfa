@@ -1499,13 +1499,30 @@
   border-top: 1px solid var(--line-soft);
 }
 /* Every section headline in the panel speaks to the user in sentence case
-   and the text ink — "Connect to this database", "Multitool MCP",
-   "Details" — one register, no tracked-caps machinery labels. */
+   and the text ink — "Connect to this database", "Connect to Multitool MCP"
+   — one register, no tracked-caps machinery labels. */
 .cd-connect-lbl {
   display: flex; align-items: center; gap: 7px; margin-bottom: 8px;
   font-size: 0.8125rem; font-weight: 600;
 }
+/* No hairline under the connect address block: confirm continues the same
+   group without a second rule right under the field. */
+.cd-connect + .cd-sec::before { display: none; }
+.cd-connect + .cd-sec { margin-top: 12px; padding-top: 0; }
+.cd-connect-lbl > span { flex: 1; min-width: 0; }
 .cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
+/* Address lifecycle ⋯ sits on the Connect label; menu opens below-right. */
+.cd-connect-lbl .ep-opts-wrap { margin-left: auto; }
+.cd-connect-lbl .ep-opts-wrap .tile-menu-btn {
+  width: 22px; height: 22px; color: var(--muted);
+}
+.cd-connect-lbl .ep-opts-wrap .tile-menu-btn svg { width: 15px; height: 15px; }
+.ep-opts-menu { min-width: 220px; }
+/* Non-action row: the opt-in expiry date at the top of the address menu. */
+.menu-meta {
+  padding: 6px 9px 4px; font-size: 0.75rem; color: var(--muted);
+  cursor: default; -webkit-user-select: none; user-select: none;
+}
 .cd-help { margin-top: 8px; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
 /* Traffic confirmation: a labelled switch row, so the promise ("Confirm
    each request") sits beside the control that makes it rather than in a
@@ -1538,13 +1555,17 @@
   margin-top: 0; padding-top: 0; border-top: 0;
 }
 .cd-advanced-options > .cd-confirm-row + .cd-confirm-row { margin-top: 12px; }
+/* Details sits under Advanced with the same disclosure chrome. */
+.cd-details { margin-top: 12px; padding-top: 0; }
+.cd-details::before { display: none; }
+.cd-details-body { margin-top: 12px; }
 .cd-tool-scope { align-items: center; }
 .cd-tool-scope .cat-meta-tools { flex: 0 0 auto; }
 .cd-off-note { margin-top: 12px; }
 /* The Details card: the target's parts spelled out as label–value rows.
    Values are mono and wrap; labels stay put. */
 .cd-facts {
-  margin-top: 8px; padding: 2px 12px;
+  margin-top: 0; padding: 2px 12px;
   background: var(--wash); border: 1px solid var(--line-soft); border-radius: 9px;
 }
 .cd-fact { display: flex; justify-content: space-between; gap: 14px; padding: 6px 0; font-size: 0.75rem; }
@@ -2249,8 +2270,9 @@
 /* Direct-endpoint lifecycle strip. Absent: just the issue button. Issued:
    the pasteable address in an input-like field with its Copy button always
    showing — copying is the one thing everyone does with this string, so
-   the affordance is explicit rather than a hover reveal. Reissue/revoke
-   stay behind the row's options menu. */
+   the affordance is explicit rather than a hover reveal. Renew/rotate/revoke
+   live on the Connect section's ⋯ menu; the strip only flags an already-
+   expired address. */
 .ep-strip{ display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .ep-strip .ep-field{
   flex: 1; min-width: 0; display: flex; flex-direction: column;
@@ -2259,12 +2281,18 @@
   background: var(--field-bg); border: 1px solid var(--line); border-radius: 9px;
 }
 /* The complete DSN never truncates — it wraps at its own punctuation. The
-   markup carries <wbr> after separators (breakableAddress), so break-word
-   only fires mid-identifier when a single segment outgrows the line. */
+   markup carries <wbr> after separators (BreakableAddress), so break-word
+   only fires mid-identifier when a single segment outgrows the line. Reveal
+   and mask share this rule so clicking does not reflow mid-word breaks. */
 .ep-strip .ep-field .ep-addr{
-  flex: 1; min-width: 0; overflow-wrap: break-word;
-  color: var(--ink-2); font-size: 0.75rem; line-height: 1.35;
+  flex: 1; min-width: 0; width: 100%; padding: 0; border: none;
+  background: none; cursor: pointer; text-align: left;
+  overflow-wrap: break-word; word-break: normal;
+  color: var(--ink-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem; line-height: 1.35;
 }
+.ep-strip .ep-field .ep-addr:hover{ color: var(--ink); }
 /* Copy sits below the DSN, at the field's right edge, so the address gets
    the field's full width. The Copy ▾ variant nests the button in a wrap
    (its menu's positioning context) — align the wrap, not just the button.
@@ -2275,26 +2303,12 @@
   justify-content: center; gap: 5px; width: 76px; white-space: nowrap;
 }
 .ep-strip .ep-field .ep-copy svg{ width: 14px; height: 14px; }
-/* Collapsed differs only in masking: the address still wraps at full field
-   width with Copy below-right of it (same stacked layout as expanded — a
-   long SSH command beside a centered button squeezed both into columns). */
-/* The masked line wraps rather than truncates — the address is the
-   section's payload, so every character stays visible even collapsed. */
-.ep-strip .ep-field .ep-addr-masked{
-  flex: 1; min-width: 0; padding: 0; border: none;
-  background: none; cursor: pointer; text-align: left;
-  color: var(--ink-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.75rem; line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-.ep-strip .ep-field .ep-addr-masked:hover{ color: var(--ink); }
 .ep-strip .ep-addr-hidden{ color: var(--muted); font-size: 0.75rem; }
 .ep-expiry{
   display: flex; align-items: center; gap: 8px; margin-top: 8px;
   color: var(--muted); font-size: 0.75rem;
 }
 .ep-expiry.expired{ color: var(--danger); font-weight: 600; }
-.ep-expiry .btn{ min-height: 24px; padding: 2px 7px; }
 /* One Copy ▾ control replaces the per-application chip row: the button
    copies nothing by itself, its menu lists the plain address and every
    client rendering (psql, libpq keywords, .env, ssh config, …). */
