@@ -279,6 +279,8 @@ pub struct OnePasswordSecretSourceDto {
     pub section_label: Option<String>,
     pub field_id: String,
     pub field_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

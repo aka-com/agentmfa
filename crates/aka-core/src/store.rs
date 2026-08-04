@@ -1964,6 +1964,7 @@ mod tests {
                     section_label: None,
                     field_id: "password".into(),
                     field_label: "password".into(),
+                    field_type: Some("Concealed".into()),
                 },
             )
             .unwrap();

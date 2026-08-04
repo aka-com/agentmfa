@@ -503,6 +503,7 @@ pub async fn add_onepassword_secret(
     section_label: Option<String>,
     field_id: String,
     field_label: String,
+    field_type: Option<String>,
 ) -> CmdResult<aka_api::SecretDto> {
     let reference = aka_core::onepassword::OnePasswordSecretRef {
         integration_id: parse_id(&integration_id)?,
@@ -514,6 +515,7 @@ pub async fn add_onepassword_secret(
         section_label,
         field_id,
         field_label,
+        field_type,
     };
     state
         .brokers

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	onepassword "github.com/1password/onepassword-sdk-go"
@@ -56,6 +57,7 @@ type catalogPayload struct {
 	ItemID    string  `json:"item_id"`
 	SectionID *string `json:"section_id"`
 	FieldID   string  `json:"field_id"`
+	FieldType string  `json:"field_type,omitempty"`
 }
 
 type vaultResult struct {
@@ -208,18 +210,21 @@ func handle(client *onepassword.Client, req request) (any, error) {
 		if payload.VaultID == "" || payload.ItemID == "" || payload.FieldID == "" {
 			return nil, errors.New("incomplete secret reference")
 		}
-		parts := []string{payload.VaultID, payload.ItemID}
-		if payload.SectionID != nil {
-			parts = append(parts, *payload.SectionID)
+		fieldType := payload.FieldType
+		if fieldType == "" {
+			item, err := client.Items().Get(ctx, payload.VaultID, payload.ItemID)
+			if err != nil {
+				return nil, err
+			}
+			var found bool
+			fieldType, found = matchingFieldType(item.Fields, payload)
+			if !found {
+				return nil, &providerFailure{
+					code: "not_found", message: "the linked 1Password field no longer exists",
+				}
+			}
 		}
-		parts = append(parts, payload.FieldID)
-		for index := range parts {
-			parts[index] = url.PathEscape(parts[index])
-		}
-		reference := "op://" + parts[0]
-		for _, part := range parts[1:] {
-			reference += "/" + part
-		}
+		reference := buildSecretReference(payload, fieldType)
 		resolved, err := client.Secrets().ResolveAll(ctx, []string{reference})
 		if err != nil {
 			return nil, err
@@ -243,6 +248,46 @@ func handle(client *onepassword.Client, req request) (any, error) {
 	default:
 		return nil, fmt.Errorf("unsupported operation")
 	}
+}
+
+func sameSection(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func matchingFieldType(fields []onepassword.ItemField, payload catalogPayload) (string, bool) {
+	for _, field := range fields {
+		if field.ID == payload.FieldID && sameSection(field.SectionID, payload.SectionID) {
+			return string(field.FieldType), true
+		}
+	}
+	return "", false
+}
+
+func isTOTPFieldType(fieldType string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(fieldType))
+	return normalized == "totp" || normalized == "otp"
+}
+
+func buildSecretReference(payload catalogPayload, fieldType string) string {
+	parts := []string{payload.VaultID, payload.ItemID}
+	if payload.SectionID != nil {
+		parts = append(parts, *payload.SectionID)
+	}
+	parts = append(parts, payload.FieldID)
+	for index := range parts {
+		parts[index] = url.PathEscape(parts[index])
+	}
+	reference := "op://" + parts[0]
+	for _, part := range parts[1:] {
+		reference += "/" + part
+	}
+	if isTOTPFieldType(fieldType) {
+		reference += "?attribute=otp"
+	}
+	return reference
 }
 
 func writeProviderError(encoder *json.Encoder, id uint64, err error) {
@@ -276,6 +321,8 @@ func resolveFailure(err onepassword.ResolveReferenceError) error {
 		onepassword.ResolveReferenceErrorTypeVariantItemNotFound,
 		onepassword.ResolveReferenceErrorTypeVariantNoMatchingSections:
 		return &providerFailure{code: "not_found", message: "the linked 1Password field no longer exists"}
+	case onepassword.ResolveReferenceErrorTypeVariantUnableToGenerateTOTPCode:
+		return &providerFailure{code: "request_failed", message: "1Password could not generate the one-time password"}
 	default:
 		return &providerFailure{code: "request_failed", message: "the 1Password field could not be resolved"}
 	}

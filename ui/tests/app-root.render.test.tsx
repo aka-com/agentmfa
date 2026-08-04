@@ -158,6 +158,10 @@ test('the 1Password sheet links a field through all three steps', { timeout: 8_0
     assert.ok(input);
     return input;
   });
+  const unsupported = [...dialog.querySelectorAll<HTMLElement>('.onepassword-field')]
+    .find((row) => row.querySelector('b')?.textContent === 'single sign-on');
+  assert.ok(unsupported?.classList.contains('unsupported'));
+  assert.equal(unsupported?.querySelector<HTMLInputElement>('input[type="checkbox"]')?.disabled, true);
   testingLibrary.fireEvent.click(checkbox);
   const alias = dialog.querySelector<HTMLInputElement>('.onepassword-alias input');
   assert.ok(alias?.value);

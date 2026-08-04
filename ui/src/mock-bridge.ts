@@ -259,6 +259,7 @@ interface MockArgs {
   sectionLabel?: string | null;
   fieldId?: string;
   fieldLabel?: string;
+  fieldType?: string;
 }
 
 const mockOnePasswordVaults: OnePasswordVault[] = [
@@ -283,6 +284,7 @@ const mockOnePasswordFields: Record<string, OnePasswordField[]> = {
     { id: 'username', title: 'username', section_id: null, section_title: null, field_type: 'string' },
     { id: 'credential', title: 'API key', section_id: null, section_title: null, field_type: 'concealed' },
     { id: 'webhook', title: 'Signing secret', section_id: 'webhooks', section_title: 'Webhooks', field_type: 'concealed' },
+    { id: 'sso', title: 'single sign-on', section_id: null, section_title: null, field_type: 'Unsupported' },
   ],
   'item-github': [
     { id: 'username', title: 'username', section_id: null, section_title: null, field_type: 'string' },
@@ -944,6 +946,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         section_label: args.sectionLabel ?? null,
         field_id: args.fieldId ?? '',
         field_label: args.fieldLabel ?? '',
+        field_type: args.fieldType ?? null,
       });
       db.secrets.push(secret);
       emit('aka://secrets-changed', {});

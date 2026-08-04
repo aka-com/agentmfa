@@ -68,6 +68,7 @@ import type { SampleTool } from '/src/samples';
 import { activityIdentity } from '/src/activity';
 import {
   onePasswordAliasError,
+  onePasswordFieldIsUnsupported,
   onePasswordSelectionKey,
   suggestedOnePasswordAlias,
 } from '/src/onepassword';
@@ -1635,6 +1636,11 @@ function toggleOnePasswordField(fieldId: string): void {
   const field = flow?.fields.find((candidate) => candidate.id === fieldId);
   if (!flow || !vault || !item || !field) return;
   const key = onePasswordSelectionKey(vault, item, field);
+  if (onePasswordFieldIsUnsupported(field)) {
+    delete flow.selections[key];
+    render();
+    return;
+  }
   if (flow.selections[key]) delete flow.selections[key];
   else {
     const unavailable = [
@@ -1673,6 +1679,7 @@ async function saveOnePasswordSelections(): Promise<void> {
         sectionLabel: selection.field.section_title ?? null,
         fieldId: selection.field.id,
         fieldLabel: selection.field.title,
+        fieldType: selection.field.field_type,
       });
       if (!brokerEpochIsCurrent(epoch) || state.onepasswordFlow !== flow) return;
       delete flow.selections[selection.key];
@@ -1833,12 +1840,16 @@ function OnePasswordChooseStep(): ReactNode {
               const key = flow.vault && flow.item
                 ? onePasswordSelectionKey(flow.vault, flow.item, field) : '';
               const selection = flow.selections[key];
-              return <div className={`onepassword-field ${selection ? 'selected' : ''}`} key={key}>
-                <label className="onepassword-field-check">
+              const unsupported = onePasswordFieldIsUnsupported(field);
+              return <div className={`onepassword-field${selection ? ' selected' : ''}${unsupported ? ' unsupported' : ''}`}
+                key={key}>
+                <label className="onepassword-field-check"
+                  title={unsupported ? 'This 1Password field type is not available to Multitool.' : undefined}>
                   <input type="checkbox" checked={Boolean(selection)}
+                    disabled={unsupported}
                     onChange={() => toggleOnePasswordField(field.id)} />
                   <span><b>{field.title}</b>
-                    <small>{field.section_title || field.field_type}</small></span>
+                    <small>{unsupported ? 'Unsupported' : field.section_title || field.field_type}</small></span>
                 </label>
                 <div className="onepassword-alias">
                   {selection ? <>

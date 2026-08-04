@@ -990,6 +990,8 @@ pub struct OnePasswordSecretAddBody {
     pub section_label: Option<String>,
     pub field_id: String,
     pub field_label: String,
+    #[serde(default)]
+    pub field_type: Option<String>,
 }
 
 impl OnePasswordSecretAddBody {
@@ -1004,6 +1006,7 @@ impl OnePasswordSecretAddBody {
             section_label: self.section_label,
             field_id: self.field_id,
             field_label: self.field_label,
+            field_type: self.field_type,
         };
         (self.name, reference)
     }

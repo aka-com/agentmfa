@@ -49,3 +49,38 @@ func TestResolveFailureMapsMissingCoordinates(t *testing.T) {
 		t.Fatalf("ambiguous item mapped to %q", code)
 	}
 }
+
+func TestBuildSecretReferenceRequestsFreshTOTPCode(t *testing.T) {
+	section := "authentication"
+	payload := catalogPayload{
+		VaultID: "vault/id", ItemID: "login", SectionID: &section, FieldID: "one-time password",
+	}
+	got := buildSecretReference(payload, "Totp")
+	want := "op://vault%2Fid/login/authentication/one-time%20password?attribute=otp"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestBuildSecretReferenceDoesNotAddOTPAttributeToOrdinaryFields(t *testing.T) {
+	payload := catalogPayload{VaultID: "vault", ItemID: "login", FieldID: "password"}
+	got := buildSecretReference(payload, "Concealed")
+	want := "op://vault/login/password"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestMatchingFieldTypeSupportsLegacyReferences(t *testing.T) {
+	section := "authentication"
+	fields := []onepassword.ItemField{
+		{ID: "otp", SectionID: &section, FieldType: onepassword.ItemFieldTypeTOTP},
+	}
+	got, ok := matchingFieldType(fields, catalogPayload{FieldID: "otp", SectionID: &section})
+	if !ok || got != "Totp" {
+		t.Fatalf("got %q, %v; want Totp, true", got, ok)
+	}
+	if _, ok := matchingFieldType(fields, catalogPayload{FieldID: "otp"}); ok {
+		t.Fatal("matched a field from the wrong section")
+	}
+}

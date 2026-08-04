@@ -6,6 +6,11 @@ export function onePasswordFieldKey(field: OnePasswordField): string {
   return `${field.section_id ?? ''}:${field.id}`;
 }
 
+export function onePasswordFieldIsUnsupported(field: OnePasswordField): boolean {
+  const fieldType = field.field_type.trim().toLowerCase();
+  return fieldType === 'unsupported' || fieldType === 'unknown';
+}
+
 export function onePasswordSelectionKey(
   vault: OnePasswordVault,
   item: OnePasswordItem,

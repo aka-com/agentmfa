@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   onePasswordAliasError,
   onePasswordFieldKey,
+  onePasswordFieldIsUnsupported,
   onePasswordSelectionKey,
   suggestedOnePasswordAlias,
 } from '../src/onepassword';
@@ -23,6 +24,12 @@ test('1Password fields have stable section-aware selection keys', () => {
     onePasswordSelectionKey({ id: 'vault-1', title: 'Work' }, item, field),
     'vault-1:item-1:oauth:credential',
   );
+});
+
+test('1Password unsupported fields are recognized across provider spellings', () => {
+  assert.equal(onePasswordFieldIsUnsupported({ ...field, field_type: 'Unsupported' }), true);
+  assert.equal(onePasswordFieldIsUnsupported({ ...field, field_type: 'UNKNOWN' }), true);
+  assert.equal(onePasswordFieldIsUnsupported({ ...field, field_type: 'Totp' }), false);
 });
 
 test('1Password alias suggestions are valid and avoid existing names', () => {

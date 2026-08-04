@@ -207,11 +207,13 @@ async fn onepassword_integrations_and_links_cross_the_manage_boundary_without_va
                 "item_label": "GitHub",
                 "field_id": "password",
                 "field_label": "password",
+                "field_type": "CONCEALED",
             })),
         )
         .await;
     assert_eq!(status, 200, "{linked}");
     assert_eq!(linked["source"]["kind"], "one_password");
+    assert_eq!(linked["source"]["field_type"], "CONCEALED");
     assert!(linked.get("value").is_none());
     let secret_id = linked["id"].as_str().unwrap();
 

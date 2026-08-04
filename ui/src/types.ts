@@ -21,6 +21,7 @@ export interface SecretSummary {
         section_label?: string | null;
         field_id: string;
         field_label: string;
+        field_type?: string | null;
       };
 }
 
@@ -662,6 +663,7 @@ export interface CommandMap {
     sectionLabel?: string | null;
     fieldId: string;
     fieldLabel: string;
+    fieldType?: string;
   }, SecretSummary>;
   list_connections: CommandSpec<undefined, ConnectionSummary[]>;
   get_identity: CommandSpec<undefined, IdentityInfo>;

@@ -816,6 +816,7 @@ impl ManagementBackend for RemoteBackend {
                 section_label: reference.section_label,
                 field_id: reference.field_id,
                 field_label: reference.field_label,
+                field_type: reference.field_type,
             },
         )
         .await

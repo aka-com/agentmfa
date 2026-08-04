@@ -35,6 +35,20 @@ const PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
+fn is_totp_field_type(field_type: &str) -> bool {
+    matches!(
+        field_type.trim().to_ascii_lowercase().as_str(),
+        "totp" | "otp"
+    )
+}
+
+fn is_unsupported_field_type(field_type: &str) -> bool {
+    matches!(
+        field_type.trim().to_ascii_lowercase().as_str(),
+        "unsupported" | "unknown"
+    )
+}
+
 /// Stable IDs select an exact field; labels are display-only snapshots.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OnePasswordSecretRef {
@@ -49,6 +63,8 @@ pub struct OnePasswordSecretRef {
     pub section_label: Option<String>,
     pub field_id: String,
     pub field_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -201,6 +217,26 @@ pub(crate) fn validate_reference(reference: &OnePasswordSecretRef) -> Result<()>
     }) {
         return Err(CoreError::InvalidOnePasswordIntegration(
             "invalid 1Password section label".into(),
+        ));
+    }
+    if reference.field_type.as_ref().is_some_and(|value| {
+        value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    }) {
+        return Err(CoreError::InvalidOnePasswordIntegration(
+            "invalid 1Password field type".into(),
+        ));
+    }
+    if reference
+        .field_type
+        .as_deref()
+        .is_some_and(is_unsupported_field_type)
+    {
+        return Err(CoreError::InvalidOnePasswordIntegration(
+            "unsupported 1Password fields cannot be linked".into(),
         ));
     }
     Ok(())
@@ -544,6 +580,7 @@ impl SdkSidecarBridge {
                     "item_id": reference.item_id,
                     "section_id": reference.section_id,
                     "field_id": reference.field_id,
+                    "field_type": reference.field_type,
                 }),
             )
             .await?;
@@ -988,15 +1025,18 @@ impl ConnectClient {
         let item = self
             .item(base_url, token, &reference.vault_id, &reference.item_id)
             .await?;
-        let field = item.fields.into_iter().find(|field| {
-            field.id == reference.field_id
-                && field.section.as_ref().map(|section| section.id.as_str())
-                    == reference.section_id.as_deref()
-        });
-        let value = field.and_then(|field| field.value).ok_or_else(|| {
-            ProviderError::new("not_found", "the linked 1Password field no longer exists")
-        })?;
-        Ok(value)
+        let field = item
+            .fields
+            .into_iter()
+            .find(|field| {
+                field.id == reference.field_id
+                    && field.section.as_ref().map(|section| section.id.as_str())
+                        == reference.section_id.as_deref()
+            })
+            .ok_or_else(|| {
+                ProviderError::new("not_found", "the linked 1Password field no longer exists")
+            })?;
+        field.into_resolved_value()
     }
 }
 
@@ -1031,8 +1071,26 @@ struct ConnectField {
     field_type: String,
     #[serde(default, deserialize_with = "deserialize_optional_secret_value")]
     value: Option<SecretValue>,
+    #[serde(default, deserialize_with = "deserialize_optional_secret_value")]
+    totp: Option<SecretValue>,
     #[serde(default)]
     section: Option<ConnectSectionRef>,
+}
+
+impl ConnectField {
+    fn into_resolved_value(self) -> std::result::Result<SecretValue, ProviderError> {
+        if is_totp_field_type(&self.field_type) {
+            return self.totp.ok_or_else(|| {
+                ProviderError::new(
+                    "request_failed",
+                    "1Password Connect could not generate the one-time password",
+                )
+            });
+        }
+        self.value.ok_or_else(|| {
+            ProviderError::new("not_found", "the linked 1Password field no longer exists")
+        })
+    }
 }
 
 fn deserialize_secret_value<'de, D>(deserializer: D) -> std::result::Result<SecretValue, D::Error>
@@ -1087,6 +1145,7 @@ pub fn source_dto(
                     section_label: reference.section_label.clone(),
                     field_id: reference.field_id.clone(),
                     field_label: reference.field_label.clone(),
+                    field_type: reference.field_type.clone(),
                 }),
             }
         }
@@ -1123,6 +1182,7 @@ mod tests {
             section_label: Some("Authentication".into()),
             field_id: "token".into(),
             field_label: "Token".into(),
+            field_type: Some("Concealed".into()),
         }
     }
 
@@ -1146,12 +1206,40 @@ mod tests {
         assert!(validate_reference(&invalid).is_ok());
     }
 
+    #[test]
+    fn reference_rejects_unsupported_fields_but_accepts_totp() {
+        let id = Uuid::new_v4();
+        let mut reference = reference(id);
+        reference.field_type = Some("Unsupported".into());
+        assert!(validate_reference(&reference).is_err());
+
+        reference.field_type = Some("Totp".into());
+        assert!(validate_reference(&reference).is_ok());
+    }
+
+    #[test]
+    fn connect_totp_never_falls_back_to_the_seed_value() {
+        let field = ConnectField {
+            id: "otp".into(),
+            label: "one-time password".into(),
+            field_type: "OTP".into(),
+            value: Some(Zeroizing::new(
+                "otpauth://totp/example?secret=private".into(),
+            )),
+            totp: None,
+            section: None,
+        };
+        let error = field.into_resolved_value().unwrap_err();
+        assert_eq!(error.code, "request_failed");
+        assert!(!error.message.contains("private"));
+    }
+
     #[tokio::test]
     async fn connect_catalog_and_resolution_keep_values_out_of_catalog_dtos() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for _ in 0..4 {
+            for _ in 0..5 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let mut chunk = [0u8; 1024];
@@ -1171,7 +1259,7 @@ mod tests {
                 } else if first.contains("GET /v1/vaults/vault1/items ") {
                     r#"[{"id":"item1","title":"GitHub","category":"API_CREDENTIAL"}]"#
                 } else {
-                    r#"{"fields":[{"id":"token","label":"Token","type":"CONCEALED","value":"rotated-secret","section":{"id":"auth"}}],"sections":[{"id":"auth","label":"Authentication"}]}"#
+                    r#"{"fields":[{"id":"token","label":"Token","type":"CONCEALED","value":"rotated-secret","section":{"id":"auth"}},{"id":"otp","label":"one-time password","type":"OTP","value":"otpauth://totp/example?secret=seed-must-stay-private","totp":"123456","section":{"id":"auth"}}],"sections":[{"id":"auth","label":"Authentication"}]}"#
                 };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1215,6 +1303,8 @@ mod tests {
         assert_eq!(fields[0].section_title.as_deref(), Some("Authentication"));
         let serialized = serde_json::to_string(&fields).unwrap();
         assert!(!serialized.contains("rotated-secret"));
+        assert!(!serialized.contains("123456"));
+        assert!(!serialized.contains("seed-must-stay-private"));
         assert_eq!(
             resolver
                 .resolve(&integration, &reference(id))
@@ -1222,6 +1312,14 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "rotated-secret"
+        );
+        let mut otp = reference(id);
+        otp.field_id = "otp".into();
+        otp.field_label = "one-time password".into();
+        otp.field_type = Some("OTP".into());
+        assert_eq!(
+            resolver.resolve(&integration, &otp).await.unwrap().as_str(),
+            "123456"
         );
         server.await.unwrap();
     }

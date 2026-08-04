@@ -1902,7 +1902,9 @@
   border-top: 1px solid var(--line-soft);
 }
 .onepassword-field.selected { background: var(--accent-wash); }
+.onepassword-field.unsupported { opacity: .6; }
 .onepassword-field-check { display: flex; align-items: flex-start; gap: 9px; min-width: 0; cursor: pointer; }
+.onepassword-field.unsupported .onepassword-field-check { cursor: not-allowed; }
 .onepassword-field-check input { margin-top: 3px; accent-color: var(--accent); }
 .onepassword-field-check span { min-width: 0; }
 .onepassword-field-check b { display: block; font-size: 0.78125rem; overflow-wrap: anywhere; }
