@@ -919,7 +919,8 @@
   /* One click takes the whole value, as on the issued-endpoint field. */
   overflow-wrap: anywhere; -webkit-user-select: all; user-select: all;
 }
-  .dropdown-surface .sec-table .ghost-copy{ top: 2px; }
+  /* In the tray the chip centers on the action-icon row, not the dots. */
+.dropdown-surface .sec-table .ghost-copy{ top: 0; }
   .rowdel{ text-align: right; white-space: nowrap; }
   .used-by-cell{ font-size: 0.8125rem; }
   .used-by-links{ display: flex; align-items: flex-start; flex-direction: column; gap: 2px; }
@@ -1822,7 +1823,10 @@
 }
 .dropdown-surface .secrets-card .used-by-link { max-width: 100%; }
 .dropdown-surface .secrets-card .val-wrap { display: flex; max-width: 100%; }
-.dropdown-surface .secrets-card .val-slot { min-width: 0; width: 100%; overflow: hidden; }
+/* Horizontal containment only — the .val cell above clips the column. The
+   slot itself must stay open: it is only as tall as the masked dots, and
+   clipping it cuts the bottom off the taller Copy chip overlaying it. */
+.dropdown-surface .secrets-card .val-slot { min-width: 0; width: 100%; }
 .secrets-card .sec-table th:first-child,
 .secrets-card .sec-table td:first-child { padding-left: 14px; }
 .secrets-card .sec-table th:last-child,
@@ -2280,8 +2284,10 @@
   .onepassword-retrieved { display: none; }
 }
 /* The dropdown catalog search sits just above the list (its own flex/gap
-   context is the list's, so restore the spacing it had as a catalog child). */
-.dd-cat-search { margin-bottom: 12px; }
+   context is the list's, so restore the spacing it had as a catalog child).
+   The top margin keeps it off the pane's top border when nothing — attention
+   banner, ready card — renders above it. */
+.dd-cat-search { margin: 12px 0; }
 
 /* The add sheet's paste-to-prefill accelerator: the field uses the sheet's
    own input styling, and the button matches its height. */

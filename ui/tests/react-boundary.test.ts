@@ -552,7 +552,7 @@ test('secret copy controls keep stable pixel-aligned positions', async () => {
 
   assert.match(styles, /\.val-slot code\{ transform: translateY\(-2px\)/);
   assert.match(styles, /\.sec-table \.ghost-copy\{ top: -1\.5px; \}/);
-  assert.match(styles, /\.dropdown-surface \.sec-table \.ghost-copy\{ top: 2px; \}/);
+  assert.match(styles, /\.dropdown-surface \.sec-table \.ghost-copy\{ top: 0; \}/);
   assert.ok(copyIcon, 'copy icon styles are present');
   assert.match(copyIcon, /display: block/);
   assert.match(copyIcon, /flex: 0 0 12px/);
