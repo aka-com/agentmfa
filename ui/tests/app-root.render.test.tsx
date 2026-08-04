@@ -163,10 +163,10 @@ test('the credential library always groups passwords apart from secrets', async 
   // Derived names stay internal — password rows never show them.
   assert.equal(document.body.textContent?.includes('PASSWORD_X_COM'), false);
 
-  // The status bar inventory splits the way the page does.
+  // The status bar reports one combined credential inventory.
   assert.match(
     document.querySelector('.sb-count')?.textContent ?? '',
-    /2 passwords · 7 secrets/,
+    /9 credentials/,
   );
 
   // The live display is still a copy action when pressed.
@@ -221,6 +221,12 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
       'true',
     );
   });
+  const passwordInput = dialog.querySelector<HTMLInputElement>('#f-value')!;
+  const showPassword = testingLibrary.getByRole(dialog, 'checkbox', { name: 'Show password' });
+  assert.equal(passwordInput.type, 'password');
+  assert.equal(showPassword.checked, false);
+  assert.equal(dialog.querySelector('#f-totp'), null, '2FA stays folded under Advanced');
+  assert.equal(dialog.textContent?.includes('the code it offers for manual entry'), false);
   testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#f-site')!, {
     target: { value: 'https://WWW.Example.com/login' },
   });
@@ -231,8 +237,30 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   testingLibrary.fireEvent.click(
     dialog.querySelector<HTMLButtonElement>('button[data-act="generate-password"]')!,
   );
-  const generated = dialog.querySelector<HTMLInputElement>('#f-value')!.value;
+  const generated = passwordInput.value;
   assert.match(generated, /^[^-]{5}(-[^-]{5}){3}$/, 'Generate fills a grouped password');
+  assert.equal(showPassword.checked, true, 'generated passwords are shown');
+  assert.equal(passwordInput.type, 'text');
+
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="generate-password-menu"]')!,
+  );
+  const formatMenu = await testingLibrary.findByRole(document.body, 'listbox', {
+    name: 'Password format',
+  });
+  assert.deepEqual(
+    testingLibrary.getAllByRole(formatMenu, 'option').map((option) => option.textContent?.trim()),
+    ['Strong Password', 'Without Special Characters', 'Easy to Type'],
+  );
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(formatMenu, 'option', { name: 'Without Special Characters' }),
+  );
+  assert.match(passwordInput.value, /^[A-Za-z0-9]{20}$/);
+  assert.equal(showPassword.checked, true);
+
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(dialog, 'button', { name: 'Advanced' }),
+  );
   testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#f-totp')!, {
     target: { value: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ' },
   });
@@ -256,7 +284,7 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   const newRow = [...document.querySelectorAll<HTMLElement>('.site-host')]
     .find((host) => host.textContent === 'example.com')?.closest('tr');
   assert.ok(newRow?.querySelector('.totp-live'), 'the saved 2FA seed shows a desktop live code');
-  assert.match(document.querySelector('.sb-count')?.textContent ?? '', /3 passwords/);
+  assert.match(document.querySelector('.sb-count')?.textContent ?? '', /10 credentials/);
 
   testingLibrary.fireEvent.click(
     newRow!.querySelector<HTMLButtonElement>('button[data-act="edit-secret"]')!,
@@ -264,6 +292,9 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   const editDialog = await testingLibrary.findByRole(document.body, 'dialog', {
     name: 'Edit password',
   });
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(editDialog, 'button', { name: 'Advanced' }),
+  );
   const removeTotp = editDialog.querySelector<HTMLInputElement>('.totp-remove-check input');
   assert.ok(removeTotp, 'stored 2FA factors use the remove checkbox');
   assert.equal(removeTotp.checked, false);
@@ -272,6 +303,86 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   assert.equal(removeTotp.checked, true);
   testingLibrary.fireEvent.click(
     editDialog.querySelector<HTMLButtonElement>('button[data-act="sheet-cancel"]')!,
+  );
+});
+
+test('credential value visibility is direct on add and confirmed on edit', async () => {
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>(
+      '.credential-group-add[data-kind="secret"]',
+    )!,
+  );
+  const addDialog = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Add credential',
+  });
+  const addValue = addDialog.querySelector<HTMLInputElement>('#f-value')!;
+  const addShow = testingLibrary.getByRole(addDialog, 'checkbox', { name: 'Show secret' });
+  assert.equal(addValue.type, 'password');
+  testingLibrary.fireEvent.click(addShow);
+  assert.equal(addValue.type, 'text');
+  testingLibrary.fireEvent.click(addShow);
+  assert.equal(addValue.type, 'password');
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(addDialog, 'button', { name: 'Cancel' }),
+  );
+
+  const xRow = [...document.querySelectorAll<HTMLElement>('.site-host')]
+    .find((host) => host.textContent === 'x.com')?.closest('tr');
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(xRow!, 'button', { name: 'Edit password x.com' }),
+  );
+  let editDialog = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Edit password',
+  });
+  let editValue = editDialog.querySelector<HTMLInputElement>('#f-value')!;
+  let editShow = testingLibrary.getByRole(editDialog, 'checkbox', { name: 'Show password' });
+  assert.equal(editValue.value, '', 'the stored password is not placed in the form on open');
+  assert.equal(editValue.placeholder, '••••••••••••');
+  testingLibrary.fireEvent.click(editShow);
+  const passwordConfirm = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Show password for x.com?',
+  });
+  assert.equal(editShow.checked, false, 'requesting confirmation does not pre-check the box');
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(passwordConfirm, 'button', { name: 'Show password' }),
+  );
+  await testingLibrary.waitFor(() => {
+    editDialog = testingLibrary.getByRole(document.body, 'dialog', { name: 'Edit password' });
+    editValue = editDialog.querySelector<HTMLInputElement>('#f-value')!;
+    editShow = testingLibrary.getByRole(editDialog, 'checkbox', { name: 'Show password' });
+    assert.equal(editValue.value, 'demo-pw-x');
+    assert.equal(editValue.type, 'text');
+    assert.equal(editShow.checked, true);
+  });
+  testingLibrary.fireEvent.click(editShow);
+  assert.equal(editValue.value, '', 'hiding scrubs the broker-released value from the draft');
+  assert.equal(editValue.type, 'password');
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(editDialog, 'button', { name: 'Cancel' }),
+  );
+
+  const secretRow = [...document.querySelectorAll<HTMLElement>('.s-name')]
+    .find((name) => name.textContent === 'GITHUB_API_KEY')?.closest('tr');
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(secretRow!, 'button', { name: 'Edit secret GITHUB_API_KEY' }),
+  );
+  editDialog = await testingLibrary.findByRole(document.body, 'dialog', { name: 'Edit secret' });
+  editValue = editDialog.querySelector<HTMLInputElement>('#f-value')!;
+  editShow = testingLibrary.getByRole(editDialog, 'checkbox', { name: 'Show secret' });
+  assert.equal(editValue.value, '');
+  testingLibrary.fireEvent.click(editShow);
+  const secretConfirm = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Show secret for GITHUB_API_KEY?',
+  });
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(secretConfirm, 'button', { name: 'Show secret' }),
+  );
+  await testingLibrary.waitFor(() => {
+    assert.equal(editValue.value, 'ghp_9aXf2Qe7LmNoP3demoToken41c');
+    assert.equal(editValue.type, 'text');
+  });
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(editDialog, 'button', { name: 'Cancel' }),
   );
 });
 
@@ -364,7 +475,7 @@ test('the 1Password sheet links a field through all three steps', { timeout: 8_0
   assert.ok(linkedRow?.querySelector('.s-source-icon svg'));
   assert.equal(linkedRow?.querySelector('.s-source'), null);
   const credentialCount = document.querySelector<HTMLElement>('.secrets-statusbar .sb-count');
-  assert.match(credentialCount?.textContent?.trim() ?? '', /\d+ passwords · \d+ secrets/);
+  assert.match(credentialCount?.textContent?.trim() ?? '', /\d+ credentials/);
   testingLibrary.fireEvent.click(
     document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="connections"]')!,
   );

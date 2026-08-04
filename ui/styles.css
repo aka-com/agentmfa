@@ -1839,19 +1839,20 @@
 .dropdown-surface .cat-search { width: 100%; }
 
 /* Both credential groups stay visible even when one is empty. Their add
-   controls are quiet links below (not full-bleed card footers). */
+   controls are quiet links at the far edge of each heading. */
 .secrets-groups { display: flex; flex-direction: column; gap: 16px; }
 .credential-group { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
+.credential-group-heading { display: flex; align-items: center; width: 100%; gap: 10px; }
 .secrets-group-h {
-  margin: 2px 2px 0; color: var(--muted);
+  margin: 2px 2px 0; flex: 1; color: var(--muted);
   font-size: 0.71875rem; font-weight: 700; letter-spacing: .08em;
   text-transform: uppercase;
 }
 .secrets-group-h:first-child { margin-top: 0; }
 .credential-group-add {
-  align-self: flex-start; padding: 1px 2px; border: 0; background: transparent;
+  margin-left: auto; padding: 1px 2px; border: 0; background: transparent;
   color: var(--muted); font: inherit; font-size: 0.71875rem; cursor: pointer;
-  text-align: left;
+  text-align: right;
 }
 .credential-group-add:hover { color: var(--accent-text); text-decoration: underline; }
 /* Password rows lead with the site — a monogram tile plus the canonical
@@ -1897,6 +1898,23 @@
 .gen-row { display: flex; align-items: stretch; gap: 6px; }
 .gen-row input { flex: 1; min-width: 0; }
 .gen-row .btn { flex: 0 0 auto; }
+.password-generator { flex: 0 0 auto; }
+.password-generator-group { display: inline-flex; align-items: stretch; height: 100%; }
+.password-generator-main { border-radius: 7px 0 0 7px; }
+.password-generator-menu-trigger {
+  width: 29px; margin-left: -1px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 0 7px 7px 0;
+}
+.password-generator-menu-trigger svg { width: 12px; height: 12px; }
+.password-generator-menu-trigger[aria-expanded="true"] { border-color: var(--accent); z-index: 1; }
+.password-format-menu { min-width: 210px; }
+.show-value-check {
+  display: inline-flex; align-items: center; gap: 7px; margin-top: 7px;
+  color: var(--muted); font-size: 0.78125rem; cursor: pointer;
+}
+.show-value-check input { margin: 0; accent-color: var(--accent); }
+.credential-advanced { margin-top: 1px; }
 .label-note { margin-left: 4px; color: var(--muted-2); font-weight: 400; }
 .field-hint { margin-top: 4px; color: var(--muted); font-size: 0.71875rem; line-height: 1.45; }
 .totp-remove-check {

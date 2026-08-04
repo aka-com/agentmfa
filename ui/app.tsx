@@ -129,23 +129,48 @@ import { Sheet } from '/src/sheet';
 
 const EDIT_SECRET_MASK = '••••••••••••';
 
-/** A generated password: four dash-separated groups of five characters from
- * an unambiguous alphabet (≈115 bits). Rejection sampling keeps the draw
- * uniform. Fills the ordinary password field; saving follows the normal
- * path, so nothing here touches the vault. */
-function generatedPassword(): string {
-  const alphabet = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+type PasswordGenerationFormat = NonNullable<ConnectionDraft['passwordGenerationFormat']>;
+const PASSWORD_GENERATION_FORMATS: ReadonlyArray<{
+  id: PasswordGenerationFormat;
+  label: string;
+}> = [
+  { id: 'strong', label: 'Strong Password' },
+  { id: 'no-special', label: 'Without Special Characters' },
+  { id: 'easy-to-type', label: 'Easy to Type' },
+];
+
+/** Draw uniformly from an alphabet without modulo bias. */
+function randomCharacters(alphabet: string, count: number): string {
   const limit = 256 - (256 % alphabet.length);
   const chars: string[] = [];
-  while (chars.length < 20) {
-    const bytes = new Uint8Array(32);
+  while (chars.length < count) {
+    const bytes = new Uint8Array(Math.max(32, count - chars.length));
     crypto.getRandomValues(bytes);
     for (const byte of bytes) {
-      if (byte < limit && chars.length < 20) chars.push(alphabet[byte % alphabet.length]);
+      if (byte < limit && chars.length < count) chars.push(alphabet[byte % alphabet.length]);
     }
   }
+  return chars.join('');
+}
+
+/** Generate familiar Passwords-style recipes locally. The default preserves
+ * the existing four grouped chunks; the alternatives trade punctuation or
+ * raw entropy for compatibility and ease of transcription. */
+function generatedPassword(format: PasswordGenerationFormat = 'strong'): string {
+  const alphabet = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  if (format === 'no-special') return randomCharacters(alphabet, 20);
+  if (format === 'easy-to-type') {
+    const consonants = 'bcdfghjkmnpqrstvwxyz';
+    const vowels = 'aeiou';
+    const chars = Array.from({ length: 20 }, (_, index) =>
+      randomCharacters(index % 2 === 0 ? consonants : vowels, 1));
+    return [0, 1, 2, 3]
+      .map((group) => chars.slice(group * 5, group * 5 + 5).join(''))
+      .join('-');
+  }
+  const chars = randomCharacters(alphabet, 20);
   return [0, 1, 2, 3]
-    .map((group) => chars.slice(group * 5, group * 5 + 5).join(''))
+    .map((group) => chars.slice(group * 5, group * 5 + 5))
     .join('-');
 }
 /** Rows kept mounted past each edge of the activity window. Enough that a
@@ -159,6 +184,9 @@ const ACTIVITY_PREPAINT_VIEWPORT = 1200;
 
 let reactMounted = false;
 let renderPublication = 0;
+/** Invalidates an in-flight reveal when navigation or window blur has asked
+ * the UI to drop sensitive presentation. */
+let sensitivePresentationEpoch = 0;
 /** Cancels the one pending post-render fix-up, if any. */
 let cancelPendingFinish: (() => void) | null = null;
 /** Scroll snapshot awaiting restore; `resetScroll` clears it so a deferred
@@ -303,9 +331,17 @@ function resetScroll(): void {
 }
 
 function clearSensitivePresentation(): boolean {
-  const changed = Object.keys(state.reveal).length > 0
+  sensitivePresentationEpoch += 1;
+  let changed = Object.keys(state.reveal).length > 0
     || Object.keys(state.epExpanded).length > 0
     || state.secretMenuOpen !== null;
+  if (state.sheet?.kind === 'edit-secret' && state.draft.showCredentialValue) {
+    changed = true;
+    state.draft.showCredentialValue = false;
+    // Values fetched from the broker are never retained behind a re-masked
+    // edit field. A replacement the user typed remains, but is hidden.
+    if (!state.draft.secretValueModified) state.draft.value = '';
+  }
   state.reveal = {};
   state.epExpanded = {};
   // The menu names the reveal state it was opened over; dropping the reveals
@@ -2989,8 +3025,8 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
   </>;
 }
 
-// The credential library always advertises both typed groups. Each group has
-// its own quiet add link outside the card, preselecting that credential kind.
+// The credential library always advertises both typed groups. Each heading
+// owns its quiet, right-aligned add link, preselecting that credential kind.
 // Legacy remote brokers retain their single untyped table.
 function SecretsView(): ReactNode {
   const needle = state.secretSearch.trim().toLowerCase();
@@ -3014,7 +3050,11 @@ function SecretsView(): ReactNode {
   return (
     <div className="secrets-groups">
       <div className="credential-group">
-        <div className="secrets-group-h" aria-hidden="true">Passwords</div>
+        <div className="credential-group-heading">
+          <div className="secrets-group-h" aria-hidden="true">Passwords</div>
+          <button className="credential-group-add" data-act="open-add-secret"
+            data-kind="password">＋ Add password</button>
+        </div>
         <div className="secrets-card">
           {matchingPasswords.length
             ? <SecretsTable secrets={matchingPasswords} passwords />
@@ -3022,11 +3062,13 @@ function SecretsView(): ReactNode {
                 {passwords.length ? 'No passwords match your search.' : 'No passwords yet.'}
               </div>}
         </div>
-        <button className="credential-group-add" data-act="open-add-secret"
-          data-kind="password">＋ Add password</button>
       </div>
       <div className="credential-group">
-        <div className="secrets-group-h" aria-hidden="true">Secrets</div>
+        <div className="credential-group-heading">
+          <div className="secrets-group-h" aria-hidden="true">Secrets</div>
+          <button className="credential-group-add" data-act="open-add-secret"
+            data-kind="secret">＋ Add secret</button>
+        </div>
         <div className="secrets-card">
           {matchingSecrets.length
             ? <SecretsTable secrets={matchingSecrets} />
@@ -3034,8 +3076,6 @@ function SecretsView(): ReactNode {
                 {secrets.length ? 'No secrets match your search.' : 'No secrets yet.'}
               </div>}
         </div>
-        <button className="credential-group-add" data-act="open-add-secret"
-          data-kind="secret">＋ Add secret</button>
       </div>
     </div>
   );
@@ -3094,14 +3134,9 @@ function SecretsStatusBar(): ReactNode {
   const available = supportsOnePassword(state.broker);
   const integrations = state.onepasswordIntegrations;
   const linked = state.secrets.filter((secret) => secret.source?.kind === 'one_password').length;
-  const passwords = state.secrets.filter((secret) => secret.kind === 'password').length;
-  const secrets = state.secrets.length - passwords;
+  const credentialCount = state.secrets.length;
   const open = state.vaultsPanelOpen && integrations.length > 0;
-  // Typed pages always split inventory the way their always-visible groups do.
-  const inventory = supportsTypedCredentials(state.broker)
-    ? `${passwords} ${passwords === 1 ? 'password' : 'passwords'}`
-      + ` · ${secrets} ${secrets === 1 ? 'secret' : 'secrets'}`
-    : `${secrets} ${secrets === 1 ? 'credential' : 'credentials'}`;
+  const inventory = `${credentialCount} ${credentialCount === 1 ? 'credential' : 'credentials'}`;
   return (
     <footer className="secrets-statusbar">
       <span className="sb-count">
@@ -4238,6 +4273,31 @@ function RevealSecretConfirm(): ReactNode {
   );
 }
 
+// Editing starts with only a placeholder. Asking to expose the saved value
+// deliberately takes the same confirmed, broker-audited release path as the
+// credential row's Reveal action.
+function RevealEditSecretConfirm(): ReactNode {
+  const confirm = state.confirm;
+  if (!confirm || confirm.kind !== 'reveal-edit-secret') return null;
+  const secret = state.secrets.find((candidate) => candidate.id === confirm.id);
+  const password = secret?.kind === 'password';
+  const noun = password ? 'password' : 'secret';
+  const name = secret ? credentialDisplayName(secret) : `this ${noun}`;
+  return (
+    <>
+      <h3 id="reveal-edit-secret-title">Show {noun} for {name}?</h3>
+      <p>The saved {noun} will be placed in the edit form — visible to anyone
+        looking at your screen, and to anything recording it. It will be hidden
+        again when you uncheck the box or the window loses focus.</p>
+      <div className="sheet-actions">
+        <button className="btn" data-act="confirm-cancel">Cancel</button>
+        <button className="btn primary" data-act="reveal-edit-secret-confirm"
+          data-id={String(confirm.id ?? '')}>Show {noun}</button>
+      </div>
+    </>
+  );
+}
+
 // In-use credentials cannot be deleted until their tools are gone; offer a
 // path to each tool’s delete confirm instead of an inline table-row swap.
 function SecretInUseConfirm(): ReactNode {
@@ -4346,6 +4406,14 @@ function ConfirmSheet(): ReactNode {
       <Sheet titleId="reveal-secret-title" className="wide confirm-sheet"
         backdropAction="confirm-cancel">
         <RevealSecretConfirm />
+      </Sheet>
+    );
+  }
+  if (kind === 'reveal-edit-secret') {
+    return (
+      <Sheet titleId="reveal-edit-secret-title" className="wide confirm-sheet"
+        backdropAction="confirm-cancel">
+        <RevealEditSecretConfirm />
       </Sheet>
     );
   }
@@ -4922,16 +4990,43 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
   const title = linked ? 'Edit linked credential'
     : editing ? (password ? 'Edit password' : 'Edit secret')
     : supportsTypedCredentials(state.broker) ? 'Add credential' : 'Add secret';
-  // The value field's write-only machinery (mask on edit, modified flag) is
-  // shared by both shapes; only its labels change.
+  const showValue = Boolean(d.showCredentialValue);
+  const generationFormat = d.passwordGenerationFormat ?? 'strong';
+  const generatorMenuOpen = state.formMenuOpen === 'password-generator-menu';
+  const toggleValueVisibility = (checked: boolean) => {
+    if (!checked) {
+      state.draft.showCredentialValue = false;
+      // A revealed stored value is presentation-only. Scrub it when hidden;
+      // user-entered replacement text remains available behind the mask.
+      if (editing && !state.draft.secretValueModified) state.draft.value = '';
+      render();
+      return;
+    }
+    if (editing && !state.draft.secretValueModified) {
+      state.confirm = { kind: 'reveal-edit-secret', id: state.sheet?.id };
+      render();
+      return;
+    }
+    state.draft.showCredentialValue = true;
+    render();
+  };
+  // The value field's write-only machinery (placeholder on edit, modified
+  // flag) is shared by both shapes; only its labels change.
   const valueField = (label: string, placeholder: string) => (
-    <input id="f-value" className={fieldCls('value')} type="password"
+    <input id="f-value" className={fieldCls('value')} type={showValue ? 'text' : 'password'}
       placeholder={placeholder}
       value={d.value ?? ''}
       onChange={(e) => {
         if (editing) state.draft.secretValueModified = true;
         setDraftField('value', 'value', e.currentTarget.value);
       }} aria-label={label} />
+  );
+  const visibilityControl = (
+    <label className="show-value-check">
+      <input type="checkbox" checked={showValue}
+        onChange={(e) => toggleValueVisibility(e.currentTarget.checked)} />
+      <span>{password ? 'Show password' : 'Show secret'}</span>
+    </label>
   );
   return (
     <>
@@ -4965,35 +5060,78 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
             <div className="f-row">
               <label htmlFor="f-value">{editing ? 'New password (saved to macOS Keychain)' : 'Password'}</label>
               <div className="gen-row">
-                {valueField('Password', editing ? '' : 'Saved in Keychain')}
-                <button type="button" className="btn" data-act="generate-password"
-                  title="Fill in a generated password">Generate</button>
+                {valueField('Password', editing ? EDIT_SECRET_MASK : 'Saved in Keychain')}
+                <div className="password-generator cred-select">
+                  <div className="password-generator-group">
+                    <button type="button" className="btn password-generator-main"
+                      data-act="generate-password" title="Fill in a generated password">Generate</button>
+                    <button type="button" id="password-generator-menu"
+                      className="btn password-generator-menu-trigger"
+                      data-act="generate-password-menu" title="Password format"
+                      aria-label="Choose password format" aria-haspopup="listbox"
+                      aria-expanded={generatorMenuOpen}>
+                      <Icon markup={ICONS.chevronDown} />
+                    </button>
+                  </div>
+                  {generatorMenuOpen
+                    ? createPortal(
+                        <div className="cred-menu password-format-menu" role="listbox"
+                          aria-label="Password format">
+                          {PASSWORD_GENERATION_FORMATS.map((format) => (
+                            <button type="button" className="cred-opt" role="option"
+                              aria-selected={generationFormat === format.id}
+                              data-act="password-format" data-id={format.id} key={format.id}>
+                              <span className="cred-opt-col"><span className="cred-name">
+                                {format.label}
+                              </span></span>
+                              {generationFormat === format.id
+                                ? <span className="cred-opt-check"><Icon markup={ICONS.check} /></span>
+                                : null}
+                            </button>
+                          ))}
+                        </div>,
+                        overlays(),
+                      )
+                    : null}
+                </div>
               </div>
               <FieldError k="value" />
+              {visibilityControl}
             </div>
-            <div className="f-row">
-              <label htmlFor="f-totp">2FA secret <span className="label-note">optional</span></label>
-              <input id="f-totp" className={fieldCls('totp')} type="password"
-                placeholder={secret?.totp ? '•••••••• (set) — paste to replace' : 'Base32 secret or otpauth:// URI'}
-                autoComplete="off" spellCheck={false}
-                value={d.totp ?? ''}
-                onChange={(e) => {
-                  state.draft.removeTotp = false;
-                  setDraftField('totp', 'totp', e.currentTarget.value);
-                }} />
-              <FieldError k="totp" />
-              {secret?.totp
-                ? <label className="totp-remove-check">
-                    <input type="checkbox" checked={Boolean(d.removeTotp)}
+            <div className="adv-collapse credential-advanced">
+              <button type="button" className="adv-toggle" data-act="credential-advanced"
+                aria-expanded={Boolean(d.credentialAdvancedOpen)}>
+                <span className="adv-toggle-icon" aria-hidden="true">
+                  <Icon markup={ICONS.chevronDown} />
+                </span>Advanced</button>
+              {d.credentialAdvancedOpen
+                ? <div className="f-row">
+                    <label htmlFor="f-totp">2FA secret <span className="label-note">optional</span></label>
+                    <input id="f-totp" className={fieldCls('totp')} type="password"
+                      placeholder={secret?.totp
+                        ? '•••••••• (set) — paste to replace'
+                        : 'Base32 secret or otpauth:// URI'}
+                      autoComplete="off" spellCheck={false}
+                      value={d.totp ?? ''}
                       onChange={(e) => {
-                        state.draft.removeTotp = e.currentTarget.checked;
-                        if (e.currentTarget.checked) state.draft.totp = '';
-                        delete state.sheetErrors.totp;
-                        render();
+                        state.draft.removeTotp = false;
+                        setDraftField('totp', 'totp', e.currentTarget.value);
                       }} />
-                    <span>Remove 2FA secret</span>
-                  </label>
-                : <div className="field-hint">From the site’s authenticator setup — the code it offers for manual entry.</div>}
+                    <FieldError k="totp" />
+                    {secret?.totp
+                      ? <label className="totp-remove-check">
+                          <input type="checkbox" checked={Boolean(d.removeTotp)}
+                            onChange={(e) => {
+                              state.draft.removeTotp = e.currentTarget.checked;
+                              if (e.currentTarget.checked) state.draft.totp = '';
+                              delete state.sheetErrors.totp;
+                              render();
+                            }} />
+                          <span>Remove 2FA secret</span>
+                        </label>
+                      : null}
+                  </div>
+                : null}
             </div>
           </>
         : <>
@@ -5010,8 +5148,9 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
                 <small>{linked.vault_label} › {linked.item_label} › {linked.field_label}</small></div>
             </div> : <div className="f-row">
               <label htmlFor="f-value">{editing ? 'New value (saved to macOS Keychain)' : 'Value'}</label>
-              {valueField('Value', editing ? '' : 'Your secret (saved in Keychain)')}
+              {valueField('Value', editing ? EDIT_SECRET_MASK : 'Your secret (saved in Keychain)')}
               <FieldError k="value" />
+              {visibilityControl}
             </div>}
           </>}
       <FormGlobalError />
@@ -6324,8 +6463,14 @@ function positionFormMenu(): void {
   // The custom selects portal their fixed listbox under #overlays, outside
   // the scrolling sheet that would otherwise clip it; anchor it here.
   const rect = trigger.getBoundingClientRect();
-  menu.style.left = `${rect.left}px`;
-  menu.style.width = `${rect.width}px`;
+  if (menu.classList.contains('password-format-menu')) {
+    const width = Math.max(210, rect.width);
+    menu.style.left = `${Math.max(8, rect.right - width)}px`;
+    menu.style.width = `${width}px`;
+  } else {
+    menu.style.left = `${rect.left}px`;
+    menu.style.width = `${rect.width}px`;
+  }
   const below = rect.bottom + 5;
   const flip = below + menu.offsetHeight > window.innerHeight - 8 &&
     rect.top - menu.offsetHeight - 5 > 8;
@@ -6426,6 +6571,9 @@ function showFormError(error: unknown): void {
     return;
   }
   state.sheetErrors = { ...state.sheetErrors, [inline.field]: inline.message };
+  if (inline.field === 'totp' && state.sheet?.kind.includes('secret')) {
+    state.draft.credentialAdvancedOpen = true;
+  }
   render();
   const defaultNameId = state.sheet && state.sheet.kind.includes('secret') ? 'f-name' : 'f-cname';
   const inputId = inline.field === 'name'
@@ -6434,14 +6582,14 @@ function showFormError(error: unknown): void {
   if (inputId) focusField(inputId);
 }
 
-function selectEditSecretMask() {
-  setTimeout(() => {
-    const el = document.getElementById('f-value') as HTMLInputElement | null;
-    if (state.sheet?.kind === 'edit-secret' && state.draft.value === EDIT_SECRET_MASK && el) {
-      el.focus();
-      el.select();
-    }
-  }, 0);
+function fillGeneratedPassword(format: PasswordGenerationFormat): void {
+  if (state.sheet?.kind === 'edit-secret') state.draft.secretValueModified = true;
+  state.draft.passwordGenerationFormat = format;
+  state.draft.value = generatedPassword(format);
+  state.draft.showCredentialValue = true;
+  state.formMenuOpen = null;
+  delete state.sheetErrors.value;
+  render();
 }
 
 
@@ -7741,10 +7889,45 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
     case 'reveal-secret-confirm': {
       const epoch = brokerEpoch;
+      const presentationEpoch = sensitivePresentationEpoch;
       try {
         const value = await invoke('reveal_secret', { id });
         if (!brokerEpochIsCurrent(epoch)) break;
+        if (presentationEpoch !== sensitivePresentationEpoch) {
+          if (state.confirm?.kind === 'reveal-secret' && state.confirm.id === id) {
+            state.confirm = null;
+            render();
+          }
+          break;
+        }
         state.reveal[id] = value;
+        state.confirm = null;
+        render();
+      } catch (error) {
+        if (brokerEpochIsCurrent(epoch)) toast('⚠ ' + errorMessage(error));
+      }
+      break;
+    }
+    case 'reveal-edit-secret-confirm': {
+      const epoch = brokerEpoch;
+      const presentationEpoch = sensitivePresentationEpoch;
+      try {
+        const value = await invoke('reveal_secret', { id });
+        if (!brokerEpochIsCurrent(epoch)) break;
+        if (presentationEpoch !== sensitivePresentationEpoch) {
+          if (state.confirm?.kind === 'reveal-edit-secret' && state.confirm.id === id) {
+            state.confirm = null;
+            render();
+          }
+          break;
+        }
+        // The edit form may have been dismissed while the broker request was
+        // in flight. Never put a released value into another sheet or draft.
+        if (state.sheet?.kind === 'edit-secret' && state.sheet.id === id) {
+          state.draft.value = value;
+          state.draft.secretValueModified = false;
+          state.draft.showCredentialValue = true;
+        }
         state.confirm = null;
         render();
       } catch (error) {
@@ -7799,13 +7982,13 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'edit-secret': {
       if (!await holdDropdownFormOpen()) break;
       setSheet({ kind: 'edit-secret', id });
-      // Controlled fields read the draft, so seed it with what the form
-      // shows: the current identity fields and the masked value. The 2FA
-      // seed is write-only — its field starts empty either way.
+      // Controlled fields read the draft, so seed the public identity fields
+      // only. The credential value and 2FA seed remain write-only; the value
+      // input renders its mask as a placeholder until a confirmed reveal.
       const secret = state.secrets.find((s) => s.id === id);
       state.draft = {
         name: secret?.name ?? '',
-        value: EDIT_SECRET_MASK,
+        value: '',
         secretKind: secret?.kind,
         site: secret?.site ?? '',
         username: secret?.username ?? '',
@@ -7813,7 +7996,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.sheetErrors = {};
       render();
       if (secret?.kind === 'password') focusField('f-site');
-      else selectEditSecretMask();
+      else focusField('f-value');
       break;
     }
     case 'open-add-secret': {
@@ -7837,11 +8020,24 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       focusField(kind === 'password' ? 'f-site' : 'f-name');
       break;
     }
-    case 'generate-password':
-      if (state.sheet?.kind === 'edit-secret') state.draft.secretValueModified = true;
-      state.draft.value = generatedPassword();
-      delete state.sheetErrors.value;
+    case 'credential-advanced':
+      state.draft.credentialAdvancedOpen = !state.draft.credentialAdvancedOpen;
       render();
+      break;
+    case 'generate-password-menu':
+      state.formMenuOpen = state.formMenuOpen === 'password-generator-menu'
+        ? null
+        : 'password-generator-menu';
+      render();
+      if (state.formMenuOpen) focusMenuOption();
+      break;
+    case 'password-format': {
+      const format = PASSWORD_GENERATION_FORMATS.find((candidate) => candidate.id === id)?.id;
+      if (format) fillGeneratedPassword(format);
+      break;
+    }
+    case 'generate-password':
+      fillGeneratedPassword(state.draft.passwordGenerationFormat ?? 'strong');
       break;
     case 'copy-totp': {
       const epoch = brokerEpoch;
@@ -9194,7 +9390,8 @@ function handleAppKeyDown(e: KeyboardEvent): void {
     if (mode === 'dropdown') invoke('ui_hide_dropdown');
   } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && state.sheet &&
       (state.formMenuOpen ||
-        (e.key === 'ArrowDown' && document.activeElement?.classList.contains('cred-trigger')))) {
+        (e.key === 'ArrowDown' && (document.activeElement?.classList.contains('cred-trigger')
+          || document.activeElement?.classList.contains('password-generator-menu-trigger'))))) {
     // Native-select keyboard behavior for the listboxes: ArrowDown on a
     // closed trigger opens it; arrows move between options once open.
     e.preventDefault();

@@ -88,6 +88,12 @@ export interface ConnectionDraft {
   value?: string;
   /** Whether the masked value in an edit-secret sheet was actually changed. */
   secretValueModified?: boolean;
+  /** Whether the credential value field is currently rendered as plain text. */
+  showCredentialValue?: boolean;
+  /** The password generator recipe selected from its split-button menu. */
+  passwordGenerationFormat?: 'strong' | 'no-special' | 'easy-to-type';
+  /** Whether the password form's optional 2FA controls are expanded. */
+  credentialAdvancedOpen?: boolean;
   /** The add-credential sheet's type segment. */
   secretKind?: SecretKind;
   /** Password fields (kind 'password'). */
