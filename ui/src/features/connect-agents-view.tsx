@@ -1,4 +1,4 @@
-// The Get started walkthrough. The hero is an editable sentence — “Connect
+// The Connect agents view. The hero is an editable sentence — “Connect
 // to <tool> from <client>” — whose two blanks are the only choices the page asks
 // for. Below it, the same three steps as always (add the tool, connect the
 // agent, ask for something useful), all open all the time: status colors
@@ -29,14 +29,14 @@ import {
   startOptionById,
   startProgress,
   startTask,
-} from '../getting-started';
+} from '../connect-agents';
 import type {
   ConnectClientEnv,
   ConnectModeId,
   Platform,
   StartOption,
   StartProgress,
-} from '../getting-started';
+} from '../connect-agents';
 import { AppIcon } from '../icon';
 import { ICONS, relTime } from '../util';
 

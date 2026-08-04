@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { state } from '../app-state';
 import { ENDPOINT_FORMATS } from '../endpoint-formats';
 import { endpointExpired } from '../endpoint-expiry';
-import { directEndpointAddress, sshDirectCommand } from '../getting-started';
+import { directEndpointAddress, sshDirectCommand } from '../connect-agents';
 import { AppIcon } from '../icon';
 import type { ConnectionSummary, ConnectionType } from '../types';
 import { ICONS } from '../util';

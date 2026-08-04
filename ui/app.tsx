@@ -36,7 +36,7 @@ import type {
   SheetState,
   Tab,
 } from '/src/app-state';
-import { START_OPTIONS } from '/src/getting-started';
+import { START_OPTIONS } from '/src/connect-agents';
 import type { CatalogEntry } from '/src/catalog';
 import {
   ICONS, TYPES, toast, relTime, absTime, timeLeft, clockTime,
@@ -117,7 +117,7 @@ import {
   EndpointStrip,
 } from '/src/features/endpoint-view';
 import { ConnectedToolsList } from '/src/features/connected-tools-list';
-import { StartViewPage, startBlankId } from '/src/features/getting-started-view';
+import { StartViewPage, startBlankId } from '/src/features/connect-agents-view';
 import { Sheet } from '/src/sheet';
 
 const EDIT_SECRET_MASK = '••••••••••••';
@@ -1161,7 +1161,7 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
   );
 }
 
-/* ---- connection guides (Get started > guides view) ---- */
+/* ---- connection guides (Connect agents > guides view) ---- */
 // One shared identity covers every local agent, so the screen pivots around
 // the core question — what may agents reach? A key card on top (this
 // computer's key: where it lives, and Rotate), then one row per tool with an
@@ -5790,7 +5790,7 @@ function SettingsSheet(): ReactNode {
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const tabLabel = (tab: Tab): string =>
   tab === 'connections' ? 'Tools'
-  : tab === 'start' ? 'Get started'
+  : tab === 'start' ? 'Connect agents'
   // The menu-bar dropdown's segmented tabs are narrow; the full "Activity
   // Log" belongs to the window's sidebar, where there is room for it.
   : tab === 'activity' ? (mode === 'dropdown' ? 'Activity' : 'Activity Log')
@@ -8348,7 +8348,7 @@ function focusStartMenuOption(at: 'selected' | 'last'): void {
   }, 0);
 }
 
-/** Keyboard driving for the Get started hero blanks, matching the form
+/** Keyboard driving for the Connect agents hero blanks, matching the form
  *  listboxes: ArrowDown/ArrowUp on a closed blank opens its menu, arrows and
  *  Home/End then walk the options — which scrolls a menu longer than its
  *  max-height, since focus() reveals what it focuses — and Tab leaves by
@@ -8408,7 +8408,7 @@ function handleAppKeyDown(e: KeyboardEvent): void {
   // open (a modal sheet keeps focus).
   if (e.key === 'Tab' && e.ctrlKey && !state.sheet) {
     e.preventDefault();
-    // The dropdown has no Get started tab; cycle only the tabs it shows.
+    // The dropdown has no Connect agents tab; cycle only the tabs it shows.
     const ring: readonly Tab[] = mode === 'dropdown' ? DROPDOWN_TABS : TABS;
     const i = ring.indexOf(state.tab);
     const n = ring.length;
@@ -8570,7 +8570,7 @@ function scheduleRequestRefresh(): void {
 }
 
 async function boot() {
-  if (mode === 'dropdown' && state.tab === 'start') state.tab = 'connections';
+  if (mode === 'dropdown' && state.tab === 'start') state.tab = 'secrets';
   // A webview reload must not leave a stale native lock behind. Forms acquire
   // it again before they are shown.
   if (mode === 'dropdown') await invoke('ui_set_dropdown_form_active', { active: false });
@@ -8595,20 +8595,14 @@ async function boot() {
       error: `Couldn’t read local broker status: ${errorMessage(error)}`,
     });
   }
-  // Choose the landing tab before the first paint: nothing configured yet
-  // means the walkthrough is the useful screen.
+  // Prime the shared shell data before the first real paint. Secrets remains
+  // the landing page even when no tools have been configured yet.
   await Promise.all([
     loadLocalUsername(),
     loadNotificationSettings(),
     load('connections', 'list_connections'),
     loadIdentity(),
   ]);
-  if (mode !== 'dropdown'
-      && state.loadStatus.connections.status === 'ready'
-      && !state.connections.length) {
-    state.tab = 'start';
-  }
-  // The landing tab is decided; the next render is the first real paint.
   booted = true;
   await refresh('all');
   // The setup card always shows the paste-ready message.

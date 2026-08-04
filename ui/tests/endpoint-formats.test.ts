@@ -9,7 +9,7 @@ import {
   scpCommand,
   sshConfigBlock,
 } from '../src/endpoint-formats';
-import { SSH_BROKER_OPTIONS, sshBrokerFlags } from '../src/getting-started';
+import { SSH_BROKER_OPTIONS, sshBrokerFlags } from '../src/connect-agents';
 import type { ConnectionSummary, ConnectionType } from '../src/types';
 
 function conn(

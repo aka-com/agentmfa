@@ -3,7 +3,7 @@
 // bridge.ts's import.meta.env.DEV guard so demo credentials and fixture data
 // are never bundled into the desktop application.
 
-import { sshInvocationCommand } from './getting-started';
+import { sshInvocationCommand } from './connect-agents';
 import type {
   ActivityEntry,
   Approval,

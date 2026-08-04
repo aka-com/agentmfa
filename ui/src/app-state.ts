@@ -33,9 +33,9 @@ import {
 import { readSamplesDismissed } from './samples';
 import { UiStore } from './ui-store';
 
-export const TABS = ['start', 'connections', 'secrets', 'inbox', 'activity'] as const;
-export const DROPDOWN_TABS = TABS.filter((tab) => tab !== 'start');
+export const TABS = ['secrets', 'connections', 'start', 'inbox', 'activity'] as const;
 export type Tab = typeof TABS[number];
+export const DROPDOWN_TABS = ['secrets', 'connections', 'activity', 'inbox'] as const satisfies readonly Tab[];
 
 export interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings'
@@ -327,7 +327,7 @@ export const defaultLoadStatus = (): Record<LoadKey, LoadStatus> => ({
 
 function createInitialState(): AppState {
   return {
-    tab: 'connections',
+    tab: 'secrets',
     broker: LOCAL_BROKER,
     brokerMenuOpen: false,
     remoteSetup: {

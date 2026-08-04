@@ -62,7 +62,7 @@ not a single-response cache entry.
 
 Feature views live under `ui/src/features/`. The shared direct-endpoint UI is
 in `endpoint-view.tsx`, and onboarding/agent guides are in
-`getting-started-view.tsx`. Feature modules may read the shared application
+`connect-agents-view.tsx`. Feature modules may read the shared application
 state and emit typed React actions, but they must not import the application
 shell. This keeps the dependency direction `app.tsx → feature → state/core`.
 

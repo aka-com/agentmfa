@@ -221,8 +221,7 @@
   }
   /* Below the narrow breakpoint (keep in step with NARROW_LAYOUT in app.tsx)
      the left bar turns sideways: it collapses to a slim rail and each menu
-     option rotates 90° to read down the bar. The order is unchanged — "Get
-     started" stays on top, the rest follow below it. */
+     option rotates 90° to read down the bar. */
   @media (max-width: 720px) {
     .dw-side{ flex: 0 0 3rem; padding: 12px 5px 10px; align-items: center; }
     .dw-brand{ flex-direction: column; align-items: center; gap: 6px; padding: 2px 0 12px; }
@@ -406,7 +405,7 @@
   /* ---- content ---------------------------------------------------------- */
 .content{
   /* Always lay out the scrollbar track (overflow-y: scroll, not auto) so the
-     panel reserves its 8px up front. Switching Get started options, toggling
+     panel reserves its 8px up front. Switching Connect agents options, toggling
      "Show all", or opening a menu with many items flips the panel between
      fitting and overflowing; holding the track keeps the content from shifting
      sideways when the scrollbar appears or disappears. overflow: scroll reserves
@@ -694,7 +693,7 @@
   /* Three answers, weighted: refuse on the far left, the two approvals on
      the right with the time-boxed one as the default. */
   .approval-actions{ gap: 8px; }
-  /* The Get started tab: a centered column so the walkthrough reads as a
+  /* The Connect agents tab: a centered column so the walkthrough reads as a
      document rather than a dashboard. */
   .start{ max-width: 620px; margin: 0 auto; padding: 20px 0 24px; }
   .start-hero{ text-align: center; }

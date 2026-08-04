@@ -24,8 +24,8 @@ import {
   startOptionById,
   startProgress,
   startTask,
-} from '../src/getting-started';
-import type { ConnectClientEnv } from '../src/getting-started';
+} from '../src/connect-agents';
+import type { ConnectClientEnv } from '../src/connect-agents';
 import { catalogEntryById } from '../src/catalog';
 import type { ConnectionSummary, ConnectionType } from '../src/types';
 

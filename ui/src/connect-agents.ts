@@ -1,4 +1,4 @@
-// The Get started walkthrough: pick what you want your agent to reach, then
+// Connect agents: pick what you want your agent to reach, then
 // three steps that mirror how the broker actually works — add the tool,
 // register the agent, wire them together and ask for something worth having.
 //

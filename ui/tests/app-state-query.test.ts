@@ -9,6 +9,14 @@ Object.defineProperty(globalThis, 'location', {
   value: { hash: '' },
 });
 
+test('navigation defaults to Secrets and follows each shell order', async () => {
+  const { DROPDOWN_TABS, state, TABS } = await import('../src/app-state');
+
+  assert.equal(state.tab, 'secrets');
+  assert.deepEqual(TABS, ['secrets', 'connections', 'start', 'inbox', 'activity']);
+  assert.deepEqual(DROPDOWN_TABS, ['secrets', 'connections', 'activity', 'inbox']);
+});
+
 test('query-backed state follows the active broker scope', async () => {
   const { state } = await import('../src/app-state');
   const {

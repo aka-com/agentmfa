@@ -111,6 +111,14 @@ test.after(async () => {
 test('the application root boots against the mock bridge', () => {
   assert.ok(testingLibrary.getAllByText(document.body, 'Multitool').length >= 1);
   assert.ok(testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }));
+  const tabs = [...document.querySelectorAll<HTMLButtonElement>('.dw-nav [data-act="tab"]')];
+  assert.deepEqual(
+    tabs.slice(0, 3).map((tab) => tab.textContent?.trim()),
+    ['Secrets', 'Tools', 'Connect agents'],
+  );
+  assert.equal(tabs[0]?.dataset.tab, 'secrets');
+  assert.equal(tabs[0]?.classList.contains('on'), true);
+  assert.ok(document.body.textContent?.includes('Manage secrets'));
 });
 
 test('the 1Password sheet links a field through all three steps', { timeout: 8_000 }, async () => {
@@ -408,7 +416,7 @@ test('the hero-sentence menus open and move under the arrow keys', async () => {
   );
   const blank = await testingLibrary.waitFor(() => {
     const trigger = document.querySelector<HTMLButtonElement>('#start-blank-client');
-    assert.ok(trigger, 'the client blank renders on the Get started tab');
+    assert.ok(trigger, 'the client blank renders on the Connect agents tab');
     return trigger;
   });
 

@@ -1,9 +1,9 @@
 // Copy-ready renderings of an issued direct endpoint for common client
 // applications — the button row under the detail pane's connect field.
 // Pure string factories over the connection summary and the resolved
-// endpoint address, in the vein of getting-started's SNIPPETS table.
+// endpoint address, in the vein of connect-agents' SNIPPETS table.
 
-import { SSH_BROKER_OPTIONS, sshBrokerFlags, sshDirectCommand } from './getting-started';
+import { SSH_BROKER_OPTIONS, sshBrokerFlags, sshDirectCommand } from './connect-agents';
 import type { ConnectionSummary, ConnectionType } from './types';
 
 export interface EndpointFormat {

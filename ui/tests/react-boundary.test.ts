@@ -61,13 +61,13 @@ test('feature views and state are kept outside the application shell', async () 
     'utf8',
   );
   const startView = await readFile(
-    new URL('../src/features/getting-started-view.tsx', import.meta.url),
+    new URL('../src/features/connect-agents-view.tsx', import.meta.url),
     'utf8',
   );
 
   assert.match(app, /from '\/src\/app-state'/);
   assert.match(app, /from '\/src\/features\/endpoint-view'/);
-  assert.match(app, /from '\/src\/features\/getting-started-view'/);
+  assert.match(app, /from '\/src\/features\/connect-agents-view'/);
   assert.doesNotMatch(app, /interface AppState/);
   assert.doesNotMatch(app, /function EndpointStrip/);
   assert.doesNotMatch(app, /function StartWalkthrough/);
@@ -408,7 +408,7 @@ test('the SSH endpoint field includes the configured ssh invocation', async () =
 
 test('direct connection guides tell the user to hand the address to their agent', async () => {
   const startView = await readFile(
-    new URL('../src/features/getting-started-view.tsx', import.meta.url),
+    new URL('../src/features/connect-agents-view.tsx', import.meta.url),
     'utf8',
   );
 
@@ -419,7 +419,7 @@ test('direct connection guides tell the user to hand the address to their agent'
 
 test('a finished step 1 keeps its action but gives up the primary button', async () => {
   const startView = await readFile(
-    new URL('../src/features/getting-started-view.tsx', import.meta.url),
+    new URL('../src/features/connect-agents-view.tsx', import.meta.url),
     'utf8',
   );
   const addBody = startView.match(/const addBody = <>([\s\S]*?)<\/>;/)?.[1];
@@ -508,7 +508,7 @@ test('connection-string credentials are masked with asterisks', async () => {
 test('endpoint credentials use the native hygienic copy command', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const gettingStarted = await readFile(
-    new URL('../src/features/getting-started-view.tsx', import.meta.url),
+    new URL('../src/features/connect-agents-view.tsx', import.meta.url),
     'utf8',
   );
   const endpointCopy = app.match(
@@ -536,7 +536,7 @@ test('dropdown hide clears credential-shaped elicitation answers', async () => {
 test('popover disclosures do not claim an unimplemented ARIA menu model', async () => {
   const sources = await Promise.all([
     readFile(new URL('../app.tsx', import.meta.url), 'utf8'),
-    readFile(new URL('../src/features/getting-started-view.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/features/connect-agents-view.tsx', import.meta.url), 'utf8'),
   ]);
   const popovers = sources.join('\n');
   assert.doesNotMatch(popovers, /role="menu(?:item|itemradio)?"/);
