@@ -802,24 +802,14 @@ function LiveSessions({ extraClass = '' }: { extraClass?: string }): ReactNode {
           const who = session.agent
             ? `${session.agent} → ${session.connection}`
             : session.connection;
-          const confirming = state.confirm?.kind === 'close-session'
-            && state.confirm.id === session.id;
           return (
             <div key={session.id} className="live-row">
               <span className={`badge ${type.cls}`}>{type.label}</span>
               <div className="live-txt"><div className="c-name">{who}</div>
-                <div className="s-sub" title={confirming ? undefined : session.detail}>
-                  {confirming ? 'Close this session now?' : session.detail}
-                </div>
+                <div className="s-sub" title={session.detail}>{session.detail}</div>
               </div>
-              {confirming
-                ? <>
-                    <button className="btn sm" data-act="confirm-cancel">Cancel</button>
-                    <button className="btn sm danger" data-act="close-session-confirm"
-                      data-id={session.id}>Close</button>
-                  </>
-                : <button className="btn sm" data-act="close-session-ask"
-                    data-id={session.id}>Close</button>}
+              <button className="btn sm" data-act="close-session-ask"
+                data-id={session.id}>Close</button>
             </div>
           );
         })}
@@ -1102,19 +1092,6 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
       <thead><tr><th>Credential</th><th>Used by</th><th><span className="sr-only">Value</span></th>
         <th><span className="sr-only">Actions</span></th></tr></thead>
       <tbody>{secrets.map((s) => {
-    if (state.confirm && state.confirm.kind === 'del-secret-inuse' && state.confirm.id === s.id) {
-      return <tr key={s.id} className="confirm-row"><td colSpan={4}><div className="confirm-inline">
-        <span>Currently used by {s.used_by_names.join(', ')}. Delete the tool first.</span>
-        {s.used_by_names.map((name) => {
-          const connection = state.connections.find((candidate) => candidate.name === name);
-          return connection
-            ? <button key={connection.id} className="btn sm danger"
-                data-act="delete-using-connection" data-id={connection.id}>Delete {name}…</button>
-            : null;
-        })}
-        <button className="btn sm" data-act="confirm-cancel">OK</button>
-      </div></td></tr>;
-    }
     // The eye reveals only a short prefix (the full value never
     // enters the webview).
     const revealed = state.reveal[s.id];
@@ -3956,6 +3933,59 @@ function DeleteSecretConfirm(): ReactNode {
   );
 }
 
+// In-use credentials cannot be deleted until their tools are gone; offer a
+// path to each tool’s delete confirm instead of an inline table-row swap.
+function SecretInUseConfirm(): ReactNode {
+  const confirm = state.confirm;
+  if (!confirm || confirm.kind !== 'del-secret-inuse') return null;
+  const secret = state.secrets.find((candidate) => candidate.id === confirm.id);
+  const name = secret?.name ?? 'this credential';
+  const usedBy = secret?.used_by_names ?? [];
+  return (
+    <>
+      <h3 id="del-secret-inuse-title">Can’t delete {name}</h3>
+      <p>{usedBy.length
+        ? `Currently used by ${usedBy.join(', ')}. Delete the tool first.`
+        : 'This credential is still used by a tool. Delete the tool first.'}</p>
+      <div className="sheet-actions">
+        {usedBy.map((toolName) => {
+          const connection = state.connections.find((candidate) => candidate.name === toolName);
+          return connection
+            ? <button key={connection.id} className="btn danger"
+                data-act="delete-using-connection" data-id={connection.id}>
+                Delete {toolName}…
+              </button>
+            : null;
+        })}
+        <button className="btn" data-act="confirm-cancel">OK</button>
+      </div>
+    </>
+  );
+}
+
+function CloseSessionConfirm(): ReactNode {
+  const confirm = state.confirm;
+  if (!confirm || confirm.kind !== 'close-session') return null;
+  const session = state.sessions.find((candidate) => candidate.id === confirm.id);
+  const who = session
+    ? (session.agent
+      ? `${session.agent} → ${session.connection}`
+      : session.connection)
+    : 'this session';
+  return (
+    <>
+      <h3 id="close-session-title">Close {who}?</h3>
+      <p>The agent’s live connection will drop immediately.
+        {session?.detail ? ` ${session.detail}` : ''}</p>
+      <div className="sheet-actions">
+        <button className="btn" data-act="confirm-cancel">Cancel</button>
+        <button className="btn danger" data-act="close-session-confirm"
+          data-id={String(confirm.id ?? '')}>Close</button>
+      </div>
+    </>
+  );
+}
+
 function RotateKeyConfirm(): ReactNode {
   if (state.confirm?.kind !== 'rotate-key') return null;
   const subject = state.broker.mode === 'local' ? 'this computer’s' : 'the broker’s';
@@ -4003,6 +4033,22 @@ function ConfirmSheet(): ReactNode {
       <Sheet titleId="del-secret-title" className="wide confirm-sheet"
         backdropAction="confirm-cancel">
         <DeleteSecretConfirm />
+      </Sheet>
+    );
+  }
+  if (kind === 'del-secret-inuse') {
+    return (
+      <Sheet titleId="del-secret-inuse-title" className="wide confirm-sheet"
+        backdropAction="confirm-cancel">
+        <SecretInUseConfirm />
+      </Sheet>
+    );
+  }
+  if (kind === 'close-session') {
+    return (
+      <Sheet titleId="close-session-title" className="wide confirm-sheet"
+        backdropAction="confirm-cancel">
+        <CloseSessionConfirm />
       </Sheet>
     );
   }
