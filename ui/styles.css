@@ -438,8 +438,8 @@
   .dw-main .content{
   container-type: size;
   /* The bottom inset is the page's own breathing room: the last card on a
-     scrolled-to-the-end page (the 1Password row on Secrets) would otherwise
-     sit flush against the window edge. */
+     scrolled-to-the-end page would otherwise sit flush against the window
+     edge (or, on Secrets, against the status bar). */
   padding: 0 8px 24px 24px;
 }
   .dw-main .content > *{
@@ -1383,11 +1383,6 @@
 /* The chevron is the expand affordance; it points down when closed and
    flips when the row is open. */
 .cat-chev { display: inline-flex; transition: transform .15s ease; opacity: .8; }
-/* Expanded rows are full-bleed: they span the whole card and align with the
-   parent row's text, so a tool reads as one object rather than a card-in-card. */
-.cat-conns {
-  display: flow-root; background: var(--wash); border-top: 1px solid var(--line);
-}
 /* The status rail: kind tag + one health verdict per row, right-aligned
    into a fixed column so the eye runs down the pane instead of re-scanning
    each row. Color is spent only where it means something: a green dot for
@@ -1738,65 +1733,85 @@
    under it would double the separation, so the next section drops it. */
 .cc-issues + .cd-sec { padding-top: 0; }
 .cc-issues + .cd-sec::before { display: none; }
-.cat-conns .sec-table { margin: 0; }
-/* Credential rows share the darker card surface of their "Saved
-   credentials" parent row. Every hairline the expansion draws — under the
-   parent row, between credential rows, under the column labels, above Add
-   credential — is this one softened rule, so no edge reads stronger than
-   its neighbors. */
-.credentials-expansion {
-  --cred-line: color-mix(in srgb, var(--line-soft) 65%, transparent);
-  background: transparent;
-  border-top-color: var(--cred-line);
+/* ---------------------------- secrets page ------------------------------ */
+/* The saved-credentials table is the page: one card, no catalog chrome. */
+.secrets-card {
+  border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  background: var(--card-bg); box-shadow: var(--shadow-sm);
 }
-/* Credential-to-credential rules should recede like the surrounding card
-   separators instead of looking like nested section boundaries. */
-.credentials-expansion .sec-table td { border-bottom-color: var(--cred-line); }
-/* The column-label rule is the same hairline as the credential-to-credential
-   rules; the header should organize the table without becoming a section. */
-.credentials-expansion .sec-table th { border-bottom-color: var(--cred-line); }
-/* Align the credential table with the connection rows' text spine — the
-   column headers included, so "Credential" sits directly under the row title
-   it belongs to and directly over the names it labels. */
-.cat-conns .sec-table th:first-child,
-.cat-conns .sec-table td:first-child { padding-left: 64px; }
-.cat-conns .sec-table th:last-child,
-.cat-conns .sec-table td:last-child { padding-right: 14px; }
-/* Column labels, not data: small caps against the hairline under the parent
-   row, with room to breathe on both sides of it. */
-.cat-conns .sec-table th {
+.secrets-card .sec-table { margin: 0; }
+.secrets-card .sec-table th:first-child,
+.secrets-card .sec-table td:first-child { padding-left: 14px; }
+.secrets-card .sec-table th:last-child,
+.secrets-card .sec-table td:last-child { padding-right: 14px; }
+/* Column labels, not data: small caps over the names they label. */
+.secrets-card .sec-table th {
   padding: 9px 6px; font-size: 0.65625rem; font-weight: 700;
   letter-spacing: .07em; text-transform: uppercase;
 }
-/* Label the value itself, not the eye/action controls at the right edge. */
-.cat-conns .sec-table th:nth-child(3) { text-align: right; }
-/* The tray dropdown has no 64px text spine to align with — its rows start
-   at the card padding, and with no eye/action controls after the value the
-   label right-aligns over the values it names. */
-.dropdown-surface .cat-conns .sec-table th:first-child,
-.dropdown-surface .cat-conns .sec-table td:first-child { padding-left: 14px; }
-.dropdown-surface .cat-conns .sec-table th:nth-child(3) { text-align: right; }
-.cat-conns > .muted-note { padding: 10px 14px; }
-/* "Add credential" is a full-bleed activatable row like "More tools"; the
-   table's last-row hairline is the divider above it, so the row itself draws
-   no border of its own. */
-.cat-conns .cat-add-secret { border-top: 0; }
-/* With no rows, the empty note cannot provide the divider the last table row
-   normally supplies above the add action. */
-.credentials-expansion > .muted-note + .cat-add-secret {
-  border-top: 1px solid var(--cred-line);
-}
-.credentials-expansion .cat-add-secret:hover { background: var(--hover); }
+/* The last row's hairline is the card's own bottom edge (or the divider
+   above the tray's Add credential row); drawing both doubles it. */
+.secrets-card .sec-table tr:last-child td { border-bottom: 0; }
+.secrets-card > .muted-note { padding: 10px 14px; }
+/* The tray keeps Add credential as a full-bleed activatable row; the wide
+   window promotes it to the page header instead. */
+.secrets-card .cat-add-secret { border-top: 1px solid var(--line-soft); }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
 
-/* ---------------------------- 1Password vault --------------------------- */
-.onepassword-integrations { background: transparent; }
-.onepassword-integration-row {
-  display: flex; align-items: center; gap: 10px; min-height: 48px;
-  padding: 8px 14px 8px 64px; border-bottom: 1px solid var(--line-soft);
+/* The status bar: vault state compressed into one line of chrome flush with
+   the window bottom, outside the scroll pane, so it costs the table nothing
+   and managing vaults never reflows it. */
+.secrets-statusbar {
+  position: relative; flex: 0 0 auto;
+  display: flex; align-items: center; gap: 10px;
+  height: 34px; padding: 0 14px;
+  border-top: 1px solid var(--line);
+  background: var(--wash); color: var(--muted); font-size: 0.75rem;
 }
-.onepassword-integration-row:last-child { border-bottom: 0; }
+.sb-count { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-spacer { flex: 1; }
+.sb-vaults {
+  display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  border: 0; background: transparent; padding: 4px 8px; border-radius: 7px;
+  color: var(--ink-3); font: inherit; font-size: 0.75rem; font-weight: 600;
+  cursor: pointer;
+}
+.sb-vaults:hover, .sb-vaults.on { background: var(--hover); }
+.sb-vaults:disabled { opacity: .55; cursor: default; }
+.sb-vaults:disabled:hover { background: transparent; }
+.sb-1p { display: inline-flex; }
+.sb-1p svg { width: 13px; height: 13px; }
+.sb-chev { display: inline-flex; transition: transform .15s ease; }
+.sb-chev svg { width: 12px; height: 12px; color: var(--muted-2); }
+.sb-chev.open { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .sb-chev { transition: none; } }
+/* The popover anchors upward off the bar's right end. Menus portal to
+   #overlays at z-index 16; the panel sits just under them. */
+.vaults-panel {
+  position: absolute; right: 12px; bottom: 42px; z-index: 15;
+  width: min(350px, calc(100vw - 24px));
+  border: 1px solid var(--line-mid); border-radius: 10px; overflow: hidden;
+  background: var(--panel); box-shadow: var(--shadow-menu);
+}
+.vault-menu-btn { display: inline-flex; align-items: center; padding: 3px 6px; }
+.vault-menu-btn svg { width: 14px; height: 14px; }
+.vault-menu-btn.on { background: var(--btn-hover); }
+.vaults-connect-more {
+  display: flex; align-items: center; gap: 5px; width: 100%;
+  padding: 8px 12px; border: 0; border-top: 1px solid var(--line);
+  background: transparent; color: var(--accent-text); font: inherit;
+  font-size: 0.78125rem; font-weight: 600; cursor: pointer; text-align: left;
+}
+.vaults-connect-more:hover { background: var(--accent-wash); }
+
+/* ---------------------------- 1Password vault --------------------------- */
+.onepassword-integration-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-bottom: 1px solid var(--line-soft);
+}
+/* The connect-more footer under the last row draws its own hairline. */
+.onepassword-integration-row:last-of-type { border-bottom: 0; }
 .onepassword-integration-icon,
 .onepassword-review-icon {
   display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;

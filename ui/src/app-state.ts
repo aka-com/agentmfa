@@ -261,6 +261,10 @@ export interface AppState {
   toolSearch: string;
   secretSearch: string;
   catalogActionMenuOpen: string | null;
+  /** The Secrets status bar's vault popover is open. */
+  vaultsPanelOpen: boolean;
+  /** Integration id whose ⋯ menu is open inside the vault popover. */
+  vaultMenuOpen: string | null;
   /** The ✕ on the sample-tools card was pressed (persisted per machine). */
   samplesDismissed: boolean;
   /** Sample id with a one-press connect in flight, disabling its button. */
@@ -380,6 +384,8 @@ function createInitialState(): AppState {
     toolSearch: '',
     secretSearch: '',
     catalogActionMenuOpen: null,
+    vaultsPanelOpen: false,
+    vaultMenuOpen: null,
     samplesDismissed: readSamplesDismissed(),
     sampleConnecting: null,
     sectionsExpanded: [],

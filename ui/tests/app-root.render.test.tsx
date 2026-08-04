@@ -210,16 +210,36 @@ test('the 1Password sheet links a field through all three steps', { timeout: 8_0
   );
 });
 
+/** Open the Secrets status bar's vault popover (idempotent) and return it. */
+async function openVaultsPanel(): Promise<HTMLElement> {
+  const toggle = await testingLibrary.waitFor(() => {
+    const button = document.querySelector<HTMLButtonElement>(
+      'button[data-act="toggle-vaults-panel"]',
+    );
+    assert.ok(button, 'the status bar offers a vault toggle');
+    return button;
+  });
+  if (toggle.getAttribute('aria-expanded') !== 'true') testingLibrary.fireEvent.click(toggle);
+  return testingLibrary.waitFor(() => {
+    const panel = document.querySelector<HTMLElement>('.vaults-panel');
+    assert.ok(panel);
+    return panel;
+  });
+}
+
+const vaultRowByLabel = (label: string): HTMLElement | undefined =>
+  [...document.querySelectorAll<HTMLElement>('.onepassword-integration-row')]
+    .find((element) => element.querySelector('b')?.textContent === label);
+
 test('1Password credentials can recover and connections can be removed', { timeout: 8_000 }, async () => {
   testingLibrary.fireEvent.click(
     document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="secrets"]')!,
   );
+  // The earlier test's desktop-app connection moves the vault surface behind
+  // the status bar's vault button; connecting another lives in its popover.
+  const connectPanel = await openVaultsPanel();
   testingLibrary.fireEvent.click(
-    await testingLibrary.waitFor(() => {
-      const button = document.querySelector<HTMLButtonElement>('button[data-act="onepassword-open"]');
-      assert.ok(button);
-      return button;
-    }),
+    connectPanel.querySelector<HTMLButtonElement>('button[data-act="onepassword-open"]')!,
   );
   let dialog = await testingLibrary.findByRole(document.body, 'dialog', {
     name: 'Connect 1Password',
@@ -293,20 +313,28 @@ test('1Password credentials can recover and connections can be removed', { timeo
     dialog.querySelector<HTMLButtonElement>('button[data-act="sheet-cancel"]')!,
   );
 
+  await openVaultsPanel();
   const row = await testingLibrary.waitFor(() => {
-    const candidate = [...document.querySelectorAll<HTMLElement>('.onepassword-integration-row')]
-      .find((element) => element.querySelector('b')?.textContent === 'Recovery Account');
+    const candidate = vaultRowByLabel('Recovery Account');
     assert.ok(candidate);
     assert.equal(candidate.querySelector('.onepassword-integration-icon'), null);
-    assert.equal(
-      candidate.querySelector<HTMLButtonElement>('button[data-act="onepassword-update"]')?.textContent,
-      'Update connection',
-    );
+    // The linked count reads on its own line under the connection method.
+    assert.match(candidate.textContent ?? '', /Service account/);
+    assert.match(candidate.textContent ?? '', /0 linked credentials/);
     return candidate;
   });
   testingLibrary.fireEvent.click(
-    row.querySelector<HTMLButtonElement>('button[data-act="onepassword-update"]')!,
+    row.querySelector<HTMLButtonElement>('button[data-act="toggle-vault-menu"]')!,
   );
+  const update = await testingLibrary.waitFor(() => {
+    const button = document.querySelector<HTMLButtonElement>(
+      '.vault-menu-wrap button[data-act="onepassword-update"]',
+    );
+    assert.ok(button);
+    assert.equal(button.textContent, 'Update connection');
+    return button;
+  });
+  testingLibrary.fireEvent.click(update);
   dialog = await testingLibrary.findByRole(document.body, 'dialog', {
     name: 'Update 1Password credential',
   });
@@ -319,15 +347,23 @@ test('1Password credentials can recover and connections can be removed', { timeo
   );
   await testingLibrary.waitFor(() => assert.ok(!document.querySelector('.onepassword-sheet')));
 
+  await openVaultsPanel();
   const updatedRow = await testingLibrary.waitFor(() => {
-    const candidate = [...document.querySelectorAll<HTMLElement>('.onepassword-integration-row')]
-      .find((element) => element.querySelector('b')?.textContent === 'Recovery Account');
+    const candidate = vaultRowByLabel('Recovery Account');
     assert.ok(candidate);
     return candidate;
   });
   testingLibrary.fireEvent.click(
-    updatedRow.querySelector<HTMLButtonElement>('button[data-act="onepassword-delete-ask"]')!,
+    updatedRow.querySelector<HTMLButtonElement>('button[data-act="toggle-vault-menu"]')!,
   );
+  const remove = await testingLibrary.waitFor(() => {
+    const button = document.querySelector<HTMLButtonElement>(
+      '.vault-menu-wrap button[data-act="onepassword-delete-ask"]',
+    );
+    assert.ok(button);
+    return button;
+  });
+  testingLibrary.fireEvent.click(remove);
   const confirm = await testingLibrary.findByRole(document.body, 'dialog', {
     name: 'Remove Recovery Account?',
   });
@@ -337,12 +373,12 @@ test('1Password credentials can recover and connections can be removed', { timeo
   testingLibrary.fireEvent.click(
     confirm.querySelector<HTMLButtonElement>('button[data-act="onepassword-delete-confirm"]')!,
   );
+  // The surviving connection keeps the popover available; the removed one is
+  // gone from it.
+  await openVaultsPanel();
   await testingLibrary.waitFor(() => {
-    assert.equal(
-      [...document.querySelectorAll<HTMLElement>('.onepassword-integration-row')]
-        .some((element) => element.querySelector('b')?.textContent === 'Recovery Account'),
-      false,
-    );
+    assert.ok(document.querySelectorAll('.onepassword-integration-row').length >= 1);
+    assert.equal(vaultRowByLabel('Recovery Account'), undefined);
   });
 });
 
@@ -362,13 +398,13 @@ test('legacy remote brokers disable the 1Password surface', async () => {
     return button;
   });
   assert.equal(connect.textContent?.trim(), 'Unavailable');
-  assert.match(document.body.textContent ?? '', /remote broker needs an update/i);
+  assert.match(connect.title, /remote broker/i);
 
   await mock.invoke('switch_broker_local');
+  // Back on the local broker, the earlier tests' surviving connection
+  // reloads and the vault surface returns.
   await testingLibrary.waitFor(() => {
-    const button = document.querySelector<HTMLButtonElement>('button[data-act="onepassword-open"]');
-    assert.ok(button);
-    assert.equal(button.disabled, false);
+    assert.ok(document.querySelector('button[data-act="toggle-vaults-panel"]'));
   });
   testingLibrary.fireEvent.click(
     document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="connections"]')!,

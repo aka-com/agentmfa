@@ -203,6 +203,7 @@ function clearBrokerOwnedState(): void {
   state.wiringTools = null;
   state.onepasswordIntegrations = [];
   state.onepasswordFlow = null;
+  closeVaultsPanel();
   // View-local filters and panel state also describe the old broker's data:
   // an agent filter from broker A would silently empty broker B's activity.
   state.activityQuery = '';
@@ -289,6 +290,7 @@ function showRequestInbox(): void {
   state.startMenuOpen = null;
   state.addPalette = null;
   state.catalogActionMenuOpen = null;
+  closeVaultsPanel();
   state.activityAgentMenuOpen = false;
   state.connMenuOpen = null;
   state.connMenuPoint = null;
@@ -648,6 +650,7 @@ function positionOpenMenus(): void {
   if (state.epMenuOpen) positionEpCopyMenu();
   if (state.epOptsMenuOpen) positionEpOptsMenu();
   if (state.catalogActionMenuOpen) positionCatalogConnectMenu();
+  if (state.vaultMenuOpen) positionVaultMenu();
   if (state.startMenuOpen) positionStartMenu();
   if (state.activityAgentMenuOpen) positionActivityAgentMenu();
 }
@@ -1341,26 +1344,6 @@ function confirmScopeNote(c: ConnectionSummary): string {
  * interrupted, and it belongs next to the access switch it narrows rather
  * than in global Settings, because the answer differs per tool.
  */
-// The built-in credentials store, expanded inline: the same secrets table
-// the standalone tab used to own.
-function CredentialsExpansion(): ReactNode {
-  const query = state.tab === 'secrets' ? state.secretSearch : '';
-  const needle = query.trim().toLowerCase();
-  const matching = state.secrets.filter((secret) => !needle
-    || secret.name.toLowerCase().includes(needle)
-    || secret.used_by_names.some((name) => name.toLowerCase().includes(needle)));
-  return (
-    <div className="cat-conns credentials-expansion">
-      {matching.length
-        ? <SecretsTable query={query} />
-        : <div className="muted-note">
-            {state.secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}
-          </div>}
-      <button className="cat-more cat-add-secret" data-act="open-add-secret">＋ Add credential</button>
-    </div>
-  );
-}
-
 /** The primary action label a catalog entry carries wherever it can be added. */
 function catalogAddLabel(entry: CatalogEntry): string {
   return entry.requiresSetup || ['mcp', 'http', 'postgres', 'ssh'].includes(entry.id) || entry.preset
@@ -1391,39 +1374,11 @@ function onePasswordMethodLabel(method: OnePasswordIntegration['kind']): string 
   return 'Connect server';
 }
 
-function OnePasswordCatalogExpansion(): ReactNode {
-  if (!supportsOnePassword(state.broker)) {
-    return <div className="cat-conns onepassword-integrations">
-      <div className="muted-note">This remote broker needs an update before it can use 1Password.</div>
-    </div>;
-  }
-  return (
-    <div className="cat-conns onepassword-integrations">
-      {state.onepasswordIntegrations.length
-        ? state.onepasswordIntegrations.map((integration) => {
-            const linked = state.secrets.filter((secret) => secret.source?.kind === 'one_password'
-              && secret.source.integration_id === integration.id).length;
-            const detail = integration.account || integration.connect_url || onePasswordMethodLabel(integration.kind);
-            return <div className="onepassword-integration-row" key={integration.id}>
-              <span className="onepassword-integration-copy">
-                <b>{integration.label}</b>
-                <span>{detail} · {linked} linked {linked === 1 ? 'credential' : 'credentials'}</span>
-              </span>
-              <span className="onepassword-integration-actions">
-                <button className="btn sm" data-act="onepassword-browse"
-                  data-id={integration.id}>Browse</button>
-                {integration.kind !== 'desktop_app'
-                  ? <button className="btn sm" data-act="onepassword-update"
-                      data-id={integration.id}>Update connection</button>
-                  : null}
-                <button className="btn sm danger" data-act="onepassword-delete-ask"
-                  data-id={integration.id}>Remove</button>
-              </span>
-            </div>;
-          })
-        : <div className="muted-note">No 1Password connections yet.</div>}
-    </div>
-  );
+/** Any vault action leaves the popover behind — the sheet or confirm it
+ * opens replaces it, and the bar is still there when that closes. */
+function closeVaultsPanel(): void {
+  state.vaultsPanelOpen = false;
+  state.vaultMenuOpen = null;
 }
 
 async function openOnePasswordFlow(
@@ -1998,20 +1953,11 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
       </div>
     );
   }
-  const builtin = entry.via === 'builtin';
-  const onePassword = entry.id === 'onepassword-vault';
-  const onePasswordAvailable = !onePassword || supportsOnePassword(state.broker);
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
   const addLabel = catalogAddLabel(entry);
   let action: ReactNode = null;
-  if (onePassword) {
-    action = <button className="btn cat-add" data-act="onepassword-open"
-      disabled={!onePasswordAvailable}
-      title={onePasswordAvailable ? undefined : 'Update this remote broker to use 1Password'}>
-      {onePasswordAvailable ? 'Connect' : 'Unavailable'}
-    </button>;
-  } else if (!builtin && quickConnect) {
+  if (quickConnect) {
     action = (
       <div className={`cat-connect-wrap ${actionMenuOpen ? 'open' : ''}`}>
         <div className="cat-connect-buttons">
@@ -2044,14 +1990,14 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
           : null}
       </div>
     );
-  } else if (!builtin && entry.via === 'connection') {
+  } else if (entry.via === 'connection') {
     action = <button className="btn cat-add" data-act="catalog-add"
       data-id={entry.id}>{addLabel}</button>;
-  } else if (!builtin) {
+  } else {
     action = <span className="cat-soon" title="Arrives with the MCP layer">Soon</span>;
   }
   return (
-    <div className={`cat-row-wrap ${builtin ? 'open' : ''} ${actionMenuOpen ? 'menu-open' : ''}`}>
+    <div className={`cat-row-wrap ${actionMenuOpen ? 'menu-open' : ''}`}>
       <div className="cat-row">
         <span className="cat-ico" aria-hidden="true"><Icon markup={ICONS[entry.icon] || ''} /></span>
         <div className="cat-tx"><b>{entry.name}</b>
@@ -2062,7 +2008,6 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
           : null}
         {action}
       </div>
-      {onePassword ? <OnePasswordCatalogExpansion /> : builtin ? <CredentialsExpansion /> : null}
     </div>
   );
 }
@@ -2861,30 +2806,114 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
   </>;
 }
 
+// The saved-credentials table is the page: one card, no catalog chrome.
+// Vault state lives in the status bar outside the scroll pane (see
+// SecretsStatusBar), so the table gets every remaining pixel.
 function SecretsView(): ReactNode {
-  const allEntries = visibleCatalog('').filter((entry) => entry.section === 'Secrets');
-  const needle = state.secretSearch.trim().toLowerCase();
-  const entries = allEntries.filter((entry) => {
-    const entryMatch = !needle
-      || entry.name.toLowerCase().includes(needle)
-      || entry.description.toLowerCase().includes(needle)
-      || (entry.keywords || []).some((keyword) => keyword.toLowerCase().includes(needle));
-    const savedSecretMatch = entry.id === 'credentials' && state.secrets.some((secret) =>
-      secret.name.toLowerCase().includes(needle)
-      || secret.used_by_names.some((name) => name.toLowerCase().includes(needle)));
-    return entryMatch || savedSecretMatch;
-  });
-  const rows = connectedCatalogFirst(entries, state.connections);
+  const query = state.secretSearch;
+  const needle = query.trim().toLowerCase();
+  const matching = state.secrets.filter((secret) => !needle
+    || secret.name.toLowerCase().includes(needle)
+    || secret.used_by_names.some((name) => name.toLowerCase().includes(needle)));
   return (
-    <div className="catalog">
-      {rows.length
-        ? rows.map((entry) => (
-            <div key={entry.id} className="cat-section">
-              <div className="cat-rows"><CatalogRow entry={entry} /></div>
-            </div>
-          ))
-        : <div className="muted-note">No secrets match your search.</div>}
+    <div className="secrets-card">
+      {matching.length
+        ? <SecretsTable query={query} />
+        : <div className="muted-note">
+            {state.secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}
+          </div>}
+      {mode === 'dropdown'
+        ? <button className="cat-more cat-add-secret" data-act="open-add-secret">＋ Add credential</button>
+        : null}
     </div>
+  );
+}
+
+/* ---- secrets status bar ------------------------------------------------ */
+// Vault state compresses into a status bar flush with the window bottom:
+// the left side is a live inventory, the right side manages 1Password
+// connections from an upward-anchored popover, so toggling it never
+// reflows the table above.
+
+function VaultRow({ integration }: { integration: OnePasswordIntegration }): ReactNode {
+  const linked = state.secrets.filter((secret) => secret.source?.kind === 'one_password'
+    && secret.source.integration_id === integration.id).length;
+  const method = integration.account || integration.connect_url
+    || onePasswordMethodLabel(integration.kind);
+  const menuOpen = state.vaultMenuOpen === integration.id;
+  return (
+    <div className="onepassword-integration-row vault-row">
+      <span className="onepassword-integration-copy">
+        <b>{integration.label}</b>
+        <span>{method}</span>
+        <span>{linked} linked {linked === 1 ? 'credential' : 'credentials'}</span>
+      </span>
+      <span className="onepassword-integration-actions">
+        <button className="btn sm" data-act="onepassword-browse"
+          data-id={integration.id}>Browse</button>
+        <button className={`btn sm vault-menu-btn ${menuOpen ? 'on' : ''}`}
+          data-act="toggle-vault-menu" data-id={integration.id}
+          title={`Options for ${integration.label}`}
+          aria-label={`Options for ${integration.label}`}
+          aria-expanded={menuOpen} aria-haspopup="true">
+          <Icon markup={ICONS.ellipsis} />
+        </button>
+        {menuOpen
+          ? createPortal(
+              <div className="anchored-menu-portal vault-menu-wrap">
+                <div className="tile-menu" aria-label={`Options for ${integration.label}`}>
+                  {integration.kind !== 'desktop_app'
+                    ? <button className="menu-item" data-act="onepassword-update"
+                        data-id={integration.id}>Update connection</button>
+                    : null}
+                  <button className="menu-item danger" data-act="onepassword-delete-ask"
+                    data-id={integration.id}>Remove…</button>
+                </div>
+              </div>,
+              overlays(),
+            )
+          : null}
+      </span>
+    </div>
+  );
+}
+
+function SecretsStatusBar(): ReactNode {
+  const available = supportsOnePassword(state.broker);
+  const integrations = state.onepasswordIntegrations;
+  const linked = state.secrets.filter((secret) => secret.source?.kind === 'one_password').length;
+  const total = state.secrets.length;
+  const open = state.vaultsPanelOpen && integrations.length > 0;
+  return (
+    <footer className="secrets-statusbar">
+      <span className="sb-count">
+        {total} {total === 1 ? 'credential' : 'credentials'}
+        {linked ? ` · ${linked} linked from 1Password` : ''}
+      </span>
+      <span className="sb-spacer"></span>
+      {integrations.length
+        ? <button className={`sb-vaults ${open ? 'on' : ''}`} data-act="toggle-vaults-panel"
+            aria-expanded={open} aria-haspopup="true" title="Manage 1Password vaults">
+            <span className="sb-1p" aria-hidden="true"><Icon markup={ICONS.onepassword} /></span>
+            {integrations.length} {integrations.length === 1 ? 'vault' : 'vaults'}
+            <span className={`sb-chev ${open ? 'open' : ''}`} aria-hidden="true">
+              <Icon markup={ICONS.chevronDown} /></span>
+          </button>
+        : <button className="sb-vaults" data-act="onepassword-open" disabled={!available}
+            title={available ? undefined : 'Update this remote broker to use 1Password'}>
+            <span className="sb-1p" aria-hidden="true"><Icon markup={ICONS.onepassword} /></span>
+            {available ? 'Connect 1Password' : 'Unavailable'}
+          </button>}
+      {open
+        ? <div className="vaults-panel" role="group" aria-label="1Password vaults">
+            {integrations.map((integration) =>
+              <VaultRow key={integration.id} integration={integration} />)}
+            <button className="vaults-connect-more" data-act="onepassword-open">
+              ＋ Connect another vault
+            </button>
+          </div>
+        : null}
+    </footer>
   );
 }
 
@@ -3575,6 +3604,9 @@ function MainWindow(): ReactNode {
           <input id="secret-search" className="cat-search" type="search" placeholder="Search secrets…"
             aria-label="Search secrets" value={state.secretSearch}
             onChange={(e) => { state.secretSearch = e.currentTarget.value; render(); }} />
+          <button className="btn primary add-tool-btn" data-act="open-add-secret">
+            <Icon markup={ICONS.plus} /> Add credential
+          </button>
         </div>
       : state.tab === 'activity'
         ? <button className="btn" data-act="clear-activity-ask"
@@ -3648,6 +3680,7 @@ function MainWindow(): ReactNode {
                   {state.tab === 'start' ? null : <GlobalSections />}
                   <LoadFailureBand />
                   <div className="content"><TabContent /></div>
+                  {state.tab === 'secrets' ? <SecretsStatusBar /> : null}
                 </>}
           </div>
         </div>
@@ -3703,6 +3736,7 @@ function DropdownWindow(): ReactNode {
         {state.tab === 'start' ? null : <GlobalSections />}
         <LoadFailureBand />
         <div className="content dd-content"><TabContent /></div>
+        {state.tab === 'secrets' ? <SecretsStatusBar /> : null}
       </div>
       <><AddToolPalette /><Sheets /><ConfirmSheet /></>
     </>
@@ -6864,6 +6898,17 @@ function positionCatalogConnectMenu(): void {
   if (trigger && wrap) placeAnchoredMenu(wrap, trigger);
 }
 
+/** Vault ⋯ menu inside the Secrets status-bar popover. */
+function positionVaultMenu(): void {
+  const id = state.vaultMenuOpen;
+  if (!id) return;
+  const trigger = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-act="toggle-vault-menu"]'),
+  ).find((candidate) => candidate.dataset.id === id);
+  const wrap = document.querySelector<HTMLElement>('.vault-menu-wrap');
+  if (trigger && wrap) placeAnchoredMenu(wrap, trigger);
+}
+
 /** Connect-agents sentence blanks (tool / client). */
 function positionStartMenu(): void {
   const kind = state.startMenuOpen;
@@ -6946,6 +6991,20 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.vaultMenuOpen
+      && !target?.closest('.vaults-panel')
+      && !target?.closest('.vault-menu-wrap')) {
+    state.vaultMenuOpen = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
+  if (state.vaultsPanelOpen
+      && !target?.closest('.secrets-statusbar')
+      && !target?.closest('.vault-menu-wrap')) {
+    state.vaultsPanelOpen = false;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.activityAgentMenuOpen
       && !target?.closest('.act-filter-select')
       && !target?.closest('.act-filter-menu-wrap')) {
@@ -6994,6 +7053,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.startMenuOpen = null;
       state.addPalette = null;
       state.catalogActionMenuOpen = null;
+      closeVaultsPanel();
       state.activityAgentMenuOpen = false;
       state.connMenuOpen = null;
       state.connMenuPoint = null;
@@ -7477,17 +7537,29 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       if (entry) await addCatalogEntry(entry);
       break;
     }
+    case 'toggle-vaults-panel':
+      state.vaultsPanelOpen = !state.vaultsPanelOpen;
+      state.vaultMenuOpen = null;
+      render();
+      break;
+    case 'toggle-vault-menu':
+      state.vaultMenuOpen = state.vaultMenuOpen === id ? null : id;
+      render();
+      break;
     case 'onepassword-open':
+      closeVaultsPanel();
       await openOnePasswordFlow();
       break;
     case 'onepassword-browse': {
       const integration = state.onepasswordIntegrations.find((candidate) => candidate.id === id);
+      closeVaultsPanel();
       if (integration) await openOnePasswordFlow(integration);
       break;
     }
     case 'onepassword-update': {
       const integration = state.onepasswordIntegrations.find((candidate) => candidate.id === id)
         ?? state.onepasswordFlow?.integration;
+      closeVaultsPanel();
       if (!integration || integration.kind === 'desktop_app') break;
       if (state.sheet?.kind === 'onepassword') closeSheet();
       await openOnePasswordFlow(integration, 'update');
@@ -7496,6 +7568,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'onepassword-delete-ask': {
       const integration = state.onepasswordIntegrations.find((candidate) => candidate.id === id)
         ?? state.onepasswordFlow?.integration;
+      closeVaultsPanel();
       if (!integration) break;
       if (state.sheet?.kind === 'onepassword') closeSheet();
       state.confirm = { kind: 'del-onepassword', id: integration.id };
@@ -8613,6 +8686,8 @@ function handleAppKeyDown(e: KeyboardEvent): void {
   if (e.key === 'Escape') {
     if (state.addPalette) { state.addPalette = null; render(); return; }
     if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
+    if (state.vaultMenuOpen) { state.vaultMenuOpen = null; render(); return; }
+    if (state.vaultsPanelOpen) { state.vaultsPanelOpen = false; render(); return; }
     if (state.activityAgentMenuOpen) { state.activityAgentMenuOpen = false; render(); return; }
     if (state.startMenuOpen) { closeStartMenu(state.startMenuOpen); return; }
     if (state.connMenuOpen) {
@@ -8938,6 +9013,7 @@ async function boot() {
     state.confirmDiscard = false;
     state.confirm = null;
     state.catalogActionMenuOpen = null;
+    closeVaultsPanel();
     state.startMenuOpen = null;
     state.addPalette = null;
     state.connMenuOpen = null;
