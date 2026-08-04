@@ -1,6 +1,6 @@
 {
   "name": "@aka-com/multitool",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Multitool credential broker for coding agents, without exposing credentials.",
   "keywords": [
     "multitool",
@@ -41,10 +41,10 @@
     "linux"
   ],
   "optionalDependencies": {
-    "@aka-com/multitool-darwin-arm64": "0.1.0",
-    "@aka-com/multitool-darwin-x64": "0.1.0",
-    "@aka-com/multitool-linux-arm64": "0.1.0",
-    "@aka-com/multitool-linux-x64": "0.1.0"
+    "@aka-com/multitool-darwin-arm64": "0.2.0",
+    "@aka-com/multitool-darwin-x64": "0.2.0",
+    "@aka-com/multitool-linux-arm64": "0.2.0",
+    "@aka-com/multitool-linux-x64": "0.2.0"
   },
   "publishConfig": {
     "access": "public"

@@ -1,6 +1,6 @@
 {
   "name": "@aka-com/multitool-darwin-arm64",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Multitool CLI binary for macOS (Apple silicon). Install @aka-com/multitool instead of installing this directly.",
   "homepage": "https://github.com/aka-com/multitool",
   "repository": {

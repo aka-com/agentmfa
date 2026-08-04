@@ -225,9 +225,9 @@ Prerequisites: one-time macOS cross-linker setup: `brew install zig`
    npm run build          # signed universal .app + .dmg (auto-detects identity)
    npm run build:release  # will also notarize, staple, and validate
 
-   gh release create v0.1.0 \
-     src-tauri/target/universal-apple-darwin/release/bundle/dmg/Multitool_0.1.0_universal.dmg \
+   gh release create v0.2.0 \
+     src-tauri/target/universal-apple-darwin/release/bundle/dmg/Multitool_0.2.0_universal.dmg \
      --target main \
-     --title "Multitool 0.1.0" \
+     --title "Multitool 0.2.0" \
      --generate-notes
    ```

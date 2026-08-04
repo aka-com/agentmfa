@@ -129,7 +129,7 @@ func initialize(raw json.RawMessage) (*onepassword.Client, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	options := []onepassword.ClientOption{
-		onepassword.WithIntegrationInfo("Multitool", "v0.1.0"),
+		onepassword.WithIntegrationInfo("Multitool", "v0.2.0"),
 	}
 	switch payload.Auth.Method {
 	case "desktop_app":

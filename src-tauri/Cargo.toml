@@ -4,7 +4,7 @@
 
 [package]
 name = "multitool-desktop"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "A secrets manager for humans and agents."
