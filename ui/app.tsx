@@ -2901,12 +2901,14 @@ function VaultRow({ integration }: { integration: OnePasswordIntegration }): Rea
 function SecretsStatusBar(): ReactNode {
   const available = supportsOnePassword(state.broker);
   const integrations = state.onepasswordIntegrations;
+  const linked = state.secrets.filter((secret) => secret.source?.kind === 'one_password').length;
   const total = state.secrets.length;
   const open = state.vaultsPanelOpen && integrations.length > 0;
   return (
     <footer className="secrets-statusbar">
       <span className="sb-count">
         {total} {total === 1 ? 'credential' : 'credentials'}
+        {linked ? ` · ${linked} linked from 1Password` : ''}
       </span>
       <span className="sb-spacer"></span>
       {integrations.length
@@ -3967,7 +3969,7 @@ function DeleteConnectionConfirm(): ReactNode {
         {enabled ? ' Agents will lose access immediately.' : ''}</p>
       <div className="sheet-actions">
         <button className="btn" data-act="confirm-cancel">Cancel</button>
-        <button className="btn danger" data-act="del-conn-confirm"
+        <button className="btn danger" data-act="del-conn-confirm" data-sheet-autofocus="true"
           data-id={String(confirm.id ?? '')}>Delete</button>
       </div>
     </>
@@ -3984,7 +3986,7 @@ function DeleteOnePasswordConfirm(): ReactNode {
     <p>Multitool will remove the connected vault and credentials. No 1Password items will be changed.</p>
     <div className="sheet-actions">
       <button className="btn" data-act="confirm-cancel">Cancel</button>
-      <button className="btn danger" data-act="onepassword-delete-confirm"
+      <button className="btn danger" data-act="onepassword-delete-confirm" data-sheet-autofocus="true"
         data-id={String(confirm.id ?? '')}>Remove</button>
     </div>
   </>;
@@ -4006,7 +4008,7 @@ function DeleteSecretConfirm(): ReactNode {
         : 'This credential will be removed from the macOS Keychain.'}</p>
       <div className="sheet-actions">
         <button className="btn" data-act="confirm-cancel">Cancel</button>
-        <button className="btn danger" data-act="del-secret-confirm"
+        <button className="btn danger" data-act="del-secret-confirm" data-sheet-autofocus="true"
           data-id={String(confirm.id ?? '')}>{linked ? 'Unlink' : 'Delete'}</button>
       </div>
     </>

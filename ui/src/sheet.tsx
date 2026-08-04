@@ -79,7 +79,8 @@ export function Sheet({
     ).filter((candidate) => candidate !== dialogRef.current);
     const releaseBackgroundSheets = backgroundSheets.map(isolate);
 
-    const initial = dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)
+    const initial = dialogRef.current?.querySelector<HTMLElement>('[data-sheet-autofocus="true"]')
+      ?? dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)
       ?? dialogRef.current;
     initial?.focus();
 

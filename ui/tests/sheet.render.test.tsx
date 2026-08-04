@@ -89,6 +89,22 @@ test('Sheet supports alert dialogs and custom backdrop actions', () => {
   );
 });
 
+test('Sheet honors an explicitly marked initial focus target', () => {
+  const surface = document.createElement('main');
+  surface.className = 'surface';
+  document.body.append(surface);
+
+  const view = testingLibrary.render(
+    <Sheet titleId="delete-title">
+      <h3 id="delete-title">Delete credential?</h3>
+      <button>Cancel</button>
+      <button data-sheet-autofocus="true">Delete</button>
+    </Sheet>,
+  );
+
+  assert.equal(document.activeElement, view.getByRole('button', { name: 'Delete' }));
+});
+
 test('a stacked Sheet makes the underlying dialog inert until it closes', async () => {
   const surface = document.createElement('main');
   surface.className = 'surface';
