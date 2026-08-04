@@ -573,7 +573,7 @@ async fn complete_sign_in(
     .await;
     broker
         .store
-        .connection_by_name(name)
+        .connection_by_name(&broker.workspace, name)
         .expect("connection created")
 }
 
@@ -623,7 +623,10 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
     let session_id = Uuid::parse_str(&started.id).expect("session id");
 
     // Nothing exists until the dance completes.
-    assert!(broker.store.connection_by_name("github-test").is_none());
+    assert!(broker
+        .store
+        .connection_by_name(&broker.workspace, "github-test")
+        .is_none());
 
     // Play the browser: follow the authorization URL; the mock AS
     // auto-approves and redirects to the flow's loopback listener.
@@ -671,7 +674,7 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
     // vault under the derived name and the account persisted.
     let connection = broker
         .store
-        .connection_by_name("github-test")
+        .connection_by_name(&broker.workspace, "github-test")
         .expect("connection created");
     let ConnectionConfig::Api {
         template, mcp_path, ..
@@ -684,11 +687,15 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
     assert_eq!(connection.account.as_deref(), Some("Octo Cat (@octocat)"));
     let secret = broker
         .store
-        .list_secrets()
+        .list_secrets(&broker.workspace)
         .into_iter()
         .find(|meta| meta.name == "GITHUB_TEST_MCP_TOKEN")
         .expect("token stored");
-    let value = broker.store.secret_value(&secret.id).await.expect("value");
+    let value = broker
+        .store
+        .secret_value(&broker.workspace, &secret.id)
+        .await
+        .expect("value");
     assert_eq!(&*value, ACCESS_TOKEN);
 
     // The status button's path: reachable, account acknowledged, tools
@@ -788,7 +795,7 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
     .await;
     let names: Vec<String> = broker
         .store
-        .list_connections()
+        .list_connections(&broker.workspace)
         .into_iter()
         .map(|connection| connection.name)
         .collect();
@@ -797,7 +804,7 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
     // Two tokens for one target MCP, held under distinct vault names.
     let secrets: Vec<String> = broker
         .store
-        .list_secrets()
+        .list_secrets(&broker.workspace)
         .into_iter()
         .map(|meta| meta.name)
         .collect();
@@ -837,7 +844,10 @@ async fn an_authorization_response_from_the_wrong_issuer_is_rejected_end_to_end(
         panic!("issuer mismatch unexpectedly succeeded")
     };
     assert!(message.contains("unexpected issuer"), "{message}");
-    assert!(broker.store.connection_by_name("issuer-mismatch").is_none());
+    assert!(broker
+        .store
+        .connection_by_name(&broker.workspace, "issuer-mismatch")
+        .is_none());
 }
 
 #[tokio::test]
@@ -853,7 +863,7 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
     assert!(oauth.expires_at.is_some());
     let secret_names: Vec<String> = broker
         .store
-        .list_secrets()
+        .list_secrets(&broker.workspace)
         .into_iter()
         .map(|meta| meta.name)
         .collect();
@@ -861,7 +871,7 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
     let grant: Value = serde_json::from_str(
         &broker
             .store
-            .connection_oauth_grant(&connection.id)
+            .connection_oauth_grant(&broker.workspace, &connection.id)
             .await
             .expect("grant stored"),
     )
@@ -891,19 +901,23 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
     // The vault-held token was replaced with the renewed one…
     let secret = broker
         .store
-        .list_secrets()
+        .list_secrets(&broker.workspace)
         .into_iter()
         .find(|meta| meta.name == "GITHUB_REFRESH_MCP_TOKEN")
         .expect("token secret");
     assert_eq!(
-        &*broker.store.secret_value(&secret.id).await.expect("value"),
+        &*broker
+            .store
+            .secret_value(&broker.workspace, &secret.id)
+            .await
+            .expect("value"),
         RENEWED_TOKEN
     );
     // …and the rotated refresh token was kept for next time.
     let grant: Value = serde_json::from_str(
         &broker
             .store
-            .connection_oauth_grant(&connection.id)
+            .connection_oauth_grant(&broker.workspace, &connection.id)
             .await
             .expect("grant"),
     )
@@ -914,12 +928,17 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
     // the check runs, even though the upstream still accepts the token.
     let raw = broker
         .store
-        .connection_oauth_grant(&connection.id)
+        .connection_oauth_grant(&broker.workspace, &connection.id)
         .await
         .expect("grant");
     broker
         .store
-        .set_connection_oauth(&connection.id, raw, Some(chrono::Utc::now()))
+        .set_connection_oauth(
+            &broker.workspace,
+            &connection.id,
+            raw,
+            Some(chrono::Utc::now()),
+        )
         .await
         .expect("age the token");
     let report = broker
@@ -939,12 +958,17 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
     }
     let raw = broker
         .store
-        .connection_oauth_grant(&connection.id)
+        .connection_oauth_grant(&broker.workspace, &connection.id)
         .await
         .expect("grant");
     broker
         .store
-        .set_connection_oauth(&connection.id, raw, Some(chrono::Utc::now()))
+        .set_connection_oauth(
+            &broker.workspace,
+            &connection.id,
+            raw,
+            Some(chrono::Utc::now()),
+        )
         .await
         .expect("age the token");
     let report = broker
@@ -967,7 +991,7 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
     let grant: Value = serde_json::from_str(
         &broker
             .store
-            .connection_oauth_grant(&connection.id)
+            .connection_oauth_grant(&broker.workspace, &connection.id)
             .await
             .expect("grant"),
     )
@@ -995,7 +1019,7 @@ async fn agent_mcp_traffic_recovers_once_from_an_early_oauth_rejection() {
     // the mutating tool itself is accepted only once.
     vendor.lock().unwrap().current_access = "revoked-early".into();
     let daemon = daemon::serve(broker.clone()).await.unwrap();
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     let (status, response) = uds_json_request(
         &daemon.socket_path,
         &token,
@@ -1081,7 +1105,10 @@ async fn a_server_that_never_asks_for_auth_fails_with_a_token_hint() {
         hint.as_deref().unwrap_or_default().contains("token"),
         "{hint:?}"
     );
-    assert!(broker.store.connection_by_name("open-server").is_none());
+    assert!(broker
+        .store
+        .connection_by_name(&broker.workspace, "open-server")
+        .is_none());
 }
 
 #[tokio::test]
@@ -1141,11 +1168,11 @@ async fn a_preset_client_signs_in_without_dynamic_registration() {
     // reconnect can reuse it without asking again.
     let connection = broker
         .store
-        .connection_by_name("gmail-style")
+        .connection_by_name(&broker.workspace, "gmail-style")
         .expect("connection created");
     let stored = broker
         .store
-        .connection_oauth_grant(&connection.id)
+        .connection_oauth_grant(&broker.workspace, &connection.id)
         .await
         .expect("grant stored");
     let grant =
@@ -1256,5 +1283,8 @@ async fn an_external_redirect_sign_in_completes_via_code_delivery() {
         panic!("expected success, got {:?}", done.phase);
     };
     assert_eq!(connection_name, "github-remote");
-    assert!(broker.store.connection_by_name("github-remote").is_some());
+    assert!(broker
+        .store
+        .connection_by_name(&broker.workspace, "github-remote")
+        .is_some());
 }

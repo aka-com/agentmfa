@@ -504,7 +504,7 @@ impl Broker {
     ) -> Result<(String, ConnectionConfig, CompletionPlan)> {
         if let Some(raw) = &draft.reauth_connection_id {
             let id = Uuid::parse_str(raw).map_err(|_| CoreError::ConnectionNotFound)?;
-            let connection = self.store.connection_by_id(&id)?;
+            let connection = self.store.connection_by_id(&self.workspace, &id)?;
             let ConnectionConfig::Api {
                 mcp_path: Some(_), ..
             } = &connection.config
@@ -553,7 +553,7 @@ impl Broker {
         // Surface invalid input (bad host, taken name) before any browser
         // opens; `add_connection_with_secret` re-checks at completion.
         self.store
-            .preflight_add_connection_with_secret(&secret_name, &spec)?;
+            .preflight_add_connection_with_secret(&self.workspace, &secret_name, &spec)?;
         Ok((
             name,
             config,
@@ -580,7 +580,7 @@ impl Broker {
         };
         let taken: std::collections::HashSet<String> = self
             .store
-            .list_secrets()
+            .list_secrets(&self.workspace)
             .into_iter()
             .map(|meta| meta.name)
             .collect();
@@ -811,7 +811,7 @@ async fn run_flow(
                     {
                         broker
                             .store
-                            .connection_oauth_grant(connection_id)
+                            .connection_oauth_grant(&broker.workspace, connection_id)
                             .await
                             .ok()
                             .and_then(|value| McpOAuthGrant::from_secret_value(&value).ok())
@@ -967,11 +967,15 @@ async fn run_flow(
         } => {
             let connection = broker
                 .store
-                .connection_by_id(&connection_id)
+                .connection_by_id(&broker.workspace, &connection_id)
                 .map_err(|e| FlowFailure::plain(e.to_string()))?;
             broker
                 .store
-                .replace_secret_value(&secret_id, Zeroizing::new(tokens.access_token.to_string()))
+                .replace_secret_value(
+                    &broker.workspace,
+                    &secret_id,
+                    Zeroizing::new(tokens.access_token.to_string()),
+                )
                 .await
                 .map_err(|e| FlowFailure::plain(format!("could not store the new token: {e}")))?;
             broker.publish_agent_surface_change();
@@ -999,7 +1003,12 @@ async fn run_flow(
         .map(|seconds| Utc::now() + chrono::Duration::seconds(seconds));
     if let Err(error) = broker
         .store
-        .set_connection_oauth(&connection_id, grant.to_secret_value(), expires_at)
+        .set_connection_oauth(
+            &broker.workspace,
+            &connection_id,
+            grant.to_secret_value(),
+            expires_at,
+        )
         .await
     {
         tracing::warn!("could not store the OAuth refresh grant for {connection_name}: {error}");
@@ -1028,7 +1037,7 @@ async fn run_flow(
         if report.account.is_some() {
             let _ = broker
                 .store
-                .set_connection_account(&connection_id, report.account.clone())
+                .set_connection_account(&broker.workspace, &connection_id, report.account.clone())
                 .await;
             broker.events.connections_changed();
         }

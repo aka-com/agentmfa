@@ -27,7 +27,7 @@ async fn rust_host_owns_the_streamable_http_session_lifecycle() {
     )
     .await
     .unwrap();
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     let host = mcp_host::serve(broker).await.unwrap();
     let client = reqwest::Client::new();
 
@@ -237,32 +237,43 @@ async fn rust_host_projects_and_invokes_native_broker_tools() {
     .unwrap();
     broker
         .store
-        .add_secret("API_KEY", Zeroizing::new("secret-value".into()))
+        .add_secret(
+            &broker.workspace,
+            "API_KEY",
+            Zeroizing::new("secret-value".into()),
+        )
         .await
         .unwrap();
     broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "prod-db".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(upstream_port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{API_KEY}}".into(),
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "prod-db".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(upstream_port),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{API_KEY}}".into(),
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
-    let connection = broker.store.list_connections().pop().unwrap();
-    let token = broker.identity.token();
+    let connection = broker
+        .store
+        .list_connections(&broker.workspace)
+        .pop()
+        .unwrap();
+    let token = broker.identity.token(&broker.workspace);
     let host = mcp_host::serve(broker.clone()).await.unwrap();
     let client = reqwest::Client::new();
     let session = initialize(&client, &host.mcp_url(), &token).await;
@@ -389,7 +400,7 @@ async fn rust_host_discovers_a_provisioned_upstream_without_reconnecting() {
     )
     .await
     .unwrap();
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     let host = mcp_host::serve(broker.clone()).await.unwrap();
     let client = reqwest::Client::new();
     let session = initialize(&client, &host.mcp_url(), &token).await;
@@ -545,26 +556,29 @@ async fn rust_host_cancels_active_calls_and_notifies_the_upstream() {
     .unwrap();
     broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "slow".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(upstream_port),
-                trusted_ca_bundle_path: None,
-                template: String::new(),
-                mcp_path: Some("/mcp".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "slow".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(upstream_port),
+                    trusted_ca_bundle_path: None,
+                    template: String::new(),
+                    mcp_path: Some("/mcp".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     let host = mcp_host::serve(broker).await.unwrap();
     let client = reqwest::Client::new();
     let session = initialize(&client, &host.mcp_url(), &token).await;
@@ -673,7 +687,7 @@ async fn rust_host_keeps_catalog_overflow_searchable_and_callable() {
     .await
     .unwrap();
     add_mcp_connection(&broker, "catalog", upstream_port).await;
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     let host = mcp_host::serve(broker).await.unwrap();
     let client = reqwest::Client::new();
     let session = initialize(&client, &host.mcp_url(), &token).await;
@@ -827,27 +841,30 @@ async fn rust_host_serves_tool_calls_before_the_first_listing() {
     .unwrap();
     broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "prod-db".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(upstream_port),
-                trusted_ca_bundle_path: None,
-                template: String::new(),
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "prod-db".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(upstream_port),
+                    trusted_ca_bundle_path: None,
+                    template: String::new(),
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     add_mcp_connection(&broker, "notes", upstream_port).await;
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     let host = mcp_host::serve(broker).await.unwrap();
     let client = reqwest::Client::new();
 
@@ -959,7 +976,7 @@ async fn rust_host_completes_a_multi_round_input_flow() {
     .await
     .unwrap();
     add_mcp_connection(&broker, "input", upstream_port).await;
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     let host = mcp_host::serve(broker).await.unwrap();
     let client = reqwest::Client::new();
     let session = initialize(&client, &host.mcp_url(), &token).await;
@@ -1074,26 +1091,29 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
     .unwrap();
     broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "docs".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(upstream_port),
-                trusted_ca_bundle_path: None,
-                template: String::new(),
-                mcp_path: Some("/mcp".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "docs".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(upstream_port),
+                    trusted_ca_bundle_path: None,
+                    template: String::new(),
+                    mcp_path: Some("/mcp".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     let host = mcp_host::serve(broker).await.unwrap();
     let client = reqwest::Client::new();
     let session = initialize(&client, &host.mcp_url(), &token).await;
@@ -1277,30 +1297,33 @@ async fn a_curated_connection_refuses_every_non_tool_capability() {
     .unwrap();
     let connection = broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "docs".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(upstream_port),
-                trusted_ca_bundle_path: None,
-                template: String::new(),
-                mcp_path: Some("/mcp".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "docs".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(upstream_port),
+                    trusted_ca_bundle_path: None,
+                    template: String::new(),
+                    mcp_path: Some("/mcp".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     broker
         .ui_set_allowed_tools(&connection.id, Some(vec!["search".into()]))
         .await
         .unwrap();
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     let host = mcp_host::serve(broker).await.unwrap();
     let client = reqwest::Client::new();
     let session = initialize(&client, &host.mcp_url(), &token).await;
@@ -1476,23 +1499,26 @@ fn tool_payload(response: &Value) -> Value {
 async fn add_mcp_connection(broker: &Broker, name: &str, port: u16) {
     broker
         .store
-        .add_connection(ConnectionSpec {
-            name: name.into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(port),
-                trusted_ca_bundle_path: None,
-                template: String::new(),
-                mcp_path: Some("/mcp".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: name.into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(port),
+                    trusted_ca_bundle_path: None,
+                    template: String::new(),
+                    mcp_path: Some("/mcp".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
 }

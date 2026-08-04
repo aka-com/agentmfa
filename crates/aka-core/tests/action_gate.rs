@@ -47,28 +47,35 @@ fn add_github(broker: &Broker) -> Connection {
     futures::executor::block_on(async {
         broker
             .store
-            .add_secret("GITHUB_API_KEY", Zeroizing::new("ghp_x".into()))
+            .add_secret(
+                &broker.workspace,
+                "GITHUB_API_KEY",
+                Zeroizing::new("ghp_x".into()),
+            )
             .await
             .unwrap();
         broker
             .store
-            .add_connection(ConnectionSpec {
-                name: "github".into(),
-                config: ConnectionConfig::Api {
-                    host: "api.github.com".into(),
-                    scheme: "https".into(),
-                    port: None,
-                    trusted_ca_bundle_path: None,
-                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
-                    mcp_path: None,
-                    test_path: None,
-                    oauth: None,
-                    signer: None,
-                    client_cert_path: None,
-                    client_key_path: None,
+            .add_connection(
+                &broker.workspace,
+                ConnectionSpec {
+                    name: "github".into(),
+                    config: ConnectionConfig::Api {
+                        host: "api.github.com".into(),
+                        scheme: "https".into(),
+                        port: None,
+                        trusted_ca_bundle_path: None,
+                        template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                        mcp_path: None,
+                        test_path: None,
+                        oauth: None,
+                        signer: None,
+                        client_cert_path: None,
+                        client_key_path: None,
+                    },
+                    secrets: vec![],
                 },
-                secrets: vec![],
-            })
+            )
             .await
             .unwrap()
     })
@@ -78,7 +85,10 @@ fn add_github(broker: &Broker) -> Connection {
 async fn explicit_management_actions_do_not_consult_native_authentication() {
     let (broker, _dir) = broker_with(Arc::new(AppEvents)).await;
     let conn = add_github(&broker);
-    let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
+    let secret = broker
+        .store
+        .secret_by_name(&broker.workspace, "GITHUB_API_KEY")
+        .unwrap();
 
     assert_eq!(
         &*broker.ui_secret_value_for_copy(&secret.id).await.unwrap(),
@@ -138,7 +148,7 @@ async fn explicit_management_actions_do_not_consult_native_authentication() {
 #[tokio::test]
 async fn key_rotation_closes_sessions_and_revokes_standing_endpoints() {
     let (broker, _dir) = broker_with(Arc::new(AppEvents)).await;
-    let old_token = broker.identity.token();
+    let old_token = broker.identity.token(&broker.workspace);
     let conn = add_github(&broker);
     let ticket = broker.data_plane.issue("claude-code", &conn);
     let session = broker
@@ -149,7 +159,7 @@ async fn key_rotation_closes_sessions_and_revokes_standing_endpoints() {
     let close = session.close_signal.clone();
     let endpoint = broker
         .endpoints
-        .issue(conn.id, ConnectionKind::Api)
+        .issue(&broker.workspace, conn.id, ConnectionKind::Api)
         .await
         .unwrap();
 
@@ -166,9 +176,12 @@ async fn key_rotation_closes_sessions_and_revokes_standing_endpoints() {
         Err(RedeemError::Expired)
     ));
     session.finish("key_rotated");
-    assert_ne!(broker.identity.token(), old_token);
-    assert!(broker.endpoints.list().is_empty());
-    assert!(broker.endpoints.resolve_secret(&endpoint.secret).is_none());
+    assert_ne!(broker.identity.token(&broker.workspace), old_token);
+    assert!(broker.endpoints.list(&broker.workspace).is_empty());
+    assert!(broker
+        .endpoints
+        .resolve_secret(&broker.workspace, &endpoint.secret)
+        .is_none());
 
     let revoked = broker
         .audit
@@ -188,23 +201,30 @@ async fn secret_rotation_closes_bound_sessions_and_approval_windows() {
     let (broker, _dir) = broker_with(Arc::new(AppEvents)).await;
     let secret = broker
         .store
-        .add_secret("PG_PASSWORD", Zeroizing::new("before".into()))
+        .add_secret(
+            &broker.workspace,
+            "PG_PASSWORD",
+            Zeroizing::new("before".into()),
+        )
         .await
         .unwrap();
     let conn = broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "warehouse".into(),
-            config: ConnectionConfig::Pg {
-                host: "db.example.com".into(),
-                port: 5432,
-                user: "reader".into(),
-                dbname: "analytics".into(),
-                sslmode: aka_core::types::PgSslMode::VerifyFull,
-                trusted_ca_bundle_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "warehouse".into(),
+                config: ConnectionConfig::Pg {
+                    host: "db.example.com".into(),
+                    port: 5432,
+                    user: "reader".into(),
+                    dbname: "analytics".into(),
+                    sslmode: aka_core::types::PgSslMode::VerifyFull,
+                    trusted_ca_bundle_path: None,
+                },
+                secrets: vec![secret.id],
             },
-            secrets: vec![secret.id],
-        })
+        )
         .await
         .unwrap();
 
@@ -300,7 +320,10 @@ async fn approve_all_remains_a_traffic_decision_and_disables_future_prompts() {
         .await
         .unwrap());
     assert_eq!(gate.await.unwrap(), Verdict::Allowed);
-    assert_eq!(broker.access.confirm_mode(&conn.id), ConfirmMode::Off);
+    assert_eq!(
+        broker.access.confirm_mode(&broker.workspace, &conn.id),
+        ConfirmMode::Off
+    );
 }
 
 #[tokio::test]

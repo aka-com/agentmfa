@@ -20,7 +20,7 @@ use crate::paths::{BrokerInstanceLock, BrokerLockAttempt, BrokerLockRole, Paths}
 use crate::policy::AccessTable;
 use crate::ratelimit::{KeyedLimiter, WindowLimiter};
 use crate::repository::{
-    CatalogRepository, EndpointRepository, IdentityRepository, PolicyRepository,
+    CatalogRepository, EndpointRepository, IdentityRepository, PolicyRepository, WorkspaceContext,
 };
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
@@ -124,6 +124,7 @@ struct PendingManageOAuth {
 /// their repository contracts are available for the later hosted switchover.
 #[derive(Clone)]
 pub struct BrokerRepositories {
+    pub workspace: WorkspaceContext,
     pub catalog: Arc<dyn CatalogRepository>,
     pub policy: Arc<dyn PolicyRepository>,
     pub endpoints: Arc<dyn EndpointRepository>,
@@ -132,12 +133,14 @@ pub struct BrokerRepositories {
 
 impl BrokerRepositories {
     pub fn new(
+        workspace: WorkspaceContext,
         catalog: Arc<dyn CatalogRepository>,
         policy: Arc<dyn PolicyRepository>,
         endpoints: Arc<dyn EndpointRepository>,
         identity: Arc<dyn IdentityRepository>,
     ) -> Self {
         Self {
+            workspace,
             catalog,
             policy,
             endpoints,
@@ -149,6 +152,9 @@ impl BrokerRepositories {
 pub struct Broker {
     pub config: BrokerConfig,
     pub paths: Paths,
+    /// Trusted tenant scope supplied at repository construction. Request data
+    /// never selects this value.
+    pub workspace: WorkspaceContext,
     pub store: Arc<dyn CatalogRepository>,
     /// The vault, retained beyond the store so endpoint secrets can live in it
     /// rather than in plaintext on disk. They are not `Secret` records: they
@@ -377,6 +383,7 @@ impl Broker {
             audit.subscribe(move |entry| events.audit_appended(entry));
         }
         let BrokerRepositories {
+            workspace,
             catalog: store,
             policy: access,
             endpoints,
@@ -421,7 +428,13 @@ impl Broker {
                         Some(local_store.clone()),
                     )?);
                 let store: Arc<dyn CatalogRepository> = local_store;
-                BrokerRepositories::new(store, access, endpoints, identity)
+                BrokerRepositories::new(
+                    WorkspaceContext::local(),
+                    store,
+                    access,
+                    endpoints,
+                    identity,
+                )
             }
         };
         let executions = Executions::new(
@@ -492,6 +505,7 @@ impl Broker {
             pairing_limiter: WindowLimiter::new(config.pairing_max_attempts, config.pairing_window),
             config,
             paths,
+            workspace,
             store,
             access,
             endpoints,
@@ -545,7 +559,7 @@ impl Broker {
         // A tool disappearing from the list because its kind was retired is a
         // change to what the user configured, so it is recorded where they can
         // see it rather than left in the process log.
-        for dropped in broker.store.retired_connections_dropped() {
+        for dropped in broker.store.retired_connections_dropped(&broker.workspace) {
             broker.audit.append(
                 AuditEntry::new(
                     AuditKind::ConnectionDeleted,
@@ -734,7 +748,7 @@ impl Broker {
     }
 
     pub async fn ui_add_secret(&self, name: &str, value: SecretValue) -> Result<SecretMeta> {
-        let meta = self.store.add_secret(name, value).await?;
+        let meta = self.store.add_secret(&self.workspace, name, value).await?;
         self.audit.append(AuditEntry::new(
             AuditKind::SecretAdded,
             format!("Secret added: {name}"),
@@ -772,16 +786,19 @@ impl Broker {
         };
         let meta = self
             .store
-            .add_credential(crate::store::NewCredential {
-                kind,
-                name,
-                site,
-                username: username
-                    .map(|username| username.trim().to_string())
-                    .filter(|username| !username.is_empty()),
-                value,
-                totp,
-            })
+            .add_credential(
+                &self.workspace,
+                crate::store::NewCredential {
+                    kind,
+                    name,
+                    site,
+                    username: username
+                        .map(|username| username.trim().to_string())
+                        .filter(|username| !username.is_empty()),
+                    value,
+                    totp,
+                },
+            )
             .await?;
         self.audit.append(match meta.kind {
             crate::types::SecretKind::Secret => AuditEntry::new(
@@ -805,8 +822,8 @@ impl Broker {
     /// the seed never leaves the vault; audited like a value release since a
     /// live code is a usable credential for its 30-second window.
     pub async fn ui_secret_totp_code(&self, id: &Uuid) -> Result<(String, u64)> {
-        let (code, seconds_remaining) = self.store.secret_totp_code(id).await?;
-        let meta = self.store.secret_by_id(id)?;
+        let (code, seconds_remaining) = self.store.secret_totp_code(&self.workspace, id).await?;
+        let meta = self.store.secret_by_id(&self.workspace, id)?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::SecretCopied,
@@ -843,7 +860,7 @@ impl Broker {
         new_totp: Option<String>,
     ) -> Result<SecretMeta> {
         let _gate = self.config_gate.lock().await;
-        let mut meta = self.store.secret_by_id(id)?;
+        let mut meta = self.store.secret_by_id(&self.workspace, id)?;
         if new_value.is_some() && !matches!(meta.source, crate::types::SecretSource::Local) {
             return Err(CoreError::ExternalSecretReadOnly);
         }
@@ -873,7 +890,10 @@ impl Broker {
         if let Some(new_name) = new_name {
             if new_name != meta.name {
                 let old = meta.name.clone();
-                let (updated, rewritten) = self.store.rename_secret(id, new_name).await?;
+                let (updated, rewritten) = self
+                    .store
+                    .rename_secret(&self.workspace, id, new_name)
+                    .await?;
                 meta = updated;
                 changes.push(if rewritten > 0 {
                     format!(
@@ -889,7 +909,10 @@ impl Broker {
         let value_replaced = new_value.is_some();
         let mut closed_sessions = 0;
         if let Some(value) = new_value {
-            meta = self.store.replace_secret_value(id, value).await?;
+            meta = self
+                .store
+                .replace_secret_value(&self.workspace, id, value)
+                .await?;
             changes.push("value replaced".into());
             // Rotating a credential has to reach the traffic already using it.
             // A live session authenticated with the old value keeps working
@@ -897,7 +920,7 @@ impl Broker {
             // meant to close — so drop the sessions of every tool bound to
             // this secret and make the next call redial with the new value.
             // A rename leaves the value alone and needs none of this.
-            for connection in self.store.list_connections() {
+            for connection in self.store.list_connections(&self.workspace) {
                 if connection.secrets.contains(id) {
                     self.approvals.revoke(&connection.id);
                     self.elicitations.revoke(&connection.id);
@@ -911,6 +934,7 @@ impl Broker {
             meta = self
                 .store
                 .set_password_profile(
+                    &self.workspace,
                     id,
                     new_site,
                     new_username.map(|username| {
@@ -923,7 +947,10 @@ impl Broker {
         }
         if let Some(totp) = totp_edit {
             let removing = totp.is_none();
-            meta = self.store.set_totp_factor(id, totp).await?;
+            meta = self
+                .store
+                .set_totp_factor(&self.workspace, id, totp)
+                .await?;
             changes.push(if removing {
                 "2FA secret removed".into()
             } else {
@@ -956,13 +983,13 @@ impl Broker {
     pub async fn ui_delete_secret(&self, id: &Uuid) -> Result<SecretMeta> {
         // Refuse in-use deletion first, so the user is never asked to
         // confirm an action that cannot proceed.
-        let users = self.store.connections_using(id);
+        let users = self.store.connections_using(&self.workspace, id);
         if !users.is_empty() {
             return Err(CoreError::SecretInUse(users));
         }
         // The in-app confirm is the gate: an unused secret grants nothing,
         // so deleting it is destructive to the user's own material only.
-        let meta = self.store.delete_secret(id).await?;
+        let meta = self.store.delete_secret(&self.workspace, id).await?;
         let detail = if matches!(meta.source, crate::types::SecretSource::Local) {
             "Removed from Keychain"
         } else {
@@ -988,7 +1015,7 @@ impl Broker {
     ) -> Result<crate::onepassword::OnePasswordIntegration> {
         let integration = self
             .store
-            .add_onepassword_integration_with_id(id, label, auth, token)
+            .add_onepassword_integration_with_id(&self.workspace, id, label, auth, token)
             .await?;
         self.audit.append(
             AuditEntry::new(
@@ -1009,7 +1036,10 @@ impl Broker {
         id: &Uuid,
         token: SecretValue,
     ) -> Result<crate::onepassword::OnePasswordIntegration> {
-        let integration = self.store.replace_onepassword_token(id, token).await?;
+        let integration = self
+            .store
+            .replace_onepassword_token(&self.workspace, id, token)
+            .await?;
         self.audit.append(AuditEntry::new(
             AuditKind::OnePasswordIntegrationUpdated,
             format!(
@@ -1025,7 +1055,10 @@ impl Broker {
         &self,
         id: &Uuid,
     ) -> Result<crate::onepassword::OnePasswordIntegration> {
-        let integration = self.store.delete_onepassword_integration(id).await?;
+        let integration = self
+            .store
+            .delete_onepassword_integration(&self.workspace, id)
+            .await?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::OnePasswordIntegrationDeleted,
@@ -1042,7 +1075,10 @@ impl Broker {
         name: &str,
         reference: crate::onepassword::OnePasswordSecretRef,
     ) -> Result<SecretMeta> {
-        let meta = self.store.add_onepassword_secret(name, reference).await?;
+        let meta = self
+            .store
+            .add_onepassword_secret(&self.workspace, name, reference)
+            .await?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::OnePasswordSecretLinked,
@@ -1055,11 +1091,11 @@ impl Broker {
     }
 
     pub async fn onepassword_health(&self, id: &Uuid) -> Result<aka_api::OnePasswordHealthDto> {
-        self.store.onepassword_health(id).await
+        self.store.onepassword_health(&self.workspace, id).await
     }
 
     pub async fn onepassword_vaults(&self, id: &Uuid) -> Result<Vec<aka_api::OnePasswordVaultDto>> {
-        self.store.onepassword_vaults(id).await
+        self.store.onepassword_vaults(&self.workspace, id).await
     }
 
     pub async fn onepassword_items(
@@ -1067,7 +1103,9 @@ impl Broker {
         id: &Uuid,
         vault_id: &str,
     ) -> Result<Vec<aka_api::OnePasswordItemDto>> {
-        self.store.onepassword_items(id, vault_id).await
+        self.store
+            .onepassword_items(&self.workspace, id, vault_id)
+            .await
     }
 
     pub async fn onepassword_fields(
@@ -1076,15 +1114,17 @@ impl Broker {
         vault_id: &str,
         item_id: &str,
     ) -> Result<Vec<aka_api::OnePasswordFieldDto>> {
-        self.store.onepassword_fields(id, vault_id, item_id).await
+        self.store
+            .onepassword_fields(&self.workspace, id, vault_id, item_id)
+            .await
     }
 
     /// Release a value for the shell to show on screen. The user asks for
     /// this per secret and confirms it first; the audit trail records that
     /// the whole value was put on display, never the value itself.
     pub async fn ui_reveal_secret_value(&self, id: &Uuid) -> Result<SecretValue> {
-        let meta = self.store.secret_by_id(id)?;
-        let value = self.store.secret_value(id).await?;
+        let meta = self.store.secret_by_id(&self.workspace, id)?;
+        let value = self.store.secret_value(&self.workspace, id).await?;
         self.audit.append(AuditEntry::new(
             AuditKind::SecretRevealed,
             format!("Secret revealed: {}", meta.name),
@@ -1094,12 +1134,12 @@ impl Broker {
 
     /// Fetch a value for the shell's core-side clipboard copy.
     pub async fn ui_secret_value_for_copy(&self, id: &Uuid) -> Result<SecretValue> {
-        self.store.secret_value(id).await
+        self.store.secret_value(&self.workspace, id).await
     }
 
     /// Fetch a value for an authenticated management client's clipboard.
     pub async fn ui_managed_secret_value_for_copy(&self, id: &Uuid) -> Result<SecretValue> {
-        self.store.secret_value(id).await
+        self.store.secret_value(&self.workspace, id).await
     }
 
     /// Release the shared agent key through an authenticated management
@@ -1110,13 +1150,13 @@ impl Broker {
                 .field("credential", "agent_key")
                 .field("surface", "management"),
         );
-        Ok(self.identity.token())
+        Ok(self.identity.token(&self.workspace))
     }
 
     /// Audit trail for the core-side clipboard copy; the shell owns the
     /// actual pasteboard write and hygiene.
     pub fn ui_note_secret_copied(&self, id: &Uuid) -> Result<()> {
-        let meta = self.store.secret_by_id(id)?;
+        let meta = self.store.secret_by_id(&self.workspace, id)?;
         self.audit.append(AuditEntry::new(
             AuditKind::SecretCopied,
             format!("Secret copied: {}", meta.name),
@@ -1129,8 +1169,9 @@ impl Broker {
     /// Add a connection after validating its pinned destination and secret
     /// bindings. Submitting the form is the user's authorization.
     pub async fn ui_add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
-        self.store.preflight_add_connection(&spec)?;
-        let conn = self.store.add_connection(spec).await?;
+        self.store
+            .preflight_add_connection(&self.workspace, &spec)?;
+        let conn = self.store.add_connection(&self.workspace, spec).await?;
         let entry = AuditEntry::new(
             AuditKind::ConnectionAdded,
             format!("Tool added: {}", conn.name),
@@ -1184,10 +1225,10 @@ impl Broker {
         spec: ConnectionSpec,
     ) -> Result<Connection> {
         self.store
-            .preflight_add_connection_with_secret(secret_name, &spec)?;
+            .preflight_add_connection_with_secret(&self.workspace, secret_name, &spec)?;
         let (secret, conn) = self
             .store
-            .add_connection_with_secret(secret_name, value, spec)
+            .add_connection_with_secret(&self.workspace, secret_name, value, spec)
             .await?;
         self.audit.append(AuditEntry::new(
             AuditKind::SecretAdded,
@@ -1242,7 +1283,7 @@ impl Broker {
         expected_updated_at: &str,
         name: String,
     ) -> Result<Connection> {
-        let current = self.store.connection_by_id(id)?;
+        let current = self.store.connection_by_id(&self.workspace, id)?;
         self.ui_update_connection_inner(
             id,
             Some(expected_updated_at),
@@ -1261,7 +1302,7 @@ impl Broker {
         expected_updated_at: Option<&str>,
         spec: ConnectionSpec,
     ) -> Result<Connection> {
-        let old = self.store.connection_by_id(id)?;
+        let old = self.store.connection_by_id(&self.workspace, id)?;
         if expected_updated_at.is_some_and(|expected| old.version() != expected) {
             return Err(CoreError::ConnectionChanged);
         }
@@ -1269,27 +1310,35 @@ impl Broker {
             old.kind() != ConnectionKind::Api && old.secrets != spec.secrets;
         let capability_changed = old.config != spec.config || explicit_secrets_changed;
         let _gate = self.config_gate.lock().await;
-        if self.store.connection_by_id(id)?.updated_at != old.updated_at {
+        if self.store.connection_by_id(&self.workspace, id)?.updated_at != old.updated_at {
             return Err(CoreError::ConnectionChanged);
         }
         let (conn, target_changed) = if capability_changed {
             match expected_updated_at {
                 Some(expected) => {
                     self.store
-                        .update_connection_if_current(id, expected, spec)
+                        .update_connection_if_current(&self.workspace, id, expected, spec)
                         .await?
                 }
-                None => self.store.update_connection(id, spec).await?,
+                None => {
+                    self.store
+                        .update_connection(&self.workspace, id, spec)
+                        .await?
+                }
             }
         } else {
             (
                 match expected_updated_at {
                     Some(expected) => {
                         self.store
-                            .rename_connection_if_current(id, expected, spec.name)
+                            .rename_connection_if_current(&self.workspace, id, expected, spec.name)
                             .await?
                     }
-                    None => self.store.rename_connection(id, spec.name).await?,
+                    None => {
+                        self.store
+                            .rename_connection(&self.workspace, id, spec.name)
+                            .await?
+                    }
                 },
                 false,
             )
@@ -1314,7 +1363,10 @@ impl Broker {
             // so they die with the retarget. The enabled/disabled flag and
             // any curated MCP tool subset name the *tool* and survive: stale
             // tool names simply stop matching, which only narrows access.
-            let endpoints = self.endpoints.remove_for_connection(id).await?;
+            let endpoints = self
+                .endpoints
+                .remove_for_connection(&self.workspace, id)
+                .await?;
             self.teardown_endpoints(&endpoints, "connection_changed");
             endpoints_revoked = !endpoints.is_empty();
             if endpoints_revoked {
@@ -1372,18 +1424,24 @@ impl Broker {
     /// access (its listed secrets stay in the Keychain), so the in-app
     /// confirmation is the gate — no native prompt.
     pub async fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
-        let conn = self.store.connection_by_id(id)?;
+        let conn = self.store.connection_by_id(&self.workspace, id)?;
         let _gate = self.config_gate.lock().await;
-        if self.store.connection_by_id(id)?.updated_at != conn.updated_at {
+        if self.store.connection_by_id(&self.workspace, id)?.updated_at != conn.updated_at {
             return Err(CoreError::ApprovalConnectionChanged);
         }
-        let conn = self.store.delete_connection(id).await?;
+        let conn = self.store.delete_connection(&self.workspace, id).await?;
         self.health.forget(id);
         self.forget_mcp_tools_cache(id);
         self.approvals.revoke(id);
         self.elicitations.revoke(id);
-        let dropped = self.access.remove_for_connection(id).await?;
-        let endpoints = self.endpoints.remove_for_connection(id).await?;
+        let dropped = self
+            .access
+            .remove_for_connection(&self.workspace, id)
+            .await?;
+        let endpoints = self
+            .endpoints
+            .remove_for_connection(&self.workspace, id)
+            .await?;
         self.teardown_endpoints(&endpoints, "connection_deleted");
         // The connection is gone, so nothing it authorized may keep running:
         // invalidate its tickets and close its live sessions, ticket-served
@@ -1414,7 +1472,9 @@ impl Broker {
     /// so all windows (and a remote manager) converge on the new order.
     pub async fn ui_reorder_connections(&self, ordered_ids: &[Uuid]) -> Result<()> {
         let _gate = self.config_gate.lock().await;
-        self.store.reorder_connections(ordered_ids).await?;
+        self.store
+            .reorder_connections(&self.workspace, ordered_ids)
+            .await?;
         self.events.connections_changed();
         Ok(())
     }
@@ -1458,8 +1518,12 @@ impl Broker {
                 // The reachability test performs no key exchange, so the
                 // draft's key — stored or typed — is simply not consulted.
                 ConnectionKind::Ssh => {
-                    crate::capability::ssh::test_reachability(self.store.as_ref(), &connection)
-                        .await
+                    crate::capability::ssh::test_reachability(
+                        self.store.as_ref(),
+                        &self.workspace,
+                        &connection,
+                    )
+                    .await
                 }
                 _ => Err(crate::capability::TestError::from(
                     "Draft tests cover Postgres and SSH connections",
@@ -1493,7 +1557,7 @@ impl Broker {
     /// summary comes back.
     pub async fn ui_test_connection(&self, id: &Uuid) -> Result<ConnectionTestReport> {
         const TEST_TIMEOUT: Duration = Duration::from_secs(15);
-        let mut connection = self.store.connection_by_id(id)?;
+        let mut connection = self.store.connection_by_id(&self.workspace, id)?;
         // An OAuth token at expiry is renewed before the test, so the test
         // grades the connection, not a token the broker knew was stale.
         if crate::mcp_refresh::wants_refresh(&connection)
@@ -1505,13 +1569,14 @@ impl Broker {
             .await
             .is_ok()
         {
-            connection = self.store.connection_by_id(id)?;
+            connection = self.store.connection_by_id(&self.workspace, id)?;
         }
         let connection = connection;
         let test = async {
             match connection.config.kind() {
                 ConnectionKind::Api => crate::capability::http::test_upstream(
                     &self.store,
+                    &self.workspace,
                     &self.http_client,
                     TEST_TIMEOUT,
                     &connection,
@@ -1519,7 +1584,7 @@ impl Broker {
                 .await
                 .map(|detail| (detail, crate::types::HealthStatus::Ok)),
                 ConnectionKind::Pg => {
-                    crate::capability::pg::test_upstream(&self.store, &connection)
+                    crate::capability::pg::test_upstream(&self.store, &self.workspace, &connection)
                         .await
                         .map(|success| {
                             let status = if success.tls_downgraded {
@@ -1612,7 +1677,7 @@ impl Broker {
             ));
         };
         self.store
-            .preflight_add_connection_with_secret(secret_name, &spec)?;
+            .preflight_add_connection_with_secret(&self.workspace, secret_name, &spec)?;
         let authorization =
             crate::oauth::begin_external(&oauth_spec, redirect_uri).map_err(CoreError::OAuth)?;
         self.park_manage_oauth(
@@ -1633,7 +1698,7 @@ impl Broker {
         id: &Uuid,
         redirect_uri: &str,
     ) -> Result<ManageOAuthStart> {
-        let conn = self.store.connection_by_id(id)?;
+        let conn = self.store.connection_by_id(&self.workspace, id)?;
         let crate::types::ConnectionConfig::Api {
             oauth: Some(oauth_spec),
             ..
@@ -1648,7 +1713,7 @@ impl Broker {
         // Carry the client secret across, exactly like the local reconnect.
         let previous = self
             .store
-            .secret_value(&secret_id)
+            .secret_value(&self.workspace, &secret_id)
             .await
             .ok()
             .and_then(|value| crate::oauth::TokenSet::from_secret_value(&value).ok());
@@ -1739,7 +1804,12 @@ impl Broker {
             } => {
                 let (_, conn) = self
                     .store
-                    .add_connection_with_secret(&secret_name, tokens.to_secret_value(), *spec)
+                    .add_connection_with_secret(
+                        &self.workspace,
+                        &secret_name,
+                        tokens.to_secret_value(),
+                        *spec,
+                    )
                     .await?;
                 self.health.record(
                     &conn.id,
@@ -1765,9 +1835,11 @@ impl Broker {
                 secret_id,
                 ..
             } => {
-                let conn = self.store.connection_by_id(&connection_id)?;
+                let conn = self
+                    .store
+                    .connection_by_id(&self.workspace, &connection_id)?;
                 self.store
-                    .replace_secret_value(&secret_id, tokens.to_secret_value())
+                    .replace_secret_value(&self.workspace, &secret_id, tokens.to_secret_value())
                     .await?;
                 self.health.record(
                     &conn.id,
@@ -1812,7 +1884,7 @@ impl Broker {
             ));
         };
         self.store
-            .preflight_add_connection_with_secret(secret_name, &spec)?;
+            .preflight_add_connection_with_secret(&self.workspace, secret_name, &spec)?;
         // No native gate: the token set is minted fresh by the sign-in the
         // user is about to drive in the browser — the same new-credential
         // rule as every other add. The provider's consent page is the
@@ -1831,7 +1903,12 @@ impl Broker {
             .map_err(CoreError::OAuth)?;
         let (_, conn) = self
             .store
-            .add_connection_with_secret(secret_name, tokens.to_secret_value(), spec)
+            .add_connection_with_secret(
+                &self.workspace,
+                secret_name,
+                tokens.to_secret_value(),
+                spec,
+            )
             .await?;
         self.health.record(
             &conn.id,
@@ -1857,7 +1934,7 @@ impl Broker {
     /// Re-run the OAuth flow for an existing connection whose token was
     /// rejected or expired, replacing the stored token set in place.
     pub async fn ui_oauth_reconnect(&self, id: &Uuid) -> Result<Connection> {
-        let conn = self.store.connection_by_id(id)?;
+        let conn = self.store.connection_by_id(&self.workspace, id)?;
         let crate::types::ConnectionConfig::Api {
             oauth: Some(oauth_spec),
             ..
@@ -1876,7 +1953,7 @@ impl Broker {
         // token endpoint); the old tokens are replaced wholesale.
         let previous = self
             .store
-            .secret_value(&secret_id)
+            .secret_value(&self.workspace, &secret_id)
             .await
             .ok()
             .and_then(|value| crate::oauth::TokenSet::from_secret_value(&value).ok());
@@ -1896,7 +1973,7 @@ impl Broker {
             .await
             .map_err(CoreError::OAuth)?;
         self.store
-            .replace_secret_value(&secret_id, tokens.to_secret_value())
+            .replace_secret_value(&self.workspace, &secret_id, tokens.to_secret_value())
             .await?;
         self.health.record(
             &conn.id,
@@ -1927,10 +2004,11 @@ impl Broker {
         mut options: crate::mcp::McpCheckOptions,
     ) -> Result<crate::mcp::McpStatusReport> {
         const CHECK_TIMEOUT: Duration = Duration::from_secs(45);
-        let mut connection = self.store.connection_by_id(id)?;
-        if let (Some(whoami), Some(allowed)) =
-            (options.whoami_tool.as_ref(), self.access.allowed_tools(id))
-        {
+        let mut connection = self.store.connection_by_id(&self.workspace, id)?;
+        if let (Some(whoami), Some(allowed)) = (
+            options.whoami_tool.as_ref(),
+            self.access.allowed_tools(&self.workspace, id),
+        ) {
             if !allowed.iter().any(|tool| tool == whoami) {
                 options.whoami_tool = None;
             }
@@ -1948,12 +2026,18 @@ impl Broker {
             .await
             .is_ok()
         {
-            connection = self.store.connection_by_id(id)?;
+            connection = self.store.connection_by_id(&self.workspace, id)?;
             refreshed = true;
         }
         let mut report = match tokio::time::timeout(
             CHECK_TIMEOUT,
-            crate::mcp::check_connection(&self.store, &self.http_client, &connection, &options),
+            crate::mcp::check_connection(
+                &self.store,
+                &self.workspace,
+                &self.http_client,
+                &connection,
+                &options,
+            ),
         )
         .await
         {
@@ -1974,10 +2058,16 @@ impl Broker {
             .await
             .is_ok()
         {
-            connection = self.store.connection_by_id(id)?;
+            connection = self.store.connection_by_id(&self.workspace, id)?;
             report = match tokio::time::timeout(
                 CHECK_TIMEOUT,
-                crate::mcp::check_connection(&self.store, &self.http_client, &connection, &options),
+                crate::mcp::check_connection(
+                    &self.store,
+                    &self.workspace,
+                    &self.http_client,
+                    &connection,
+                    &options,
+                ),
             )
             .await
             {
@@ -1999,7 +2089,7 @@ impl Broker {
         }
         if report.ok && report.account.is_some() && report.account != connection.account {
             self.store
-                .set_connection_account(id, report.account.clone())
+                .set_connection_account(&self.workspace, id, report.account.clone())
                 .await?;
             self.events.connections_changed();
         }
@@ -2059,12 +2149,12 @@ impl Broker {
     /// Every recorded access entry, for the app's tool rows. Connections
     /// with no entry are in the default state (enabled, all tools).
     pub fn tool_access(&self) -> Vec<ToolAccess> {
-        self.access.entries()
+        self.access.entries(&self.workspace)
     }
 
     /// Every issued direct endpoint, for the app's tool rows.
     pub fn endpoints(&self) -> Vec<DirectEndpoint> {
-        self.endpoints.list()
+        self.endpoints.list(&self.workspace)
     }
 
     /// A direct endpoint is how agents consume a plain HTTP API, so one is
@@ -2078,14 +2168,17 @@ impl Broker {
     /// error: the connection was created or enabled either way, and issuing
     /// remains available from the panel.
     pub async fn auto_issue_api_endpoint(self: &Arc<Self>, connection_id: &Uuid) {
-        let Ok(connection) = self.store.connection_by_id(connection_id) else {
+        let Ok(connection) = self.store.connection_by_id(&self.workspace, connection_id) else {
             return;
         };
         if !matches!(
             &connection.config,
             ConnectionConfig::Api { mcp_path: None, .. }
-        ) || !self.access.allows(connection_id)
-            || self.endpoints.get_for_connection(connection_id).is_some()
+        ) || !self.access.allows(&self.workspace, connection_id)
+            || self
+                .endpoints
+                .get_for_connection(&self.workspace, connection_id)
+                .is_some()
         {
             return;
         }
@@ -2105,13 +2198,15 @@ impl Broker {
         self: &Arc<Self>,
         connection_id: &Uuid,
     ) -> Result<IssuedEndpointInfo> {
-        let connection = self.store.connection_by_id(connection_id)?;
-        if !self.access.allows(connection_id) {
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
+        if !self.access.allows(&self.workspace, connection_id) {
             return Err(CoreError::EndpointRequiresWiring);
         }
         if self
             .endpoints
-            .get_for_connection(connection_id)
+            .get_for_connection(&self.workspace, connection_id)
             .is_some_and(|endpoint| endpoint.is_expired())
         {
             return Err(CoreError::EndpointExpired);
@@ -2127,10 +2222,12 @@ impl Broker {
         // read-back advertises a path nothing listens on.
         let (issued, listener_already_live) = {
             let _gate = self.config_gate.lock().await;
-            if !self.access.allows(connection_id) {
+            if !self.access.allows(&self.workspace, connection_id) {
                 return Err(CoreError::EndpointRequiresWiring);
             }
-            let existing = self.endpoints.get_for_connection(connection_id);
+            let existing = self
+                .endpoints
+                .get_for_connection(&self.workspace, connection_id);
             if existing
                 .as_ref()
                 .is_some_and(|endpoint| endpoint.is_expired())
@@ -2145,7 +2242,7 @@ impl Broker {
             }) && connection.kind() != ConnectionKind::Ssh;
             (
                 self.endpoints
-                    .issue(*connection_id, connection.kind())
+                    .issue(&self.workspace, *connection_id, connection.kind())
                     .await?,
                 listener_already_live,
             )
@@ -2159,7 +2256,10 @@ impl Broker {
                 .bind_endpoint_listener(&issued.endpoint, &connection)
                 .await
             {
-                let _ = self.endpoints.revoke(&issued.endpoint.id).await;
+                let _ = self
+                    .endpoints
+                    .revoke(&self.workspace, &issued.endpoint.id)
+                    .await;
                 return Err(CoreError::Io(error));
             }
         }
@@ -2173,7 +2273,7 @@ impl Broker {
         // (assigned during bind) is present.
         let mut record = self
             .endpoints
-            .get(&issued.endpoint.id)
+            .get(&self.workspace, &issued.endpoint.id)
             .unwrap_or_else(|| issued.endpoint.clone());
         record.secret = issued.secret.clone();
         let info = self.endpoint_info(&connection, &record).await?;
@@ -2316,8 +2416,13 @@ impl Broker {
         &self,
         connection_id: &Uuid,
     ) -> Result<Option<IssuedEndpointInfo>> {
-        let connection = self.store.connection_by_id(connection_id)?;
-        let Some(endpoint) = self.endpoints.get_for_connection(connection_id) else {
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
+        let Some(endpoint) = self
+            .endpoints
+            .get_for_connection(&self.workspace, connection_id)
+        else {
             return Ok(None);
         };
         Ok(Some(self.endpoint_info(&connection, &endpoint).await?))
@@ -2331,13 +2436,15 @@ impl Broker {
         self: &Arc<Self>,
         connection_id: &Uuid,
     ) -> Result<IssuedEndpointInfo> {
-        let connection = self.store.connection_by_id(connection_id)?;
-        if !self.access.allows(connection_id) {
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
+        if !self.access.allows(&self.workspace, connection_id) {
             return Err(CoreError::EndpointRequiresWiring);
         }
         let endpoint = self
             .endpoints
-            .get_for_connection(connection_id)
+            .get_for_connection(&self.workspace, connection_id)
             .ok_or(CoreError::EndpointNotFound)?;
         // Expired endpoints are not rebound at startup. Reclaim their stable
         // socket/port before making the credential valid again, so renewal can
@@ -2354,10 +2461,12 @@ impl Broker {
 
         let renewed = {
             let _gate = self.config_gate.lock().await;
-            if !self.access.allows(connection_id) {
+            if !self.access.allows(&self.workspace, connection_id) {
                 return Err(CoreError::EndpointRequiresWiring);
             }
-            let current = self.endpoints.get_for_connection(connection_id);
+            let current = self
+                .endpoints
+                .get_for_connection(&self.workspace, connection_id);
             if current
                 .as_ref()
                 .is_none_or(|current| current.id != endpoint.id)
@@ -2371,7 +2480,7 @@ impl Broker {
                 }
                 return Err(CoreError::EndpointNotFound);
             }
-            self.endpoints.renew(&endpoint.id).await?
+            self.endpoints.renew(&self.workspace, &endpoint.id).await?
         };
         let info = self.endpoint_info(&connection, &renewed).await?;
         self.audit.append(
@@ -2403,13 +2512,15 @@ impl Broker {
         connection_id: &Uuid,
         expire: bool,
     ) -> Result<IssuedEndpointInfo> {
-        let connection = self.store.connection_by_id(connection_id)?;
-        if !self.access.allows(connection_id) {
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
+        if !self.access.allows(&self.workspace, connection_id) {
             return Err(CoreError::EndpointRequiresWiring);
         }
         let endpoint = self
             .endpoints
-            .get_for_connection(connection_id)
+            .get_for_connection(&self.workspace, connection_id)
             .ok_or(CoreError::EndpointNotFound)?;
         let listener_live = self
             .endpoint_listeners
@@ -2422,10 +2533,12 @@ impl Broker {
 
         let updated = {
             let _gate = self.config_gate.lock().await;
-            if !self.access.allows(connection_id) {
+            if !self.access.allows(&self.workspace, connection_id) {
                 return Err(CoreError::EndpointRequiresWiring);
             }
-            let current = self.endpoints.get_for_connection(connection_id);
+            let current = self
+                .endpoints
+                .get_for_connection(&self.workspace, connection_id);
             if current
                 .as_ref()
                 .is_none_or(|current| current.id != endpoint.id)
@@ -2439,7 +2552,9 @@ impl Broker {
                 }
                 return Err(CoreError::EndpointNotFound);
             }
-            self.endpoints.set_expiry(&endpoint.id, expire).await?
+            self.endpoints
+                .set_expiry(&self.workspace, &endpoint.id, expire)
+                .await?
         };
         let info = self.endpoint_info(&connection, &updated).await?;
         self.audit.append(
@@ -2472,8 +2587,13 @@ impl Broker {
         &self,
         connection_id: &Uuid,
     ) -> Result<Option<IssuedEndpointInfo>> {
-        let connection = self.store.connection_by_id(connection_id)?;
-        let Some(endpoint) = self.endpoints.get_for_connection(connection_id) else {
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
+        let Some(endpoint) = self
+            .endpoints
+            .get_for_connection(&self.workspace, connection_id)
+        else {
             return Ok(None);
         };
         if endpoint.is_expired() {
@@ -2481,7 +2601,7 @@ impl Broker {
         }
         if self
             .endpoints
-            .get(&endpoint.id)
+            .get(&self.workspace, &endpoint.id)
             .is_none_or(|current| current.is_expired())
         {
             return Err(CoreError::EndpointExpired);
@@ -2544,7 +2664,9 @@ impl Broker {
         connection_id: &Uuid,
         require_auth: bool,
     ) -> Result<bool> {
-        let connection = self.store.connection_by_id(connection_id)?;
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
         if connection.kind() != ConnectionKind::Ssh {
             return Err(CoreError::InvalidConnectionConfig(
                 "only SSH endpoints carry an agent-protocol authentication step; \
@@ -2552,7 +2674,10 @@ impl Broker {
                     .into(),
             ));
         }
-        let Some(endpoint) = self.endpoints.get_for_connection(connection_id) else {
+        let Some(endpoint) = self
+            .endpoints
+            .get_for_connection(&self.workspace, connection_id)
+        else {
             return Err(CoreError::EndpointNotFound);
         };
         if endpoint.require_auth == require_auth {
@@ -2561,7 +2686,7 @@ impl Broker {
         let changed = {
             let _gate = self.config_gate.lock().await;
             self.endpoints
-                .set_require_auth(&endpoint.id, require_auth)
+                .set_require_auth(&self.workspace, &endpoint.id, require_auth)
                 .await?
         };
         if !changed {
@@ -2602,14 +2727,14 @@ impl Broker {
     /// close any live sessions it was serving.
     pub async fn ui_revoke_endpoint(&self, endpoint_id: &Uuid) -> Result<bool> {
         let _gate = self.config_gate.lock().await;
-        let Some(endpoint) = self.endpoints.revoke(endpoint_id).await? else {
+        let Some(endpoint) = self.endpoints.revoke(&self.workspace, endpoint_id).await? else {
             return Ok(false);
         };
         let _ = self.vault.delete(&endpoint.id);
         self.teardown_endpoints(std::slice::from_ref(&endpoint), "endpoint_revoked");
         let connection = self
             .store
-            .connection_by_id(&endpoint.connection_id)
+            .connection_by_id(&self.workspace, &endpoint.connection_id)
             .map(|c| c.name)
             .unwrap_or_else(|_| "removed tool".to_string());
         self.audit.append(
@@ -2628,7 +2753,7 @@ impl Broker {
     /// Endpoints whose connection has since disappeared or changed kind are
     /// stale and dropped rather than rebound.
     pub async fn rebind_endpoints(self: &Arc<Self>) {
-        for endpoint in self.endpoints.list() {
+        for endpoint in self.endpoints.list(&self.workspace) {
             if endpoint.is_expired() {
                 tracing::info!(
                     "leaving expired endpoint {} inactive until it is renewed or revoked",
@@ -2644,7 +2769,10 @@ impl Broker {
             {
                 continue;
             }
-            match self.store.connection_by_id(&endpoint.connection_id) {
+            match self
+                .store
+                .connection_by_id(&self.workspace, &endpoint.connection_id)
+            {
                 Ok(connection) if connection.kind() == endpoint.kind => {
                     if let Err(error) = self.bind_endpoint_listener(&endpoint, &connection).await {
                         // A persisted port owned by another process is not a
@@ -2655,7 +2783,9 @@ impl Broker {
                             "revoking endpoint {} after listener rebind failed: {error}",
                             endpoint.id
                         );
-                        if let Ok(Some(removed)) = self.endpoints.revoke(&endpoint.id).await {
+                        if let Ok(Some(removed)) =
+                            self.endpoints.revoke(&self.workspace, &endpoint.id).await
+                        {
                             self.teardown_endpoints(
                                 std::slice::from_ref(&removed),
                                 "endpoint_revoked",
@@ -2681,7 +2811,9 @@ impl Broker {
                         "dropping stale endpoint {} (connection missing or kind changed)",
                         endpoint.id
                     );
-                    if let Ok(Some(removed)) = self.endpoints.revoke(&endpoint.id).await {
+                    if let Ok(Some(removed)) =
+                        self.endpoints.revoke(&self.workspace, &endpoint.id).await
+                    {
                         self.teardown_endpoints(
                             std::slice::from_ref(&removed),
                             "connection_changed",
@@ -2727,7 +2859,10 @@ impl Broker {
                 // Pin the TCP port so a pasted DSN survives a restart, exactly
                 // as the HTTP endpoint's base URL does.
                 if endpoint.port != Some(port) {
-                    let _ = self.endpoints.set_port(&endpoint.id, port).await;
+                    let _ = self
+                        .endpoints
+                        .set_port(&self.workspace, &endpoint.id, port)
+                        .await;
                 }
                 handle
             }
@@ -2740,7 +2875,10 @@ impl Broker {
                 // Pin the assigned loopback port so a pasted base URL survives
                 // a restart (rebind reuses it).
                 if endpoint.port != Some(port) {
-                    let _ = self.endpoints.set_port(&endpoint.id, port).await;
+                    let _ = self
+                        .endpoints
+                        .set_port(&self.workspace, &endpoint.id, port)
+                        .await;
                 }
                 handle
             }
@@ -2786,9 +2924,14 @@ impl Broker {
     /// connection alive for an hour after the user revoked it. The issued
     /// endpoint itself remains available for later re-enabling.
     pub async fn ui_set_tool_access(&self, connection_id: &Uuid, enabled: bool) -> Result<bool> {
-        let connection = self.store.connection_by_id(connection_id)?;
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
         let _gate = self.config_gate.lock().await;
-        let changed = self.access.set_enabled(*connection_id, enabled).await?;
+        let changed = self
+            .access
+            .set_enabled(&self.workspace, *connection_id, enabled)
+            .await?;
         if changed {
             let closed_sessions = if enabled {
                 0
@@ -2847,14 +2990,18 @@ impl Broker {
         confirm: ConfirmMode,
         release_resolution: crate::request_history::RequestResolution,
     ) -> Result<bool> {
-        let connection = self.store.connection_by_id(connection_id)?;
-        let old_mode = self.access.confirm_mode(connection_id);
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
+        let old_mode = self.access.confirm_mode(&self.workspace, connection_id);
         let _gate = self.config_gate.lock().await;
-        let current = self.store.connection_by_id(connection_id)?;
+        let current = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
         if current.updated_at != connection.updated_at {
             return Err(CoreError::ApprovalConnectionChanged);
         }
-        let current_mode = self.access.confirm_mode(connection_id);
+        let current_mode = self.access.confirm_mode(&self.workspace, connection_id);
         if current_mode == confirm {
             return Ok(false);
         }
@@ -2865,7 +3012,7 @@ impl Broker {
         }
         let changed = self
             .access
-            .set_confirm_mode(*connection_id, confirm)
+            .set_confirm_mode(&self.workspace, *connection_id, confirm)
             .await?;
         if changed {
             if !confirm.is_on() {
@@ -2998,15 +3145,19 @@ impl Broker {
         audit_statements: Option<bool>,
     ) -> Result<bool> {
         let _gate = self.config_gate.lock().await;
-        let connection = self.store.connection_by_id(connection_id)?;
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
         let changed = self
             .access
-            .set_audit_statements(*connection_id, audit_statements)
+            .set_audit_statements(&self.workspace, *connection_id, audit_statements)
             .await?;
         if changed {
-            let effective = self
-                .access
-                .audit_statements(connection_id, self.config.audit_pg_statements);
+            let effective = self.access.audit_statements(
+                &self.workspace,
+                connection_id,
+                self.config.audit_pg_statements,
+            );
             self.audit.append(
                 AuditEntry::new(
                     AuditKind::SettingsChanged,
@@ -3039,24 +3190,33 @@ impl Broker {
         connection_id: &Uuid,
         expose: bool,
     ) -> Result<bool> {
-        let connection = self.store.connection_by_id(connection_id)?;
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
         if connection.kind() != ConnectionKind::Api {
             return Err(CoreError::InvalidSetting(
                 "upstream response credentials apply only to API connections".into(),
             ));
         }
-        let old = self.access.expose_response_credentials(connection_id);
+        let old = self
+            .access
+            .expose_response_credentials(&self.workspace, connection_id);
 
         let _gate = self.config_gate.lock().await;
-        let current = self.store.connection_by_id(connection_id)?;
+        let current = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
         if current.updated_at != connection.updated_at
-            || self.access.expose_response_credentials(connection_id) != old
+            || self
+                .access
+                .expose_response_credentials(&self.workspace, connection_id)
+                != old
         {
             return Err(CoreError::ApprovalConnectionChanged);
         }
         let changed = self
             .access
-            .set_expose_response_credentials(*connection_id, expose)
+            .set_expose_response_credentials(&self.workspace, *connection_id, expose)
             .await?;
         if changed {
             let audit = AuditEntry::new(
@@ -3086,7 +3246,9 @@ impl Broker {
         tools: Option<Vec<String>>,
     ) -> Result<bool> {
         let _gate = self.config_gate.lock().await;
-        let connection = self.store.connection_by_id(connection_id)?;
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
         let detail = match &tools {
             None => "all tools".to_string(),
             Some(list) => format!(
@@ -3095,7 +3257,10 @@ impl Broker {
                 if list.len() == 1 { "" } else { "s" }
             ),
         };
-        let changed = self.access.set_allowed_tools(*connection_id, tools).await?;
+        let changed = self
+            .access
+            .set_allowed_tools(&self.workspace, *connection_id, tools)
+            .await?;
         if changed {
             // A pending prompt or open window was admitted under the old
             // tool subset. Narrowing must take effect before any parked call
@@ -3118,7 +3283,7 @@ impl Broker {
     /// per-wiring tool picker). Read-only against the upstream; the
     /// credential rides only the upstream leg, as everywhere.
     pub async fn ui_list_mcp_tools(&self, id: &Uuid) -> Result<crate::mcp::McpToolCatalog> {
-        let connection = self.store.connection_by_id(id)?;
+        let connection = self.store.connection_by_id(&self.workspace, id)?;
         if crate::mcp_refresh::wants_refresh(&connection) {
             let _ = crate::mcp_refresh::refresh_connection_token(
                 &self.refresh_context(),
@@ -3127,8 +3292,10 @@ impl Broker {
             )
             .await;
         }
-        let connection = self.store.connection_by_id(id)?;
-        let live = crate::mcp::list_tools(&self.store, &self.http_client, &connection).await;
+        let connection = self.store.connection_by_id(&self.workspace, id)?;
+        let live =
+            crate::mcp::list_tools(&self.store, &self.workspace, &self.http_client, &connection)
+                .await;
         match live {
             Ok(listing) => {
                 // Remember the last good listing so a later open can still
@@ -3184,7 +3351,7 @@ impl Broker {
     /// The persisted identity record (hash, timestamps, migration aliases —
     /// never the plaintext key).
     pub fn identity_info(&self) -> BrokerIdentity {
-        self.identity.info()
+        self.identity.info(&self.workspace)
     }
 
     /// Rotate this computer's key: mint a fresh one, rewrite the token
@@ -3199,12 +3366,12 @@ impl Broker {
         // If a persistence error interrupts the operation, failing with fewer
         // live capabilities is safer than leaving an endpoint usable after a
         // successful identity rotation.
-        let endpoints = self.endpoints.revoke_all().await?;
+        let endpoints = self.endpoints.revoke_all(&self.workspace).await?;
         for endpoint in &endpoints {
             let _ = self.vault.delete(&endpoint.id);
         }
         self.teardown_endpoints(&endpoints, "key_rotated");
-        self.identity.rotate().await?;
+        self.identity.rotate(&self.workspace).await?;
         let sessions_closed = self.data_plane.close_all("key_rotated");
         // An approval window is permission for traffic from the generation
         // being disconnected; it must not outlive it.
@@ -3285,18 +3452,20 @@ impl Broker {
     /* ----------------------------- settings ------------------------------- */
 
     pub fn settings(&self) -> Settings {
-        self.store.settings()
+        self.store.settings(&self.workspace)
     }
 
     /// Ask before trusting a first-seen SSH host key, or stop asking.
     ///
     /// The explicit switch is the user's authorization in either direction.
     pub async fn ui_set_confirm_ssh_host_keys(&self, on: bool) -> Result<()> {
-        let old = self.store.settings().confirm_ssh_host_keys;
+        let old = self.store.settings(&self.workspace).confirm_ssh_host_keys;
         if old == on {
             return Ok(());
         }
-        self.store.set_confirm_ssh_host_keys(on).await?;
+        self.store
+            .set_confirm_ssh_host_keys(&self.workspace, on)
+            .await?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::SettingsChanged,
@@ -3310,11 +3479,13 @@ impl Broker {
     }
 
     pub async fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
-        let old = self.store.settings().menu_bar_hides_dock;
+        let old = self.store.settings(&self.workspace).menu_bar_hides_dock;
         if old == on {
             return Ok(());
         }
-        self.store.set_menu_bar_hides_dock(on).await?;
+        self.store
+            .set_menu_bar_hides_dock(&self.workspace, on)
+            .await?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::SettingsChanged,

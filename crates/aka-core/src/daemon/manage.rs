@@ -58,7 +58,11 @@ impl FromRequestParts<AppState> for ManageAuthed {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(&parts.headers).map_err(err_missing_token)?;
-        match state.broker.identity.verify_manage(token) {
+        match state
+            .broker
+            .identity
+            .verify_manage(&state.broker.workspace, token)
+        {
             Ok(()) => Ok(ManageAuthed {
                 token: Zeroizing::new(token.to_string()),
             }),
@@ -298,7 +302,7 @@ async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Respons
     ok(json!({
         "ok": true,
         "version": state.broker.config.version,
-        "client_id": state.broker.identity.client_id(),
+        "client_id": state.broker.identity.client_id(&state.broker.workspace),
         "capabilities": [
             aka_api::APPROVAL_SURFACE_CAPABILITY,
             aka_api::ONEPASSWORD_PROVIDER_CAPABILITY,
@@ -348,7 +352,7 @@ async fn rotate_management_token(
     match state
         .broker
         .identity
-        .rotate_manage_token_with_ttl(authed.token(), Some(ttl))
+        .rotate_manage_token_with_ttl(&state.broker.workspace, authed.token(), Some(ttl))
         .await
     {
         Ok(token) => {
@@ -358,7 +362,7 @@ async fn rotate_management_token(
             let expires_at = state
                 .broker
                 .identity
-                .manage_token_expires_at()
+                .manage_token_expires_at(&state.broker.workspace)
                 .expect("online rotations always carry a TTL");
             let mut entry = crate::audit::AuditEntry::new(
                 crate::audit::AuditKind::ManagementTokenIssued,
@@ -384,7 +388,7 @@ async fn revoke_management_token(State(state): State<AppState>, authed: ManageAu
     match state
         .broker
         .identity
-        .revoke_manage_token_with_token(authed.token())
+        .revoke_manage_token_with_token(&state.broker.workspace, authed.token())
         .await
     {
         Ok(()) => {
@@ -525,6 +529,7 @@ async fn events(
         rx: tokio::sync::broadcast::Receiver<SeqEvent>,
         backlog: std::collections::VecDeque<SeqEvent>,
         epoch: String,
+        workspace: crate::repository::WorkspaceContext,
         identity: std::sync::Arc<dyn crate::repository::IdentityRepository>,
         token: Zeroizing<String>,
         // Present only when the authenticated client explicitly promised a
@@ -544,6 +549,7 @@ async fn events(
         rx,
         backlog,
         epoch,
+        workspace: state.broker.workspace.clone(),
         identity: state.broker.identity.clone(),
         token: authed.token,
         _approval_surface: approval_surface,
@@ -558,7 +564,7 @@ async fn events(
         // stream that can live indefinitely. Rotation, revocation, and TTL
         // expiry must stop both event disclosure and the stream counting as
         // an approval surface.
-        if st.identity.verify_manage(&st.token).is_err() {
+        if st.identity.verify_manage(&st.workspace, &st.token).is_err() {
             return None;
         }
         if std::mem::take(&mut st.ready_first) {
@@ -587,7 +593,7 @@ async fn events(
             let item = tokio::select! {
                 biased;
                 _ = st.revalidate.tick() => {
-                    if st.identity.verify_manage(&st.token).is_err() {
+                    if st.identity.verify_manage(&st.workspace, &st.token).is_err() {
                         return None;
                     }
                     continue;
@@ -598,7 +604,7 @@ async fn events(
                         // Dropped live notifications: force a full refetch,
                         // but never disclose it after the stream's credential
                         // has ceased to be valid.
-                        if st.identity.verify_manage(&st.token).is_err() {
+                        if st.identity.verify_manage(&st.workspace, &st.token).is_err() {
                             return None;
                         }
                         let id = format!("{}:{}", st.epoch, st.delivered_head);
@@ -615,7 +621,7 @@ async fn events(
             if item.seq <= st.delivered_head {
                 continue;
             }
-            if st.identity.verify_manage(&st.token).is_err() {
+            if st.identity.verify_manage(&st.workspace, &st.token).is_err() {
                 return None;
             }
             st.delivered_head = item.seq;
@@ -704,7 +710,11 @@ async fn secret_value_for_copy(
 ) -> Response {
     let result = state.manage.secret_value_for_copy(id).await;
     if result.is_ok() {
-        if let Ok(meta) = state.broker.store.secret_by_id(&id) {
+        if let Ok(meta) = state
+            .broker
+            .store
+            .secret_by_id(&state.broker.workspace, &id)
+        {
             state.broker.audit.append(crate::audit::AuditEntry::new(
                 crate::audit::AuditKind::SecretCopied,
                 format!("Secret value copied (manage API): {}", meta.name),

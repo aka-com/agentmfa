@@ -427,6 +427,7 @@ pub fn mcp_endpoint(connection: &Connection) -> Result<Url, String> {
 /// agent plane uses) and drives the handshake.
 pub async fn check_connection(
     store: &Arc<dyn CatalogRepository>,
+    workspace: &crate::repository::WorkspaceContext,
     client: &reqwest::Client,
     connection: &Connection,
     options: &McpCheckOptions,
@@ -435,7 +436,7 @@ pub async fn check_connection(
         Ok(endpoint) => endpoint,
         Err(detail) => return McpStatusReport::failed(detail),
     };
-    let credential = match render_connection_injection(store, client, connection).await {
+    let credential = match render_connection_injection(store, workspace, client, connection).await {
         Ok(rendered) => match Credential::from_rendered(rendered) {
             Ok(credential) => credential,
             Err(detail) => return McpStatusReport::failed(detail),
@@ -501,11 +502,12 @@ fn tool_info(value: &Value) -> Option<McpToolInfo> {
 /// credential path as the status check, minus whoami and resources.
 pub async fn list_tools(
     store: &Arc<dyn CatalogRepository>,
+    workspace: &crate::repository::WorkspaceContext,
     client: &reqwest::Client,
     connection: &Connection,
 ) -> Result<McpToolListing, String> {
     let endpoint = mcp_endpoint(connection)?;
-    let rendered = render_connection_injection(store, client, connection)
+    let rendered = render_connection_injection(store, workspace, client, connection)
         .await
         .map_err(|failure| format!("could not render credential: {failure}"))?;
     let client = crate::capability::http::client_for_connection(client, connection)?;

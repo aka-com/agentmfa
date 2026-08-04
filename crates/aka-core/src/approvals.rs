@@ -194,14 +194,18 @@ impl ApprovalRequest {
     /// Attach display-only saved credential names from the sealed binding.
     /// OAuth grants are intentionally not public Secrets, but still need a
     /// stable label so the prompt says which credential class will ride.
-    pub fn credentials_from(mut self, store: &dyn crate::repository::CatalogReader) -> Self {
+    pub fn credentials_from(
+        mut self,
+        store: &dyn crate::repository::CatalogReader,
+        workspace: &crate::repository::WorkspaceContext,
+    ) -> Self {
         self.credential_names = if self.connection.oauth.is_some() {
             vec![oauth_credential_name(&self.connection)]
         } else {
             self.connection
                 .secrets
                 .iter()
-                .filter_map(|id| store.secret_by_id(id).ok())
+                .filter_map(|id| store.secret_by_id(workspace, id).ok())
                 .map(|secret| cap_approval_text(secret.name))
                 .collect()
         };

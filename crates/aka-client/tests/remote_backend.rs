@@ -38,7 +38,11 @@ async fn harness() -> Harness {
     )
     .await
     .unwrap();
-    let token = broker.identity.issue_manage_token().await.unwrap();
+    let token = broker
+        .identity
+        .issue_manage_token(&broker.workspace)
+        .await
+        .unwrap();
     let handle = daemon::serve_with(
         broker.clone(),
         ServeOptions {

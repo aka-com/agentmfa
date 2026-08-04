@@ -854,7 +854,7 @@ where
     let Some(endpoint) = state
         .broker
         .endpoints
-        .resolve_secret(&presented)
+        .resolve_secret(&state.broker.workspace, &presented)
         .filter(|e| e.id == endpoint_id)
     else {
         match state.endpoint_auth_failures.check(&failure_key) {
@@ -900,13 +900,17 @@ where
 
     // Re-check access at connect time: a disabled tool must be refused
     // even if a stale listener briefly outlived its teardown.
-    if !state.broker.access.allows(&endpoint.connection_id) {
+    if !state
+        .broker
+        .access
+        .allows(&state.broker.workspace, &endpoint.connection_id)
+    {
         // The endpoint resolved, so the tool has a name — an entry that
         // carries it lands on the right row in Activity.
         let name = state
             .broker
             .store
-            .connection_by_id(&endpoint.connection_id)
+            .connection_by_id(&state.broker.workspace, &endpoint.connection_id)
             .ok()
             .map(|c| c.name);
         audit_refusal(
@@ -926,7 +930,11 @@ where
     }
 
     // Resolve the connection fresh; it may have been edited since issue.
-    let Ok(connection) = state.broker.store.connection_by_id(&endpoint.connection_id) else {
+    let Ok(connection) = state
+        .broker
+        .store
+        .connection_by_id(&state.broker.workspace, &endpoint.connection_id)
+    else {
         client
             .write_all(&error_response(
                 "FATAL",
@@ -987,9 +995,14 @@ where
     let endpoint_still_valid = state
         .broker
         .endpoints
-        .resolve_secret(&presented)
+        .resolve_secret(&state.broker.workspace, &presented)
         .is_some_and(|current| current.id == endpoint_id);
-    if !endpoint_still_valid || !state.broker.access.allows(&connection.id) {
+    if !endpoint_still_valid
+        || !state
+            .broker
+            .access
+            .allows(&state.broker.workspace, &connection.id)
+    {
         state.broker.approvals.revoke(&connection.id);
         audit_refusal(
             &state.broker,
@@ -1009,7 +1022,11 @@ where
 
     // Use the current credential binding and TLS configuration, not the
     // snapshot from before the user was asked.
-    let Ok(connection) = state.broker.store.connection_by_id(&endpoint.connection_id) else {
+    let Ok(connection) = state
+        .broker
+        .store
+        .connection_by_id(&state.broker.workspace, &endpoint.connection_id)
+    else {
         state.broker.approvals.revoke(&endpoint.connection_id);
         client
             .write_all(&error_response(
@@ -1057,7 +1074,12 @@ where
 
     let upstream = match dial_with_timeout(
         &state.broker,
-        dial_upstream(&state.broker.store, &connection, &params),
+        dial_upstream(
+            &state.broker.store,
+            &state.broker.workspace,
+            &connection,
+            &params,
+        ),
     )
     .await
     {
@@ -1126,9 +1148,14 @@ where
     let endpoint_still_valid = state
         .broker
         .endpoints
-        .resolve_secret(&presented)
+        .resolve_secret(&state.broker.workspace, &presented)
         .is_some_and(|current| current.id == endpoint_id);
-    if !endpoint_still_valid || !state.broker.access.allows(&connection.id) {
+    if !endpoint_still_valid
+        || !state
+            .broker
+            .access
+            .allows(&state.broker.workspace, &connection.id)
+    {
         session.finish("access_revoked");
         audit_refusal(
             &state.broker,
@@ -1174,10 +1201,11 @@ where
         broker: state.broker.clone(),
         connection: connection.name.clone(),
         agent: "endpoint".to_string(),
-        record_statements: state
-            .broker
-            .access
-            .audit_statements(&connection.id, state.broker.config.audit_pg_statements),
+        record_statements: state.broker.access.audit_statements(
+            &state.broker.workspace,
+            &connection.id,
+            state.broker.config.audit_pg_statements,
+        ),
     };
     splice(client, upstream.stream, session, max_ttl, idle, audit).await;
     drop(registration);
@@ -1233,7 +1261,12 @@ async fn confirm_session<S>(
 where
     S: AsyncRead + Unpin,
 {
-    if !state.broker.access.confirm_mode(&connection.id).is_on() {
+    if !state
+        .broker
+        .access
+        .confirm_mode(&state.broker.workspace, &connection.id)
+        .is_on()
+    {
         return SessionConfirmation::Proceed;
     }
     // The startup parameters are the only thing the client tells us about
@@ -1258,7 +1291,7 @@ where
     .collect::<Vec<_>>()
     .join(" · ");
     let request = crate::approvals::ApprovalRequest::new(connection, agent, "New Postgres session")
-        .credentials_from(state.broker.store.as_ref())
+        .credentials_from(state.broker.store.as_ref(), &state.broker.workspace)
         .maybe_detail((!detail.is_empty()).then_some(detail))
         .consequence(SESSION_CONSEQUENCE);
     let verdict = tokio::select! {
@@ -1518,7 +1551,11 @@ async fn handle_conn(
     // names a live, unchanged authority before showing a prompt; otherwise a
     // delete/retarget that raced just ahead of prompt insertion could not
     // have found the prompt to revoke.
-    if !state.broker.access.allows(&redemption.connection.id) {
+    if !state
+        .broker
+        .access
+        .allows(&state.broker.workspace, &redemption.connection.id)
+    {
         state.broker.approvals.revoke(&redemption.connection.id);
         audit_refusal(
             &state.broker,
@@ -1538,7 +1575,7 @@ async fn handle_conn(
     let Ok(connection) = state
         .broker
         .store
-        .connection_by_id(&redemption.connection.id)
+        .connection_by_id(&state.broker.workspace, &redemption.connection.id)
     else {
         state.broker.approvals.revoke(&redemption.connection.id);
         audit_refusal(
@@ -1601,7 +1638,11 @@ async fn handle_conn(
         }
         SessionConfirmation::Abandoned => return Ok(()),
     }
-    if !state.broker.access.allows(&redemption.connection.id) {
+    if !state
+        .broker
+        .access
+        .allows(&state.broker.workspace, &redemption.connection.id)
+    {
         state.broker.approvals.revoke(&redemption.connection.id);
         audit_refusal(
             &state.broker,
@@ -1625,7 +1666,7 @@ async fn handle_conn(
     let Ok(connection) = state
         .broker
         .store
-        .connection_by_id(&redemption.connection.id)
+        .connection_by_id(&state.broker.workspace, &redemption.connection.id)
     else {
         state.broker.approvals.revoke(&redemption.connection.id);
         audit_refusal(
@@ -1687,7 +1728,12 @@ async fn handle_conn(
     // slot, and `TestErrorKind::Timeout` was unreachable from the data path.
     let upstream = match dial_with_timeout(
         &state.broker,
-        dial_upstream(&state.broker.store, &connection, &params),
+        dial_upstream(
+            &state.broker.store,
+            &state.broker.workspace,
+            &connection,
+            &params,
+        ),
     )
     .await
     {
@@ -1748,11 +1794,14 @@ async fn handle_conn(
             ("upstream_tls", upstream_tls),
         ],
     );
-    let still_current = state.broker.access.allows(&connection.id)
+    let still_current = state
+        .broker
+        .access
+        .allows(&state.broker.workspace, &connection.id)
         && state
             .broker
             .store
-            .connection_by_id(&connection.id)
+            .connection_by_id(&state.broker.workspace, &connection.id)
             .is_ok_and(|current| current.updated_at == approved_version);
     if !still_current {
         session.finish("access_revoked");
@@ -1792,10 +1841,11 @@ async fn handle_conn(
         broker: state.broker.clone(),
         connection: connection.name.clone(),
         agent,
-        record_statements: state
-            .broker
-            .access
-            .audit_statements(&connection.id, state.broker.config.audit_pg_statements),
+        record_statements: state.broker.access.audit_statements(
+            &state.broker.workspace,
+            &connection.id,
+            state.broker.config.audit_pg_statements,
+        ),
     };
     splice(client, upstream.stream, session, max_ttl, idle, audit).await;
     drop(registration);
@@ -2385,13 +2435,14 @@ fn needs_password() -> TestError {
 
 async fn dial_upstream(
     store: &Arc<dyn CatalogRepository>,
+    workspace: &crate::repository::WorkspaceContext,
     connection: &Connection,
     client_params: &[(String, String)],
 ) -> Result<UpstreamSession, TestError> {
     let password = match connection.secrets.first() {
         Some(secret_id) => Some(
             store
-                .secret_value(secret_id)
+                .secret_value(workspace, secret_id)
                 .await
                 .map_err(|e| format!("The saved credential could not be read: {e}"))?,
         ),
@@ -2647,12 +2698,13 @@ pub struct TestSuccess {
 
 pub async fn test_upstream(
     store: &Arc<dyn CatalogRepository>,
+    workspace: &crate::repository::WorkspaceContext,
     connection: &Connection,
 ) -> Result<TestSuccess, TestError> {
     let ConnectionConfig::Pg { dbname, user, .. } = &connection.config else {
         return Err("not a postgres connection".into());
     };
-    let mut upstream = dial_upstream(store, connection, &[]).await?;
+    let mut upstream = dial_upstream(store, workspace, connection, &[]).await?;
     verify_select_one(&mut upstream).await?;
     let _ = upstream.stream.write_all(&frame(b'X', &[])).await;
     let _ = upstream.stream.shutdown().await;

@@ -226,7 +226,7 @@ fn err_rate_limited(reason: ErrorReason, retry_after: std::time::Duration) -> Re
 fn err_unknown_connection(broker: &Arc<Broker>) -> Response {
     let names: Vec<String> = broker
         .store
-        .list_connections()
+        .list_connections(&broker.workspace)
         .into_iter()
         .map(|c| c.name)
         .collect();
@@ -270,7 +270,7 @@ impl FromRequestParts<AppState> for Authed {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(&parts.headers).map_err(err_missing_token)?;
-        match state.broker.identity.verify(token) {
+        match state.broker.identity.verify(&state.broker.workspace, token) {
             Ok(verified) => {
                 let client = parts
                     .headers
@@ -830,7 +830,7 @@ async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBod
     // per-agent pairing was never gated either, so any local process could
     // always mint itself a token. The name is recorded as an activity label
     // only; agents that can read the token file directly never need this.
-    broker.identity.touch().await;
+    broker.identity.touch(&broker.workspace).await;
     broker.audit.append(
         AuditEntry::new(AuditKind::Paired, format!("Agent connected: {name}"))
             .agent(name.clone())
@@ -840,8 +840,8 @@ async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBod
     (
         StatusCode::OK,
         Json(json!({
-            "token": broker.identity.token(),
-            "client_id": broker.identity.client_id(),
+            "token": broker.identity.token(&broker.workspace),
+            "client_id": broker.identity.client_id(&broker.workspace),
             // Echo what was registered, so the agent can log its own
             // enrollment without a follow-up /v1/whoami.
             "agent": name,
@@ -892,7 +892,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
     }
     let list: Vec<serde_json::Value> = broker
         .store
-        .list_connections()
+        .list_connections(&broker.workspace)
         .into_iter()
         .map(|c| {
             let mut row = json!({
@@ -905,10 +905,10 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 // Whether agents may use the connection. Disabled
                 // connections are visible but refused; the user flips
                 // access in the app.
-                "wired": broker.access.allows(&c.id),
+                "wired": broker.access.allows(&broker.workspace, &c.id),
                 // Headless clients use this to warn that calls will fail
                 // closed when no approval surface is attached.
-                "confirm": broker.access.confirm_mode(&c.id).is_on(),
+                "confirm": broker.access.confirm_mode(&broker.workspace, &c.id).is_on(),
             });
             // Present only when this upstream speaks MCP, so the payload
             // stays exactly as it was for every other connection.
@@ -921,7 +921,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 // The curated tool subset, when one is set; the broker
                 // enforces it on tools/call, this field lets the MCP host
                 // list only what is callable.
-                if let Some(tools) = broker.access.allowed_tools(&c.id) {
+                if let Some(tools) = broker.access.allowed_tools(&broker.workspace, &c.id) {
                     row["allowed_tools"] = json!(tools);
                 }
             }
@@ -949,7 +949,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
 /// a capability call would, so it needs no throttle of its own.
 async fn get_whoami(State(state): State<AppState>, authed: Authed) -> Response {
     let broker = &state.broker;
-    let identity = broker.identity.info();
+    let identity = broker.identity.info(&broker.workspace);
     let expires_at = identity.last_used
         + chrono::Duration::from_std(broker.config.token_ttl)
             .unwrap_or_else(|_| chrono::Duration::days(30));
@@ -1081,7 +1081,10 @@ async fn post_http(
     }
 
     // Resolve the connection: it supplies the *where* and the credential.
-    let Some(conn) = broker.store.connection_by_name(&call.connection) else {
+    let Some(conn) = broker
+        .store
+        .connection_by_name(&broker.workspace, &call.connection)
+    else {
         return err_unknown_connection(broker);
     };
     if conn.kind() != ConnectionKind::Api {
@@ -1185,7 +1188,7 @@ async fn post_http(
         } => crate::capability::http::resolves_to_mcp_path(&call.path, mcp_path),
         _ => false,
     };
-    let allowed_tools_snapshot = broker.access.allowed_tools(&conn.id);
+    let allowed_tools_snapshot = broker.access.allowed_tools(&broker.workspace, &conn.id);
     let mcp_envelope_leg = on_mcp_path
         && (crate::capability::http::is_mcp_transport_leg(
             &conn,
@@ -1262,6 +1265,7 @@ async fn post_http(
     // was being admitted let it execute silently.
     let approval = approval_for_call(
         broker.store.as_ref(),
+        &broker.workspace,
         &conn,
         &client,
         &method,
@@ -1300,6 +1304,7 @@ async fn post_http(
     let payload_hash = coalesce_key.as_ref().map(|_| hash);
 
     let executor = HttpExecution {
+        workspace: broker.workspace.clone(),
         store: broker.store.clone(),
         access: broker.access.clone(),
         audit: broker.audit.clone(),
@@ -1321,11 +1326,13 @@ async fn post_http(
         None => Box::pin(executor.run()),
     };
     let access = broker.access.clone();
+    let workspace = broker.workspace.clone();
     let approvals = broker.approvals.clone();
     let elicitation_permits = broker.elicitation_permits.clone();
     let connection_id = conn.id;
     let executor: crate::executions::Executor = Box::pin(async move {
-        if on_mcp_path && access.allowed_tools(&connection_id) != allowed_tools_snapshot {
+        if on_mcp_path && access.allowed_tools(&workspace, &connection_id) != allowed_tools_snapshot
+        {
             // A subset change that raced just ahead of prompt insertion may
             // have found no pending prompt to revoke. Refuse this snapshot
             // and close any window its stale answer opened.
@@ -1384,7 +1391,10 @@ async fn post_elicit(
         return response;
     }
     let client = authed.client;
-    let Some(conn) = broker.store.connection_by_name(&body.connection) else {
+    let Some(conn) = broker
+        .store
+        .connection_by_name(&broker.workspace, &body.connection)
+    else {
         return err_unknown_connection(broker);
     };
     if !matches!(
@@ -1400,7 +1410,7 @@ async fn post_elicit(
             format!("{} is not an MCP connection", conn.name),
         );
     }
-    if !broker.access.allows(&conn.id) {
+    if !broker.access.allows(&broker.workspace, &conn.id) {
         broker.audit.append(
             AuditEntry::new(
                 AuditKind::Denied,
@@ -1463,7 +1473,10 @@ async fn post_cancel_elicit(
     ApiJson(body): ApiJson<ElicitBody>,
 ) -> Response {
     let broker = &state.broker;
-    let Some(conn) = broker.store.connection_by_name(&body.connection) else {
+    let Some(conn) = broker
+        .store
+        .connection_by_name(&broker.workspace, &body.connection)
+    else {
         return err_unknown_connection(broker);
     };
     if !matches!(
@@ -1479,7 +1492,7 @@ async fn post_cancel_elicit(
             format!("{} is not an MCP connection", conn.name),
         );
     }
-    if !broker.access.allows(&conn.id) {
+    if !broker.access.allows(&broker.workspace, &conn.id) {
         return err_detail(
             StatusCode::FORBIDDEN,
             ErrorReason::DeniedByPolicy,
@@ -1830,7 +1843,10 @@ fn http_rate_limit(broker: &Broker, key: &str, client: &str) -> Option<Response>
 }
 
 fn is_mcp_envelope_candidate(broker: &Broker, call: &HttpCallBody) -> bool {
-    let Some(connection) = broker.store.connection_by_name(&call.connection) else {
+    let Some(connection) = broker
+        .store
+        .connection_by_name(&broker.workspace, &call.connection)
+    else {
         return false;
     };
     let ConnectionConfig::Api {
@@ -1914,6 +1930,7 @@ fn is_mcp_envelope_body(body: &[u8]) -> bool {
 /// such rather than waved through for looking like plumbing.
 fn approval_for_call(
     store: &dyn crate::repository::CatalogReader,
+    workspace: &crate::repository::WorkspaceContext,
     conn: &crate::types::Connection,
     client: &str,
     method: &http::Method,
@@ -1924,7 +1941,7 @@ fn approval_for_call(
     use crate::approvals::{capped_text, ApprovalRequest};
     let request = |summary: String| {
         ApprovalRequest::new(conn, client, summary)
-            .credentials_from(store)
+            .credentials_from(store, workspace)
             .http_operation(method, path)
     };
     let mcp_path = match &conn.config {
@@ -2088,7 +2105,7 @@ async fn run_allowed(
         tokio::sync::mpsc::Receiver<crate::capability::http::StreamEvent>,
     )>,
 ) -> Response {
-    if !broker.access.allows(&conn.id) {
+    if !broker.access.allows(&broker.workspace, &conn.id) {
         broker.audit.append(
             AuditEntry::new(
                 AuditKind::Denied,
@@ -2112,6 +2129,7 @@ async fn run_allowed(
     // request-level check above, especially while a confirmed call is parked.
     let access = broker.access.clone();
     let store = broker.store.clone();
+    let workspace = broker.workspace.clone();
     let approvals = broker.approvals.clone();
     let connection_id = conn.id;
     let expected_version = conn.updated_at;
@@ -2119,7 +2137,7 @@ async fn run_allowed(
     let exec = ExecRequest {
         executor: Box::pin(async move {
             let connection_is_current = store
-                .connection_by_id(&connection_id)
+                .connection_by_id(&workspace, &connection_id)
                 .is_ok_and(|current| current.updated_at == expected_version);
             if !connection_is_current {
                 // A stale prompt may just have opened a window after a
@@ -2128,7 +2146,7 @@ async fn run_allowed(
                 approvals.revoke(&connection_id);
                 return ExecOutcome::refusal(ErrorReason::DeniedByPolicy);
             }
-            if !access.allows(&connection_id) {
+            if !access.allows(&workspace, &connection_id) {
                 return ExecOutcome::refusal(ErrorReason::DeniedByPolicy);
             }
             executor.await
@@ -2140,10 +2158,16 @@ async fn run_allowed(
     // re-sending the same `request_id` joins the wait instead of raising a
     // second prompt for work that is already being asked about.
     let exec = match approval {
-        Some(request) if broker.access.confirm_mode(&conn.id).is_on() => {
+        Some(request)
+            if broker
+                .access
+                .confirm_mode(&broker.workspace, &conn.id)
+                .is_on() =>
+        {
             let approvals = broker.approvals.clone();
             let access = broker.access.clone();
             let store = broker.store.clone();
+            let workspace = broker.workspace.clone();
             let connection_id = conn.id;
             let expected_version = conn.updated_at;
             let connection = conn.name.clone();
@@ -2168,9 +2192,9 @@ async fn run_allowed(
                     // changed just before this prompt was inserted (and so
                     // neither revocation could find it yet).
                     let connection_is_current = store
-                        .connection_by_id(&connection_id)
+                        .connection_by_id(&workspace, &connection_id)
                         .is_ok_and(|current| current.updated_at == expected_version);
-                    if !access.allows(&connection_id) || !connection_is_current {
+                    if !access.allows(&workspace, &connection_id) || !connection_is_current {
                         return ExecOutcome::refusal(ErrorReason::DeniedByPolicy);
                     }
                     // Said before the wait, not after: an agent watching a
@@ -2356,7 +2380,10 @@ async fn post_ssh_open(
     if let Some(response) = request_id_error(body.request_id.as_deref()) {
         return response;
     }
-    let Some(conn) = broker.store.connection_by_name(&body.connection) else {
+    let Some(conn) = broker
+        .store
+        .connection_by_name(&broker.workspace, &body.connection)
+    else {
         return err_unknown_connection(broker);
     };
     if conn.kind() != ConnectionKind::Ssh {
@@ -2477,7 +2504,10 @@ async fn post_pg_open(
     if let Some(response) = request_id_error(body.request_id.as_deref()) {
         return response;
     }
-    let Some(conn) = broker.store.connection_by_name(&body.connection) else {
+    let Some(conn) = broker
+        .store
+        .connection_by_name(&broker.workspace, &body.connection)
+    else {
         return err_unknown_connection(broker);
     };
     if conn.kind() != ConnectionKind::Pg {

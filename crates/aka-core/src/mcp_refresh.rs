@@ -35,7 +35,7 @@ use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::broker::Broker;
 use crate::health::HealthRegistry;
 use crate::mcp_auth::{is_loopback_host, parse_token_payload, McpOAuthGrant};
-use crate::repository::CatalogRepository;
+use crate::repository::{CatalogRepository, WorkspaceContext};
 use crate::types::{Connection, HealthStatus};
 
 /// Renew when the access token is within this window of expiry.
@@ -51,6 +51,8 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(20);
 /// build one (the broker, an HTTP execution) without dragging the whole
 /// broker along.
 pub(crate) struct RefreshContext<'a> {
+    /// Trusted scope shared by every repository participating in renewal.
+    pub workspace: &'a WorkspaceContext,
     pub store: &'a dyn CatalogRepository,
     pub http: &'a reqwest::Client,
     pub audit: &'a AuditLog,
@@ -61,6 +63,7 @@ pub(crate) struct RefreshContext<'a> {
 impl Broker {
     pub(crate) fn refresh_context(&self) -> RefreshContext<'_> {
         RefreshContext {
+            workspace: &self.workspace,
             store: self.store.as_ref(),
             http: &self.http_client,
             audit: self.audit.as_ref(),
@@ -106,9 +109,17 @@ impl RefreshError {
 /// When the connection's bound token secret last changed — the "version"
 /// concurrent renewals compare to avoid spending the refresh token twice.
 fn bound_token_version(ctx: &RefreshContext<'_>, connection_id: &Uuid) -> Option<DateTime<Utc>> {
-    let connection = ctx.store.connection_by_id(connection_id).ok()?;
+    let connection = ctx
+        .store
+        .connection_by_id(ctx.workspace, connection_id)
+        .ok()?;
     let secret_id = connection.secrets.first()?;
-    Some(ctx.store.secret_by_id(secret_id).ok()?.updated_at)
+    Some(
+        ctx.store
+            .secret_by_id(ctx.workspace, secret_id)
+            .ok()?
+            .updated_at,
+    )
 }
 
 /// Whether this connection's access token is (about to be) expired,
@@ -166,7 +177,7 @@ pub(crate) async fn refresh_connection_token(
     let _guard = lock.lock().await;
     let connection = ctx
         .store
-        .connection_by_id(connection_id)
+        .connection_by_id(ctx.workspace, connection_id)
         .map_err(|_| RefreshError::NotRefreshable("the connection no longer exists".into()))?;
     match mode {
         RefreshMode::IfStale => {
@@ -292,7 +303,11 @@ async fn try_refresh(
     let tokens = parse_token_payload(&payload).map_err(RefreshError::Rejected)?;
 
     ctx.store
-        .replace_secret_value(&secret_id, Zeroizing::new(tokens.access_token.to_string()))
+        .replace_secret_value(
+            ctx.workspace,
+            &secret_id,
+            Zeroizing::new(tokens.access_token.to_string()),
+        )
         .await
         .map_err(|error| {
             RefreshError::Transient(format!("could not store the renewed token: {error}"))
@@ -311,7 +326,12 @@ async fn try_refresh(
         .and_then(|seconds| i64::try_from(seconds).ok())
         .map(|seconds| Utc::now() + chrono::Duration::seconds(seconds));
     ctx.store
-        .set_connection_oauth(&connection.id, renewed.to_secret_value(), expires_at)
+        .set_connection_oauth(
+            ctx.workspace,
+            &connection.id,
+            renewed.to_secret_value(),
+            expires_at,
+        )
         .await
         .map_err(|error| {
             RefreshError::Transient(format!("could not store the renewed grant: {error}"))
@@ -330,7 +350,7 @@ async fn read_grant(
     }
     let stored = ctx
         .store
-        .connection_oauth_grant(&connection.id)
+        .connection_oauth_grant(ctx.workspace, &connection.id)
         .await
         .map_err(|error| {
             RefreshError::Transient(format!("could not read the refresh grant: {error}"))
@@ -358,7 +378,12 @@ async fn retire_refresh_token(ctx: &RefreshContext<'_>, connection: &Connection)
     let retired = grant.with_refresh_token(None);
     if let Err(error) = ctx
         .store
-        .set_connection_oauth(&connection.id, retired.to_secret_value(), expires_at)
+        .set_connection_oauth(
+            ctx.workspace,
+            &connection.id,
+            retired.to_secret_value(),
+            expires_at,
+        )
         .await
     {
         tracing::warn!(
@@ -375,7 +400,7 @@ async fn retire_refresh_token(ctx: &RefreshContext<'_>, connection: &Connection)
 fn byo_park_key(broker: &Broker, connection: &Connection) -> Option<DateTime<Utc>> {
     crate::oauth::oauth_token_secret_id(connection)
         .ok()
-        .and_then(|id| broker.store.secret_by_id(&id).ok())
+        .and_then(|id| broker.store.secret_by_id(&broker.workspace, &id).ok())
         .map(|meta| meta.updated_at)
 }
 
@@ -396,7 +421,7 @@ pub(crate) fn spawn_refresh_sweeper(broker: &Arc<Broker>) {
         loop {
             let Some(broker) = weak.upgrade() else { return };
             let now = Utc::now();
-            for connection in broker.store.list_connections() {
+            for connection in broker.store.list_connections(&broker.workspace) {
                 // BYO-OAuth (`Api { oauth: Some(_) }`) keeps its token set in a
                 // secret rather than in `connection.oauth`, so `wants_refresh`
                 // cannot see it and these connections refreshed only when an
@@ -426,7 +451,13 @@ pub(crate) fn spawn_refresh_sweeper(broker: &Arc<Broker>) {
                         &connection,
                     ) {
                         Ok(http) => {
-                            crate::oauth::fresh_bearer(&broker.store, &http, &connection).await
+                            crate::oauth::fresh_bearer(
+                                &broker.store,
+                                &broker.workspace,
+                                &http,
+                                &connection,
+                            )
+                            .await
                         }
                         Err(error) => Err(crate::oauth::RefreshFailure::Transient(format!(
                             "trusted CA: {error}"
@@ -560,29 +591,39 @@ mod tests {
         .unwrap();
         broker
             .store
-            .add_secret("MCP_TOKEN", Zeroizing::new("old-access".into()))
+            .add_secret(
+                &broker.workspace,
+                "MCP_TOKEN",
+                Zeroizing::new("old-access".into()),
+            )
             .await
             .unwrap();
-        let secret = broker.store.secret_by_name("MCP_TOKEN").unwrap();
+        let secret = broker
+            .store
+            .secret_by_name(&broker.workspace, "MCP_TOKEN")
+            .unwrap();
         let connection = broker
             .store
-            .add_connection(ConnectionSpec {
-                name: format!("mcp-refresh-{}", Uuid::new_v4()),
-                config: ConnectionConfig::Api {
-                    host: "127.0.0.1".into(),
-                    scheme: "http".into(),
-                    port: Some(9),
-                    trusted_ca_bundle_path: None,
-                    template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
-                    mcp_path: Some("/mcp".into()),
-                    test_path: None,
-                    oauth: None,
-                    signer: None,
-                    client_cert_path: None,
-                    client_key_path: None,
+            .add_connection(
+                &broker.workspace,
+                ConnectionSpec {
+                    name: format!("mcp-refresh-{}", Uuid::new_v4()),
+                    config: ConnectionConfig::Api {
+                        host: "127.0.0.1".into(),
+                        scheme: "http".into(),
+                        port: Some(9),
+                        trusted_ca_bundle_path: None,
+                        template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
+                        mcp_path: Some("/mcp".into()),
+                        test_path: None,
+                        oauth: None,
+                        signer: None,
+                        client_cert_path: None,
+                        client_key_path: None,
+                    },
+                    secrets: vec![secret.id],
                 },
-                secrets: vec![secret.id],
-            })
+            )
             .await
             .unwrap();
         let grant = McpOAuthGrant {
@@ -595,13 +636,17 @@ mod tests {
         broker
             .store
             .set_connection_oauth(
+                &broker.workspace,
                 &connection.id,
                 grant.to_secret_value(),
                 Some(Utc::now() - chrono::Duration::minutes(1)),
             )
             .await
             .unwrap();
-        let connection = broker.store.connection_by_id(&connection.id).unwrap();
+        let connection = broker
+            .store
+            .connection_by_id(&broker.workspace, &connection.id)
+            .unwrap();
         (broker, dir, connection)
     }
 
@@ -617,7 +662,7 @@ mod tests {
     async fn stored_grant(broker: &Broker, connection_id: Uuid) -> McpOAuthGrant {
         let raw = broker
             .store
-            .connection_oauth_grant(&connection_id)
+            .connection_oauth_grant(&broker.workspace, &connection_id)
             .await
             .unwrap();
         McpOAuthGrant::from_secret_value(&raw).unwrap()
@@ -764,36 +809,46 @@ mod tests {
         });
         broker
             .store
-            .add_secret("OAUTH_TOKENS", Zeroizing::new(tokens.to_string()))
+            .add_secret(
+                &broker.workspace,
+                "OAUTH_TOKENS",
+                Zeroizing::new(tokens.to_string()),
+            )
             .await
             .unwrap();
-        let secret = broker.store.secret_by_name("OAUTH_TOKENS").unwrap();
+        let secret = broker
+            .store
+            .secret_by_name(&broker.workspace, "OAUTH_TOKENS")
+            .unwrap();
         broker
             .store
-            .add_connection(ConnectionSpec {
-                name: "slack".into(),
-                config: ConnectionConfig::Api {
-                    host: "127.0.0.1".into(),
-                    scheme: "http".into(),
-                    port: Some(port),
-                    trusted_ca_bundle_path: None,
-                    template: "Authorization: Bearer {{OAUTH_TOKENS}}".into(),
-                    mcp_path: None,
-                    test_path: None,
-                    oauth: Some(OAuthSpec {
-                        auth_url: "http://127.0.0.1/authorize".into(),
-                        token_url: format!("http://127.0.0.1:{port}/token"),
-                        client_id: "client-abc".into(),
-                        scopes: Vec::new(),
-                        extra_auth_params: Vec::new(),
-                        token_secret_id: None,
-                    }),
-                    signer: None,
-                    client_cert_path: None,
-                    client_key_path: None,
+            .add_connection(
+                &broker.workspace,
+                ConnectionSpec {
+                    name: "slack".into(),
+                    config: ConnectionConfig::Api {
+                        host: "127.0.0.1".into(),
+                        scheme: "http".into(),
+                        port: Some(port),
+                        trusted_ca_bundle_path: None,
+                        template: "Authorization: Bearer {{OAUTH_TOKENS}}".into(),
+                        mcp_path: None,
+                        test_path: None,
+                        oauth: Some(OAuthSpec {
+                            auth_url: "http://127.0.0.1/authorize".into(),
+                            token_url: format!("http://127.0.0.1:{port}/token"),
+                            client_id: "client-abc".into(),
+                            scopes: Vec::new(),
+                            extra_auth_params: Vec::new(),
+                            token_secret_id: None,
+                        }),
+                        signer: None,
+                        client_cert_path: None,
+                        client_key_path: None,
+                    },
+                    secrets: vec![secret.id],
                 },
-                secrets: vec![secret.id],
-            })
+            )
             .await
             .unwrap();
 
@@ -812,7 +867,11 @@ mod tests {
         );
 
         // And the renewed token is what a later call would present.
-        let stored = broker.store.secret_value(&secret.id).await.unwrap();
+        let stored = broker
+            .store
+            .secret_value(&broker.workspace, &secret.id)
+            .await
+            .unwrap();
         assert!(
             stored.contains("renewed_by_the_sweeper"),
             "the renewed token must be persisted: {}",

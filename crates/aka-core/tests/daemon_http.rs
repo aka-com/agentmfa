@@ -391,6 +391,7 @@ fn api_connection(harness: &Harness, name: &str, port: u16) {
             .broker
             .store
             .add_secret(
+                &harness.broker.workspace,
                 "GITHUB_API_KEY",
                 Zeroizing::new("ghp_test_secret_value".into()),
             )
@@ -399,24 +400,27 @@ fn api_connection(harness: &Harness, name: &str, port: u16) {
         harness
             .broker
             .store
-            .add_connection(ConnectionSpec {
-                name: name.into(),
-                config: ConnectionConfig::Api {
-                    host: "127.0.0.1".into(),
-                    scheme: "http".into(),
-                    port: Some(port),
-                    trusted_ca_bundle_path: None,
-                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+            .add_connection(
+                &harness.broker.workspace,
+                ConnectionSpec {
+                    name: name.into(),
+                    config: ConnectionConfig::Api {
+                        host: "127.0.0.1".into(),
+                        scheme: "http".into(),
+                        port: Some(port),
+                        trusted_ca_bundle_path: None,
+                        template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
-                    mcp_path: None,
-                    test_path: None,
-                    oauth: None,
-                    signer: None,
-                    client_cert_path: None,
-                    client_key_path: None,
+                        mcp_path: None,
+                        test_path: None,
+                        oauth: None,
+                        signer: None,
+                        client_cert_path: None,
+                        client_key_path: None,
+                    },
+                    secrets: vec![],
                 },
-                secrets: vec![],
-            })
+            )
             .await
             .unwrap();
     });
@@ -528,7 +532,7 @@ async fn pairing_flow_and_token_auth() {
     // enrollment.
     let again = h.pair("codex").await;
     assert_eq!(again, token);
-    assert_eq!(h.broker.identity.token(), token);
+    assert_eq!(h.broker.identity.token(&h.broker.workspace), token);
 
     // Token works; garbage doesn't.
     let auth = format!("Bearer {token}");
@@ -584,7 +588,7 @@ async fn pairing_flow_and_token_auth() {
         h.broker.paths.token_display()
     );
     // The rewritten token file authenticates.
-    let fresh = h.broker.identity.token();
+    let fresh = h.broker.identity.token(&h.broker.workspace);
     let fresh_auth = format!("Bearer {fresh}");
     let (status, _) = uds_request(
         &h.socket,
@@ -719,24 +723,35 @@ async fn wrong_connection_type_names_the_right_endpoint() {
     let mut h = harness(BrokerConfig::default()).await;
     h.broker
         .store
-        .add_secret("DATABASE_PASSWORD", Zeroizing::new("pg-pw".into()))
+        .add_secret(
+            &h.broker.workspace,
+            "DATABASE_PASSWORD",
+            Zeroizing::new("pg-pw".into()),
+        )
         .await
         .unwrap();
-    let pw = h.broker.store.secret_by_name("DATABASE_PASSWORD").unwrap();
+    let pw = h
+        .broker
+        .store
+        .secret_by_name(&h.broker.workspace, "DATABASE_PASSWORD")
+        .unwrap();
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "prod-db".into(),
-            config: ConnectionConfig::Pg {
-                host: "db.internal.aka.com".into(),
-                port: 5432,
-                dbname: "app_production".into(),
-                user: "app".into(),
-                sslmode: PgSslMode::Require,
-                trusted_ca_bundle_path: None,
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "prod-db".into(),
+                config: ConnectionConfig::Pg {
+                    host: "db.internal.aka.com".into(),
+                    port: 5432,
+                    dbname: "app_production".into(),
+                    user: "app".into(),
+                    sslmode: PgSslMode::Require,
+                    trusted_ca_bundle_path: None,
+                },
+                secrets: vec![pw.id],
             },
-            secrets: vec![pw.id],
-        })
+        )
         .await
         .unwrap();
     let token = h.pair("claude-code").await;
@@ -769,24 +784,35 @@ async fn connections_listing_shows_targets_only() {
     api_connection(&h, "github", up.port);
     h.broker
         .store
-        .add_secret("DATABASE_PASSWORD", Zeroizing::new("pg-pw".into()))
+        .add_secret(
+            &h.broker.workspace,
+            "DATABASE_PASSWORD",
+            Zeroizing::new("pg-pw".into()),
+        )
         .await
         .unwrap();
-    let pw = h.broker.store.secret_by_name("DATABASE_PASSWORD").unwrap();
+    let pw = h
+        .broker
+        .store
+        .secret_by_name(&h.broker.workspace, "DATABASE_PASSWORD")
+        .unwrap();
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "prod-db".into(),
-            config: ConnectionConfig::Pg {
-                host: "db.internal.aka.com".into(),
-                port: 5432,
-                dbname: "app_production".into(),
-                user: "app".into(),
-                sslmode: PgSslMode::Require,
-                trusted_ca_bundle_path: None,
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "prod-db".into(),
+                config: ConnectionConfig::Pg {
+                    host: "db.internal.aka.com".into(),
+                    port: 5432,
+                    dbname: "app_production".into(),
+                    user: "app".into(),
+                    sslmode: PgSslMode::Require,
+                    trusted_ca_bundle_path: None,
+                },
+                secrets: vec![pw.id],
             },
-            secrets: vec![pw.id],
-        })
+        )
         .await
         .unwrap();
 
@@ -817,7 +843,11 @@ async fn connections_listing_shows_targets_only() {
 
     // Disabling a tool flips its `wired` flag for every agent at once —
     // access is per connection, not per caller.
-    let pg = h.broker.store.connection_by_name("prod-db").unwrap();
+    let pg = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-db")
+        .unwrap();
     h.broker.ui_set_tool_access(&pg.id, false).await.unwrap();
     let (status, list) = uds_request(
         &h.socket,
@@ -1025,7 +1055,11 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
     const TOKEN: &str = "supersecretquerytoken123";
     h.broker
         .store
-        .add_secret("STREAM_TOKEN", Zeroizing::new(TOKEN.into()))
+        .add_secret(
+            &h.broker.workspace,
+            "STREAM_TOKEN",
+            Zeroizing::new(TOKEN.into()),
+        )
         .await
         .unwrap();
     // A port with (essentially certainly) nothing listening: bind, then drop.
@@ -1035,24 +1069,27 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
     };
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "feed".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(dead_port),
-                trusted_ca_bundle_path: None,
-                template: "?token={{url(STREAM_TOKEN)}}".into(),
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "feed".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(dead_port),
+                    trusted_ca_bundle_path: None,
+                    template: "?token={{url(STREAM_TOKEN)}}".into(),
 
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     let token = h.pair("claude-code").await;
@@ -1243,24 +1280,27 @@ async fn mutating_request_id_is_independent_per_connection() {
     api_connection(&h, "github", up.port);
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "github-alt".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(up.port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "github-alt".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(up.port),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     let token = h.pair("claude-code").await;
@@ -1379,7 +1419,11 @@ async fn connections_are_enabled_by_default_and_disable_refuses() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
-    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
 
@@ -1600,28 +1644,35 @@ async fn recognized_mcp_envelope_legs_do_not_spend_the_tool_call_budget() {
     let up = upstream().await;
     h.broker
         .store
-        .add_secret("MCP_KEY", Zeroizing::new("mcp_test_secret_value".into()))
+        .add_secret(
+            &h.broker.workspace,
+            "MCP_KEY",
+            Zeroizing::new("mcp_test_secret_value".into()),
+        )
         .await
         .unwrap();
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "docs".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(up.port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{MCP_KEY}}".into(),
-                mcp_path: Some("/echo".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "docs".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(up.port),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{MCP_KEY}}".into(),
+                    mcp_path: Some("/echo".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     let token = h.pair("claude-code").await;
@@ -1738,7 +1789,12 @@ async fn a_brokered_401_flips_connection_health_to_needs_reconnect() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
-    let conn_id = h.broker.store.connection_by_name("github").unwrap().id;
+    let conn_id = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap()
+        .id;
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
 
@@ -1798,7 +1854,12 @@ async fn a_business_403_does_not_claim_the_credential_needs_reconnecting() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
-    let conn_id = h.broker.store.connection_by_name("github").unwrap().id;
+    let conn_id = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap()
+        .id;
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
 
@@ -1853,31 +1914,42 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
     // upstream's /echo so tools/call round-trips.
     h.broker
         .store
-        .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .add_secret(
+            &h.broker.workspace,
+            "MCP_TOKEN",
+            Zeroizing::new("tok".into()),
+        )
         .await
         .unwrap();
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "docs".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(up.port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
-                mcp_path: Some("/echo".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "docs".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(up.port),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
+                    mcp_path: Some("/echo".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
-    let conn = h.broker.store.connection_by_name("docs").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "docs")
+        .unwrap();
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
 
@@ -1981,23 +2053,26 @@ async fn an_oversized_mcp_tool_result_becomes_a_bounded_explicit_tool_error() {
     let up = upstream().await;
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "large-docs".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(up.port),
-                trusted_ca_bundle_path: None,
-                template: String::new(),
-                mcp_path: Some("/large-mcp".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "large-docs".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(up.port),
+                    trusted_ca_bundle_path: None,
+                    template: String::new(),
+                    mcp_path: Some("/large-mcp".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     let token = h.pair("claude-code").await;
@@ -2102,28 +2177,35 @@ async fn elicitations_require_an_exact_upstream_correlation_capability() {
     let up = upstream().await;
     h.broker
         .store
-        .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .add_secret(
+            &h.broker.workspace,
+            "MCP_TOKEN",
+            Zeroizing::new("tok".into()),
+        )
         .await
         .unwrap();
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "interactive".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(up.port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
-                mcp_path: Some("/needs-input".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "interactive".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(up.port),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
+                    mcp_path: Some("/needs-input".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     let token = h.pair("claude-code").await;
@@ -2322,7 +2404,11 @@ async fn loopback_request(
 
 /// Issue an HTTP direct endpoint on `github`; returns (info, port).
 async fn issue_http_endpoint(h: &Harness) -> (aka_core::broker::IssuedEndpointInfo, u16) {
-    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
     let info = h.broker.ui_issue_endpoint(&conn.id).await.unwrap();
     let port: u16 = info.dsn.rsplit(':').next().unwrap().parse().unwrap();
     (info, port)
@@ -2386,7 +2472,11 @@ async fn http_direct_endpoint_fails_closed_before_reaching_upstream() {
     let h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
-    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
         .await
@@ -2410,7 +2500,11 @@ async fn http_direct_endpoint_only_exempts_identifiable_mcp_transport_legs() {
     let h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
-    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
     let mut config = conn.config.clone();
     let ConnectionConfig::Api { mcp_path, .. } = &mut config else {
         unreachable!()
@@ -2528,7 +2622,11 @@ async fn curated_mcp_tools_cannot_bypass_the_subset_through_a_direct_endpoint() 
     let h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "docs", up.port);
-    let conn = h.broker.store.connection_by_name("docs").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "docs")
+        .unwrap();
     let mut config = conn.config.clone();
     let ConnectionConfig::Api { mcp_path, .. } = &mut config else {
         unreachable!()
@@ -2602,7 +2700,11 @@ async fn http_direct_endpoint_returns_cookies_until_explicitly_contained() {
         ]
     );
 
-    let connection = h.broker.store.connection_by_name("github").unwrap();
+    let connection = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
     assert!(h
         .broker
         .ui_set_expose_response_credentials(&connection.id, false)
@@ -2635,7 +2737,11 @@ async fn disabling_access_during_http_upload_prevents_dispatch() {
     // Let the handler authenticate, then disable while it is still waiting
     // for the remainder of the body.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let connection = h.broker.store.connection_by_name("github").unwrap();
+    let connection = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
     h.broker
         .ui_set_tool_access(&connection.id, false)
         .await
@@ -2731,28 +2837,35 @@ async fn http_direct_endpoint_rejects_client_supplied_custom_credential_header()
     let up = upstream().await;
     h.broker
         .store
-        .add_secret("API_KEY", Zeroizing::new("real-key".into()))
+        .add_secret(
+            &h.broker.workspace,
+            "API_KEY",
+            Zeroizing::new("real-key".into()),
+        )
         .await
         .unwrap();
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "github".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(up.port),
-                trusted_ca_bundle_path: None,
-                template: "X-Api-Key: {{API_KEY}}".into(),
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "github".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(up.port),
+                    trusted_ca_bundle_path: None,
+                    template: "X-Api-Key: {{API_KEY}}".into(),
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     h.pair("claude-code").await;
@@ -2918,7 +3031,11 @@ async fn streamed_response_credentials_follow_the_connection_policy() {
     assert!(cookies.contains("session=one"));
     assert!(cookies.contains("csrf=two"));
 
-    let connection = h.broker.store.connection_by_name("github").unwrap();
+    let connection = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
     h.broker
         .ui_set_expose_response_credentials(&connection.id, false)
         .await
@@ -2979,7 +3096,11 @@ async fn streamed_body_network_failures_record_failed_health() {
     let mut h = harness(BrokerConfig::default()).await;
     let port = truncated_upstream().await;
     api_connection(&h, "github", port);
-    let connection = h.broker.store.connection_by_name("github").unwrap();
+    let connection = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
     let token = h.pair("agent").await;
 
     let (status, _, body) = uds_request_raw(
@@ -3098,7 +3219,11 @@ async fn a_refused_stream_carries_one_error_frame_and_no_head() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
-    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
     h.broker.ui_set_tool_access(&conn.id, false).await.unwrap();
     let token = h.pair("agent").await;
 
@@ -3171,28 +3296,35 @@ async fn a_streamed_answer_still_carries_what_the_broker_attached_after_it() {
     let up = upstream().await;
     h.broker
         .store
-        .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .add_secret(
+            &h.broker.workspace,
+            "MCP_TOKEN",
+            Zeroizing::new("tok".into()),
+        )
         .await
         .unwrap();
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "interactive".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(up.port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
-                mcp_path: Some("/needs-input".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "interactive".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(up.port),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
+                    mcp_path: Some("/needs-input".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     let token = h.pair("claude-code").await;

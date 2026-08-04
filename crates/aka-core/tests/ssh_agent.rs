@@ -171,23 +171,33 @@ fn add_ssh_connection_with_fingerprint(
     futures::executor::block_on(async {
         broker
             .store
-            .add_secret("DEPLOY_SSH_KEY", Zeroizing::new(pem.to_string()))
+            .add_secret(
+                &broker.workspace,
+                "DEPLOY_SSH_KEY",
+                Zeroizing::new(pem.to_string()),
+            )
             .await
             .unwrap();
-        let secret = broker.store.secret_by_name("DEPLOY_SSH_KEY").unwrap();
+        let secret = broker
+            .store
+            .secret_by_name(&broker.workspace, "DEPLOY_SSH_KEY")
+            .unwrap();
         broker
             .store
-            .add_connection(ConnectionSpec {
-                name: "prod-ssh".into(),
-                config: ConnectionConfig::Ssh {
-                    destination: Some("prod".into()),
-                    host: "prod.example.com".into(),
-                    port: 22,
-                    user: user.into(),
-                    host_key_fingerprint,
+            .add_connection(
+                &broker.workspace,
+                ConnectionSpec {
+                    name: "prod-ssh".into(),
+                    config: ConnectionConfig::Ssh {
+                        destination: Some("prod".into()),
+                        host: "prod.example.com".into(),
+                        port: 22,
+                        user: user.into(),
+                        host_key_fingerprint,
+                    },
+                    secrets: vec![secret.id],
                 },
-                secrets: vec![secret.id],
-            })
+            )
             .await
             .unwrap();
     });
@@ -213,20 +223,23 @@ fn add_passwordless_ssh_connection(broker: &Broker) -> PrivateKey {
     futures::executor::block_on(async {
         broker
             .store
-            .add_connection(ConnectionSpec {
-                name: "prod-ssh".into(),
-                config: ConnectionConfig::Ssh {
-                    destination: Some("prod".into()),
-                    host: "prod.example.com".into(),
-                    port: 22,
-                    user: "deploy".into(),
-                    host_key_fingerprint: host_key
-                        .public_key()
-                        .fingerprint(HashAlg::Sha256)
-                        .to_string(),
+            .add_connection(
+                &broker.workspace,
+                ConnectionSpec {
+                    name: "prod-ssh".into(),
+                    config: ConnectionConfig::Ssh {
+                        destination: Some("prod".into()),
+                        host: "prod.example.com".into(),
+                        port: 22,
+                        user: "deploy".into(),
+                        host_key_fingerprint: host_key
+                            .public_key()
+                            .fingerprint(HashAlg::Sha256)
+                            .to_string(),
+                    },
+                    secrets: vec![],
                 },
-                secrets: vec![],
-            })
+            )
             .await
             .unwrap();
     });
@@ -235,7 +248,10 @@ fn add_passwordless_ssh_connection(broker: &Broker) -> PrivateKey {
 
 /// The `prod-ssh` connection's stored fingerprint ("" while unpinned).
 fn stored_fingerprint(broker: &Broker) -> String {
-    let conn = broker.store.connection_by_name("prod-ssh").unwrap();
+    let conn = broker
+        .store
+        .connection_by_name(&broker.workspace, "prod-ssh")
+        .unwrap();
     match conn.config {
         ConnectionConfig::Ssh {
             host_key_fingerprint,
@@ -319,7 +335,11 @@ impl Harness {
     /// Issue an SSH direct endpoint; its `dsn` is the stable
     /// `SSH_AUTH_SOCK` path.
     async fn issue_ssh_endpoint(&self) -> aka_core::broker::IssuedEndpointInfo {
-        let conn = self.broker.store.connection_by_name("prod-ssh").unwrap();
+        let conn = self
+            .broker
+            .store
+            .connection_by_name(&self.broker.workspace, "prod-ssh")
+            .unwrap();
         self.broker.ui_issue_endpoint(&conn.id).await.unwrap()
     }
 }
@@ -551,27 +571,38 @@ async fn unparseable_key_fails_open() {
     // fail up front (SshSigner::load), not each later signature.
     h.broker
         .store
-        .add_secret("DEPLOY_SSH_KEY", Zeroizing::new("not a private key".into()))
+        .add_secret(
+            &h.broker.workspace,
+            "DEPLOY_SSH_KEY",
+            Zeroizing::new("not a private key".into()),
+        )
         .await
         .unwrap();
-    let secret = h.broker.store.secret_by_name("DEPLOY_SSH_KEY").unwrap();
+    let secret = h
+        .broker
+        .store
+        .secret_by_name(&h.broker.workspace, "DEPLOY_SSH_KEY")
+        .unwrap();
     let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     h.broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "prod-ssh".into(),
-            config: ConnectionConfig::Ssh {
-                destination: None,
-                host: "prod.example.com".into(),
-                port: 22,
-                user: "deploy".into(),
-                host_key_fingerprint: host_key
-                    .public_key()
-                    .fingerprint(HashAlg::Sha256)
-                    .to_string(),
+        .add_connection(
+            &h.broker.workspace,
+            ConnectionSpec {
+                name: "prod-ssh".into(),
+                config: ConnectionConfig::Ssh {
+                    destination: None,
+                    host: "prod.example.com".into(),
+                    port: 22,
+                    user: "deploy".into(),
+                    host_key_fingerprint: host_key
+                        .public_key()
+                        .fingerprint(HashAlg::Sha256)
+                        .to_string(),
+                },
+                secrets: vec![secret.id],
             },
-            secrets: vec![secret.id],
-        })
+        )
         .await
         .unwrap();
     let token = h.pair().await;
@@ -807,7 +838,14 @@ async fn direct_endpoint_serves_the_ssh_agent_protocol() {
     let endpoint = h
         .broker
         .endpoints
-        .get_for_connection(&h.broker.store.connection_by_name("prod-ssh").unwrap().id)
+        .get_for_connection(
+            &h.broker.workspace,
+            &h.broker
+                .store
+                .connection_by_name(&h.broker.workspace, "prod-ssh")
+                .unwrap()
+                .id,
+        )
         .expect("issued");
     assert!(
         !name.contains(&endpoint.secret_hash[..16]),
@@ -819,7 +857,11 @@ async fn direct_endpoint_serves_the_ssh_agent_protocol() {
     // SSH-1's other half: the path is not in the ordinary connection listing,
     // which every manage caller receives. Only an explicit endpoint read-back
     // hands out a working signing oracle.
-    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-ssh")
+        .unwrap();
     let chip = aka_core::manage::connection_dto(&h.broker, &conn)
         .agent_access
         .endpoint
@@ -882,7 +924,11 @@ async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
     // Disabling agent access keeps the endpoint issued but refuses fresh
     // connections at the access re-check (the listener shuts them down
     // before serving the agent protocol).
-    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-ssh")
+        .unwrap();
     h.broker.ui_set_tool_access(&conn.id, false).await.unwrap();
     assert_eq!(h.broker.endpoints().len(), 1);
     let mut byte = [0u8; 1];
@@ -962,7 +1008,10 @@ async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
 
 /// Turn the switch on for `prod-ssh`.
 fn confirm_logins(broker: &Broker) {
-    let conn = broker.store.connection_by_name("prod-ssh").unwrap();
+    let conn = broker
+        .store
+        .connection_by_name(&broker.workspace, "prod-ssh")
+        .unwrap();
     futures::executor::block_on(
         broker.ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On),
     )
@@ -1201,7 +1250,11 @@ async fn disabling_access_refuses_a_live_per_open_socket() {
     assert_lists_identity(&mut before, &key).await;
     drop(before);
 
-    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-ssh")
+        .unwrap();
     assert!(h.broker.ui_set_tool_access(&conn.id, false).await.unwrap());
 
     // The socket file is still there — the listener's window has not lapsed —
@@ -1246,8 +1299,17 @@ async fn the_access_table_is_rechecked_when_a_socket_connection_arrives() {
     assert_lists_identity(&mut before, &key).await;
     drop(before);
 
-    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
-    assert!(h.broker.access.set_enabled(conn.id, false).await.unwrap());
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-ssh")
+        .unwrap();
+    assert!(h
+        .broker
+        .access
+        .set_enabled(&h.broker.workspace, conn.id, false)
+        .await
+        .unwrap());
 
     let mut after = UnixStream::connect(&auth_sock).await.unwrap();
     let mut probe = [0u8; 1];
@@ -1288,7 +1350,11 @@ async fn retargeting_refuses_a_live_per_open_socket() {
     let token = h.pair().await;
     let (auth_sock, _) = h.open_ssh(&token).await;
 
-    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-ssh")
+        .unwrap();
     let ConnectionConfig::Ssh {
         host,
         port,
@@ -1302,6 +1368,7 @@ async fn retargeting_refuses_a_live_per_open_socket() {
     h.broker
         .store
         .update_connection(
+            &h.broker.workspace,
             &conn.id,
             aka_core::store::ConnectionSpec {
                 name: conn.name.clone(),
@@ -1382,7 +1449,11 @@ async fn withdrawing_a_connection_closes_a_live_agent_connection() {
     assert_lists_identity(&mut s, &key).await;
     assert_eq!(h.broker.sessions().len(), 1);
 
-    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-ssh")
+        .unwrap();
     assert!(h.broker.ui_set_tool_access(&conn.id, false).await.unwrap());
 
     let mut probe = [0u8; 1];
@@ -1695,7 +1766,11 @@ async fn authenticate_with_extension(
 /// Turn on the socket's authentication requirement and hand back the secret a
 /// client must now present, read the way the app reads it.
 async fn require_endpoint_auth(h: &Harness) -> String {
-    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-ssh")
+        .unwrap();
     assert!(
         h.broker
             .ui_set_endpoint_require_auth(&conn.id, true)

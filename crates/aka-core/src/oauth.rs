@@ -592,6 +592,7 @@ pub(crate) fn oauth_token_secret_id(connection: &Connection) -> Result<uuid::Uui
 /// their usual confirmation behavior.
 pub async fn fresh_bearer(
     store: &Arc<dyn CatalogRepository>,
+    workspace: &crate::repository::WorkspaceContext,
     http: &reqwest::Client,
     connection: &Connection,
 ) -> Result<SecretValue, RefreshFailure> {
@@ -599,7 +600,7 @@ pub async fn fresh_bearer(
     let lock = crate::mcp_refresh::connection_lock(&connection.id);
     let _guard = lock.lock().await;
     let stored = store
-        .secret_value(&secret_id)
+        .secret_value(workspace, &secret_id)
         .await
         .map_err(|e| RefreshFailure::Transient(e.to_string()))?;
     let tokens = TokenSet::from_secret_value(&stored).map_err(RefreshFailure::NotRefreshable)?;
@@ -638,7 +639,7 @@ pub async fn fresh_bearer(
                     ..tokens.clone()
                 };
                 if let Err(e) = store
-                    .replace_secret_value(&secret_id, retired.to_secret_value())
+                    .replace_secret_value(workspace, &secret_id, retired.to_secret_value())
                     .await
                 {
                     tracing::warn!(
@@ -658,7 +659,7 @@ pub async fn fresh_bearer(
     .map_err(RefreshFailure::Rejected)?;
     let access = refreshed.access_token.clone();
     store
-        .replace_secret_value(&secret_id, refreshed.to_secret_value())
+        .replace_secret_value(workspace, &secret_id, refreshed.to_secret_value())
         .await
         .map_err(|e| {
             RefreshFailure::Transient(format!("could not persist the refreshed token: {e}"))

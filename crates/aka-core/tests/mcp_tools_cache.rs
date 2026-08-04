@@ -107,28 +107,31 @@ async fn broker() -> (Arc<Broker>, tempfile::TempDir) {
 async fn add_mcp_connection(broker: &Broker, port: u16) -> aka_core::types::Connection {
     broker
         .store
-        .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .add_secret(&broker.workspace, "MCP_TOKEN", Zeroizing::new("tok".into()))
         .await
         .unwrap();
     broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "docs".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
-                mcp_path: Some("/mcp".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "docs".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(port),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
+                    mcp_path: Some("/mcp".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap()
 }

@@ -27,7 +27,7 @@ use crate::capability::{BodySpool, SpoolError, SpooledBody, TestError, TestError
 use crate::config::BrokerConfig;
 use crate::endpoints::EndpointListenerHandle;
 use crate::executions::ExecOutcome;
-use crate::repository::{CatalogReader, CatalogRepository, PolicyRepository};
+use crate::repository::{CatalogReader, CatalogRepository, PolicyRepository, WorkspaceContext};
 use crate::template::Template;
 use crate::types::{Connection, ConnectionConfig, ConnectionKind, DirectEndpoint};
 use crate::wire::ErrorReason;
@@ -845,6 +845,7 @@ fn redacting_stream(
 /// connection is snapshotted so a concurrent edit can't repoint what the
 /// user approved.
 pub struct HttpExecution {
+    pub workspace: WorkspaceContext,
     pub store: Arc<dyn CatalogRepository>,
     pub access: Arc<dyn PolicyRepository>,
     pub audit: Arc<AuditLog>,
@@ -1325,7 +1326,8 @@ impl HttpExecution {
             dialed.response,
             &self.config,
             &dialed.redactions,
-            self.access.expose_response_credentials(&self.connection.id),
+            self.access
+                .expose_response_credentials(&self.workspace, &self.connection.id),
             dialed.mcp_response_id.as_ref(),
             dialed.mcp_tool_call_id.as_ref(),
             &mut stats.response_bytes,
@@ -1361,8 +1363,9 @@ impl HttpExecution {
         let auth_challenge = response
             .headers()
             .contains_key(http::header::WWW_AUTHENTICATE);
-        let expose_response_credentials =
-            self.access.expose_response_credentials(&self.connection.id);
+        let expose_response_credentials = self
+            .access
+            .expose_response_credentials(&self.workspace, &self.connection.id);
         let mut headers = serde_json::Map::new();
         for (name, value) in response.headers() {
             if !response_header_is_relayable(name, expose_response_credentials) {
@@ -1528,6 +1531,7 @@ impl HttpExecution {
         // goes out as-is and the upstream's verdict lands in health.
         if self.connection.oauth.is_some() {
             let ctx = crate::mcp_refresh::RefreshContext {
+                workspace: &self.workspace,
                 store: self.store.as_ref(),
                 http: &upstream_client,
                 audit: self.audit.as_ref(),
@@ -1541,6 +1545,7 @@ impl HttpExecution {
 
         let mut injection = match render_connection_injection(
             &self.store,
+            &self.workspace,
             &upstream_client,
             &self.connection,
         )
@@ -1741,6 +1746,7 @@ impl HttpExecution {
             {
                 oauth_recovery_attempted = true;
                 let ctx = crate::mcp_refresh::RefreshContext {
+                    workspace: &self.workspace,
                     store: self.store.as_ref(),
                     http: &upstream_client,
                     audit: self.audit.as_ref(),
@@ -1756,6 +1762,7 @@ impl HttpExecution {
                 {
                     match render_connection_injection(
                         &self.store,
+                        &self.workspace,
                         &upstream_client,
                         &self.connection,
                     )
@@ -1875,6 +1882,7 @@ fn probe_path(config: &ConnectionConfig) -> &str {
 /// injected and the connection's TLS trust.
 pub async fn test_upstream(
     store: &Arc<dyn CatalogRepository>,
+    workspace: &WorkspaceContext,
     client: &reqwest::Client,
     timeout: std::time::Duration,
     connection: &Connection,
@@ -1885,7 +1893,7 @@ pub async fn test_upstream(
     let (scheme, host, port) = pinned_base(&connection.config).expect("api config");
     let upstream_client = client_for_connection(client, connection)
         .map_err(|error| TestError::new(TestErrorKind::CertUnverified, error))?;
-    let injection = render_connection_injection(store, &upstream_client, connection)
+    let injection = render_connection_injection(store, workspace, &upstream_client, connection)
         .await
         .map_err(|e| TestError::from(e.message))?;
     let mut base =
@@ -2010,10 +2018,11 @@ impl std::fmt::Display for CredentialFailure {
 /// the value is trimmed here, once.
 async fn signer_secret(
     store: &Arc<dyn CatalogRepository>,
+    workspace: &WorkspaceContext,
     name: &str,
 ) -> Result<Zeroizing<String>, String> {
     store
-        .secret_value_by_name(name)
+        .secret_value_by_name(workspace, name)
         .await
         .map(|value| Zeroizing::new(value.trim().to_string()))
         .map_err(|e| format!("signer credential {name:?} unavailable: {e}"))
@@ -2021,6 +2030,7 @@ async fn signer_secret(
 
 pub(crate) async fn render_connection_injection(
     store: &Arc<dyn CatalogRepository>,
+    workspace: &WorkspaceContext,
     client: &reqwest::Client,
     connection: &Connection,
 ) -> Result<RenderedInjection, CredentialFailure> {
@@ -2043,19 +2053,19 @@ pub(crate) async fn render_connection_injection(
                 session_token_ref,
             } => {
                 let session_token = match session_token_ref {
-                    Some(name) => Some(signer_secret(store, name).await?),
+                    Some(name) => Some(signer_secret(store, workspace, name).await?),
                     None => None,
                 };
                 return Ok(RenderedInjection::Sigv4(Box::new(Sigv4Credentials {
-                    access_key: signer_secret(store, access_key_ref).await?,
-                    secret_key: signer_secret(store, secret_key_ref).await?,
+                    access_key: signer_secret(store, workspace, access_key_ref).await?,
+                    secret_key: signer_secret(store, workspace, secret_key_ref).await?,
                     session_token,
                     region: region.clone(),
                     service: service.clone(),
                 })));
             }
             crate::types::SignerSpec::GcpServiceAccount { key_ref, scope } => {
-                let key_json = signer_secret(store, key_ref).await?;
+                let key_json = signer_secret(store, workspace, key_ref).await?;
                 let cache_key = format!("{}\0{key_ref}\0{scope}", connection.id);
                 let token = crate::gcp_signer::fresh_bearer(client, &key_json, scope, &cache_key)
                     .await
@@ -2084,7 +2094,7 @@ pub(crate) async fn render_connection_injection(
         }
     }
     if oauth.is_some() {
-        let token = crate::oauth::fresh_bearer(store, client, connection)
+        let token = crate::oauth::fresh_bearer(store, workspace, client, connection)
             .await
             .map_err(|failure| CredentialFailure {
                 message: failure.message().to_string(),
@@ -2104,13 +2114,14 @@ pub(crate) async fn render_connection_injection(
     }
     // A template that will not render is conclusive about the connection, which
     // is the `From<String>` default.
-    render_injection(store.as_ref(), template)
+    render_injection(store.as_ref(), workspace, template)
         .await
         .map_err(Into::into)
 }
 
 pub(crate) async fn render_injection(
     store: &dyn CatalogReader,
+    workspace: &WorkspaceContext,
     template_src: &str,
 ) -> Result<RenderedInjection, String> {
     // An empty template is a credential-less connection: nothing to render,
@@ -2120,7 +2131,7 @@ pub(crate) async fn render_injection(
     }
     let template = Template::parse(template_src).map_err(|e| e.to_string())?;
     let rendered = store
-        .render_template(&template)
+        .render_template(workspace, &template)
         .await
         .map_err(|e| e.to_string())?;
     let trimmed = rendered.trim_start();
@@ -2815,7 +2826,7 @@ async fn proxy_handler(
     }
     let Some(endpoint) = broker
         .endpoints
-        .resolve_secret(presented)
+        .resolve_secret(&broker.workspace, presented)
         .filter(|e| e.id == state.endpoint_id)
     else {
         return endpoint_auth_failure(
@@ -2847,14 +2858,20 @@ async fn proxy_handler(
     }
 
     // Authorization is enforced here, on every request, at connect time.
-    if !broker.access.allows(&endpoint.connection_id) {
+    if !broker
+        .access
+        .allows(&broker.workspace, &endpoint.connection_id)
+    {
         return endpoint_error(
             StatusCode::FORBIDDEN,
             ErrorReason::DeniedByPolicy,
             "agent access is disabled for this tool",
         );
     }
-    let Ok(connection) = broker.store.connection_by_id(&endpoint.connection_id) else {
+    let Ok(connection) = broker
+        .store
+        .connection_by_id(&broker.workspace, &endpoint.connection_id)
+    else {
         return endpoint_error(
             StatusCode::BAD_GATEWAY,
             ErrorReason::UnknownConnection,
@@ -2960,7 +2977,9 @@ async fn proxy_handler(
         } => resolves_to_mcp_path(&path, mcp_path),
         _ => false,
     };
-    let allowed_tools_snapshot = broker.access.allowed_tools(&endpoint.connection_id);
+    let allowed_tools_snapshot = broker
+        .access
+        .allowed_tools(&broker.workspace, &endpoint.connection_id);
     if on_mcp_path && allowed_tools_snapshot.is_some() {
         return endpoint_error(
             StatusCode::FORBIDDEN,
@@ -3001,7 +3020,10 @@ async fn proxy_handler(
     // body means a prompt the user leaves sitting cannot hold this listener's
     // upload budget hostage — at the cost of a preview in the prompt, which
     // is the right trade for a stable endpoint that any tool may be pointed at.
-    let confirmation_enabled = broker.access.confirm_mode(&endpoint.connection_id).is_on();
+    let confirmation_enabled = broker
+        .access
+        .confirm_mode(&broker.workspace, &endpoint.connection_id)
+        .is_on();
     let mcp_transport_leg = is_mcp_transport_leg(
         &connection,
         &method,
@@ -3020,7 +3042,7 @@ async fn proxy_handler(
                     "endpoint",
                     format!("{method} {}", crate::approvals::capped_text(&path)),
                 )
-                .credentials_from(broker.store.as_ref())
+                .credentials_from(broker.store.as_ref(), &broker.workspace)
                 .http_operation(&method, &path),
             )
             .await;
@@ -3044,16 +3066,21 @@ async fn proxy_handler(
     // and close any window a stale prompt might just have opened.
     let endpoint_still_valid = broker
         .endpoints
-        .resolve_secret(presented)
+        .resolve_secret(&broker.workspace, presented)
         .is_some_and(|current| current.id == endpoint.id);
     let connection_is_current = broker
         .store
-        .connection_by_id(&endpoint.connection_id)
+        .connection_by_id(&broker.workspace, &endpoint.connection_id)
         .is_ok_and(|current| current.updated_at == policy_version);
     if !endpoint_still_valid
-        || !broker.access.allows(&endpoint.connection_id)
+        || !broker
+            .access
+            .allows(&broker.workspace, &endpoint.connection_id)
         || !connection_is_current
-        || broker.access.allowed_tools(&endpoint.connection_id) != allowed_tools_snapshot
+        || broker
+            .access
+            .allowed_tools(&broker.workspace, &endpoint.connection_id)
+            != allowed_tools_snapshot
     {
         if confirmed_version.is_some() {
             broker.approvals.revoke(&endpoint.connection_id);
@@ -3108,9 +3135,13 @@ async fn proxy_handler(
     };
     let endpoint_still_valid = broker
         .endpoints
-        .resolve_secret(presented)
+        .resolve_secret(&broker.workspace, presented)
         .is_some_and(|current| current.id == endpoint.id);
-    if !endpoint_still_valid || !broker.access.allows(&endpoint.connection_id) {
+    if !endpoint_still_valid
+        || !broker
+            .access
+            .allows(&broker.workspace, &endpoint.connection_id)
+    {
         if confirmed_version.is_some() {
             broker.approvals.revoke(&endpoint.connection_id);
         }
@@ -3184,7 +3215,7 @@ async fn proxy_handler(
     // secret rotation that landed during the upload wins.
     let Some(endpoint) = broker
         .endpoints
-        .resolve_secret(presented)
+        .resolve_secret(&broker.workspace, presented)
         .filter(|endpoint| endpoint.id == state.endpoint_id)
     else {
         if confirmed_version.is_some() {
@@ -3197,7 +3228,10 @@ async fn proxy_handler(
             "the endpoint was revoked or its secret was rotated",
         );
     };
-    if !broker.access.allows(&endpoint.connection_id) {
+    if !broker
+        .access
+        .allows(&broker.workspace, &endpoint.connection_id)
+    {
         if confirmed_version.is_some() {
             broker.approvals.revoke(&endpoint.connection_id);
         }
@@ -3208,7 +3242,10 @@ async fn proxy_handler(
             "agent access is disabled for this tool",
         );
     }
-    let Ok(connection) = broker.store.connection_by_id(&endpoint.connection_id) else {
+    let Ok(connection) = broker
+        .store
+        .connection_by_id(&broker.workspace, &endpoint.connection_id)
+    else {
         if confirmed_version.is_some() {
             broker.approvals.revoke(&endpoint.connection_id);
         }
@@ -3240,7 +3277,7 @@ async fn proxy_handler(
     if current_on_mcp_path
         && broker
             .access
-            .allowed_tools(&endpoint.connection_id)
+            .allowed_tools(&broker.workspace, &endpoint.connection_id)
             .is_some()
     {
         if confirmed_version.is_some() {
@@ -3269,9 +3306,13 @@ async fn proxy_handler(
     // resolving current connection state to close races with rotation.
     let endpoint_still_valid = broker
         .endpoints
-        .resolve_secret(presented)
+        .resolve_secret(&broker.workspace, presented)
         .is_some_and(|current| current.id == endpoint.id);
-    if !endpoint_still_valid || !broker.access.allows(&endpoint.connection_id) {
+    if !endpoint_still_valid
+        || !broker
+            .access
+            .allows(&broker.workspace, &endpoint.connection_id)
+    {
         if confirmed_version.is_some() {
             broker.approvals.revoke(&endpoint.connection_id);
         }
@@ -3286,6 +3327,7 @@ async fn proxy_handler(
     // Reuse `/v1/http`'s whole execution core. The wiring is the
     // authorization, so the vault read is pre-authorized (scope confirmed).
     let execution = HttpExecution {
+        workspace: broker.workspace.clone(),
         store: broker.store.clone(),
         access: broker.access.clone(),
         audit: broker.audit.clone(),
@@ -3329,7 +3371,7 @@ async fn proxy_handler(
         session.finish("request_complete");
         let expose_response_credentials = broker
             .access
-            .expose_response_credentials(&endpoint.connection_id);
+            .expose_response_credentials(&broker.workspace, &endpoint.connection_id);
         return match outcome {
             Ok(outcome) => translate_outcome(outcome, &method, expose_response_credentials),
             Err(response) => response,
@@ -3370,7 +3412,7 @@ async fn proxy_handler(
                 redactions,
                 broker
                     .access
-                    .expose_response_credentials(&endpoint.connection_id),
+                    .expose_response_credentials(&broker.workspace, &endpoint.connection_id),
                 &method,
                 broker.health.clone(),
                 connection.id,
@@ -3387,7 +3429,7 @@ async fn proxy_handler(
                 &method,
                 broker
                     .access
-                    .expose_response_credentials(&endpoint.connection_id),
+                    .expose_response_credentials(&broker.workspace, &endpoint.connection_id),
             )
         }
     }

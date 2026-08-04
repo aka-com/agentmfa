@@ -104,24 +104,34 @@ fn add_pg_connection(broker: &Broker, upstream_port: u16) {
     futures::executor::block_on(async {
         broker
             .store
-            .add_secret("PG_PASSWORD", Zeroizing::new(REAL_PG_PASSWORD.into()))
+            .add_secret(
+                &broker.workspace,
+                "PG_PASSWORD",
+                Zeroizing::new(REAL_PG_PASSWORD.into()),
+            )
             .await
             .unwrap();
-        let secret = broker.store.secret_by_name("PG_PASSWORD").unwrap();
+        let secret = broker
+            .store
+            .secret_by_name(&broker.workspace, "PG_PASSWORD")
+            .unwrap();
         broker
             .store
-            .add_connection(ConnectionSpec {
-                name: "prod-db".into(),
-                config: ConnectionConfig::Pg {
-                    host: "127.0.0.1".into(),
-                    port: upstream_port,
-                    dbname: "app_production".into(),
-                    user: "app".into(),
-                    sslmode: PgSslMode::Disable,
-                    trusted_ca_bundle_path: None,
+            .add_connection(
+                &broker.workspace,
+                ConnectionSpec {
+                    name: "prod-db".into(),
+                    config: ConnectionConfig::Pg {
+                        host: "127.0.0.1".into(),
+                        port: upstream_port,
+                        dbname: "app_production".into(),
+                        user: "app".into(),
+                        sslmode: PgSslMode::Disable,
+                        trusted_ca_bundle_path: None,
+                    },
+                    secrets: vec![secret.id],
                 },
-                secrets: vec![secret.id],
-            })
+            )
             .await
             .unwrap();
     });
@@ -131,18 +141,21 @@ fn add_passwordless_pg_connection(broker: &Broker, upstream_port: u16) {
     futures::executor::block_on(async {
         broker
             .store
-            .add_connection(ConnectionSpec {
-                name: "prod-db".into(),
-                config: ConnectionConfig::Pg {
-                    host: "127.0.0.1".into(),
-                    port: upstream_port,
-                    dbname: "app_production".into(),
-                    user: "app".into(),
-                    sslmode: PgSslMode::Disable,
-                    trusted_ca_bundle_path: None,
+            .add_connection(
+                &broker.workspace,
+                ConnectionSpec {
+                    name: "prod-db".into(),
+                    config: ConnectionConfig::Pg {
+                        host: "127.0.0.1".into(),
+                        port: upstream_port,
+                        dbname: "app_production".into(),
+                        user: "app".into(),
+                        sslmode: PgSslMode::Disable,
+                        trusted_ca_bundle_path: None,
+                    },
+                    secrets: vec![],
                 },
-                secrets: vec![],
-            })
+            )
             .await
             .unwrap();
     });
@@ -228,7 +241,11 @@ impl Harness {
 
     /// Issue a direct endpoint on `prod-db`.
     async fn issue_endpoint(&self) -> aka_core::broker::IssuedEndpointInfo {
-        let conn = self.broker.store.connection_by_name("prod-db").unwrap();
+        let conn = self
+            .broker
+            .store
+            .connection_by_name(&self.broker.workspace, "prod-db")
+            .unwrap();
         self.broker.ui_issue_endpoint(&conn.id).await.unwrap()
     }
 
@@ -797,7 +814,11 @@ async fn get_endpoint_reads_back_the_issued_address_without_rotating() {
     let fake = fake_pg(FakeAuth::Cleartext).await;
     add_pg_connection(&h.broker, fake.port);
     h.pair().await;
-    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-db")
+        .unwrap();
 
     // No endpoint issued yet: the read is a clean absence, not an error.
     assert!(h.broker.ui_get_endpoint(&conn.id).await.unwrap().is_none());
@@ -828,7 +849,11 @@ async fn renewing_endpoint_extends_expiry_without_changing_client_configuration(
     let fake = fake_pg(FakeAuth::Cleartext).await;
     add_pg_connection(&h.broker, fake.port);
     h.pair().await;
-    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-db")
+        .unwrap();
     let issued = h.issue_endpoint().await;
 
     let renewed = h.broker.ui_renew_endpoint(&conn.id).await.unwrap();
@@ -919,7 +944,11 @@ async fn disabling_access_refuses_the_endpoint_until_reenabled() {
 
     // … is refused at the connect-time re-check while disabled (the
     // endpoint itself stays issued) …
-    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-db")
+        .unwrap();
     h.broker.ui_set_tool_access(&conn.id, false).await.unwrap();
     assert_eq!(h.broker.endpoints().len(), 1);
     let _ = tokio::time::timeout(Duration::from_secs(3), connection)
@@ -949,7 +978,11 @@ async fn a_confirmed_connection_asks_before_the_session_opens() {
     .await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
     add_pg_connection(&h.broker, fake.port);
-    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-db")
+        .unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
         .await
@@ -991,7 +1024,11 @@ async fn the_session_prompt_says_it_grants_full_sql_access() {
     .await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
     add_pg_connection(&h.broker, fake.port);
-    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-db")
+        .unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
         .await
@@ -1044,7 +1081,11 @@ async fn a_refused_session_never_reaches_the_database() {
     .await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
     add_pg_connection(&h.broker, fake.port);
-    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-db")
+        .unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
         .await
@@ -1098,7 +1139,11 @@ async fn an_unanswered_pg_prompt_times_out_without_dialing_upstream() {
     .await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
     add_pg_connection(&h.broker, fake.port);
-    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-db")
+        .unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
         .await
@@ -1133,7 +1178,11 @@ async fn a_confirmed_endpoint_asks_on_every_new_session() {
     add_pg_connection(&h.broker, fake.port);
     h.pair().await;
     let info = h.issue_endpoint().await;
-    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-db")
+        .unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
         .await
@@ -1473,10 +1522,18 @@ async fn draft_test_signs_in_with_a_typed_credential_and_defers_stored_ones() {
     // the server asks for a password and reports a qualified pass.
     h.broker
         .store
-        .add_secret("STORED_PG", Zeroizing::new(REAL_PG_PASSWORD.into()))
+        .add_secret(
+            &h.broker.workspace,
+            "STORED_PG",
+            Zeroizing::new(REAL_PG_PASSWORD.into()),
+        )
         .await
         .unwrap();
-    let stored = h.broker.store.secret_by_name("STORED_PG").unwrap();
+    let stored = h
+        .broker
+        .store
+        .secret_by_name(&h.broker.workspace, "STORED_PG")
+        .unwrap();
     let report = h
         .broker
         .ui_test_connection_draft(spec(vec![stored.id]), None)
@@ -1637,7 +1694,11 @@ async fn the_tcp_endpoint_port_is_pinned_across_a_rebind() {
     h.broker.stop_endpoint_listeners_for_restart().await;
     h.broker.rebind_endpoints().await;
 
-    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "prod-db")
+        .unwrap();
     let after = h
         .broker
         .ui_get_endpoint(&conn.id)

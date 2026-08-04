@@ -41,7 +41,11 @@ async fn harness(public_url: Option<&str>) -> Harness {
     )
     .await
     .unwrap();
-    let manage_token = broker.identity.issue_manage_token().await.unwrap();
+    let manage_token = broker
+        .identity
+        .issue_manage_token(&broker.workspace)
+        .await
+        .unwrap();
     let handle = daemon::serve_with(
         broker.clone(),
         ServeOptions {
@@ -181,7 +185,7 @@ async fn tcp_discovery_is_remote_flavored_and_pair_is_refused() {
         .post(format!("{}/v1/ssh/open", h.base))
         .header(
             "authorization",
-            format!("Bearer {}", h.broker.identity.token()),
+            format!("Bearer {}", h.broker.identity.token(&h.broker.workspace)),
         )
         .json(&json!({ "connection": "missing" }))
         .send()
@@ -209,7 +213,7 @@ async fn both_planes_authenticate_over_tcp() {
     let h = harness(None).await;
 
     // Agent plane: the shared key works over TCP.
-    let agent_key = h.broker.identity.token();
+    let agent_key = h.broker.identity.token(&h.broker.workspace);
     let (status, body) = get_json(&format!("{}/v1/whoami", h.base), Some(&agent_key)).await;
     assert_eq!(status, 200, "{body}");
 
@@ -326,7 +330,7 @@ async fn mcp_is_reverse_proxied_to_the_loopback_host() {
     h.broker.set_mcp_host_port(Some(host.addr().port()));
     let response = client
         .post(format!("{}/mcp", h.base))
-        .bearer_auth(h.broker.identity.token())
+        .bearer_auth(h.broker.identity.token(&h.broker.workspace))
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
         .json(&json!({
@@ -382,7 +386,7 @@ async fn data_plane_opens_advertise_the_configured_host() {
         "bind stays loopback"
     );
 
-    let agent_key = broker.identity.token();
+    let agent_key = broker.identity.token(&broker.workspace);
     let socket = _daemon.socket_path.clone();
 
     // PG advertises the host in its DSN unconditionally (no upstream dial
@@ -393,7 +397,7 @@ async fn data_plane_opens_advertise_the_configured_host() {
         .unwrap();
     let pg_secret = broker
         .store
-        .list_secrets()
+        .list_secrets(&broker.workspace)
         .into_iter()
         .find(|s| s.name == "PGPW")
         .unwrap()

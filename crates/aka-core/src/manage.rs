@@ -101,7 +101,7 @@ impl From<CoreError> for ManageError {
 /* ------------------------------ DTO builders ------------------------------ */
 
 pub fn secret_dto(broker: &Broker, meta: &SecretMeta) -> SecretDto {
-    let names = broker.store.connections_using(&meta.id);
+    let names = broker.store.connections_using(&broker.workspace, &meta.id);
     SecretDto {
         id: meta.id.to_string(),
         name: meta.name.clone(),
@@ -111,7 +111,9 @@ pub fn secret_dto(broker: &Broker, meta: &SecretMeta) -> SecretDto {
         updated_at: meta.updated_at.to_rfc3339(),
         source: crate::onepassword::source_dto(
             &meta.source,
-            &broker.store.list_onepassword_integrations(),
+            &broker
+                .store
+                .list_onepassword_integrations(&broker.workspace),
         ),
         kind: match meta.kind {
             crate::types::SecretKind::Secret => aka_api::SecretKindDto::Secret,
@@ -128,9 +130,15 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
     let secret_names = conn
         .secrets
         .iter()
-        .filter_map(|id| broker.store.secret_by_id(id).ok().map(|s| s.name))
+        .filter_map(|id| {
+            broker
+                .store
+                .secret_by_id(&broker.workspace, id)
+                .ok()
+                .map(|s| s.name)
+        })
         .collect();
-    let entry = broker.access.entry(&conn.id);
+    let entry = broker.access.entry(&broker.workspace, &conn.id);
     let agent_access = AccessDto {
         enabled: entry.as_ref().map(|e| e.enabled).unwrap_or(true),
         confirm: entry
@@ -138,7 +146,9 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
             .map(|e| e.confirm.is_on())
             .unwrap_or_default(),
         expose_response_credentials: matches!(&conn.config, Api { .. })
-            && broker.access.expose_response_credentials(&conn.id),
+            && broker
+                .access
+                .expose_response_credentials(&broker.workspace, &conn.id),
         confirm_window_until: broker.approvals.window_remaining(&conn.id).map(|left| {
             (chrono::Utc::now()
                 + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()))
@@ -151,41 +161,46 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
             .to_rfc3339()
         }),
         audit_statements: entry.as_ref().and_then(|e| e.audit_statements),
-        audit_statements_effective: broker
-            .access
-            .audit_statements(&conn.id, broker.config.audit_pg_statements),
+        audit_statements_effective: broker.access.audit_statements(
+            &broker.workspace,
+            &conn.id,
+            broker.config.audit_pg_statements,
+        ),
         allowed_tools: entry.and_then(|e| e.allowed_tools),
-        endpoint: broker.endpoints.get_for_connection(&conn.id).map(|e| {
-            let dsn = match &conn.config {
-                // The retained secret rides in the password slot; a
-                // pre-retention record (empty secret) falls back to
-                // the password-less form until reissued.
-                Pg { user, dbname, .. } => Some(crate::capability::pg::endpoint_dsn(
-                    broker.paths.endpoint_dir(&e.id).as_path(),
-                    user,
-                    dbname,
-                    (!e.secret.is_empty()).then_some(e.secret.as_str()),
-                )),
-                // Deliberately omitted for SSH. The socket path *is* the
-                // capability — the ssh-agent protocol offers no place to
-                // present a secret — so putting it in the ordinary connection
-                // listing handed a working signing oracle to every manage
-                // caller that asked for the list, not only to one that asked
-                // for the endpoint. `GET .../endpoint` still returns it.
-                Ssh { .. } => None,
-                Api { .. } => e
-                    .port
-                    .map(|port| format!("http://{}:{port}", broker.advertise_host())),
-            };
-            EndpointChip {
-                endpoint_id: e.id.to_string(),
-                kind: e.kind.as_str().to_string(),
-                dsn,
-                require_auth: e.require_auth,
-                expires_at: e.expires_at.map(|at| at.to_rfc3339()).unwrap_or_default(),
-                expires_in_secs: e.expires_at.map(secs_until),
-            }
-        }),
+        endpoint: broker
+            .endpoints
+            .get_for_connection(&broker.workspace, &conn.id)
+            .map(|e| {
+                let dsn = match &conn.config {
+                    // The retained secret rides in the password slot; a
+                    // pre-retention record (empty secret) falls back to
+                    // the password-less form until reissued.
+                    Pg { user, dbname, .. } => Some(crate::capability::pg::endpoint_dsn(
+                        broker.paths.endpoint_dir(&e.id).as_path(),
+                        user,
+                        dbname,
+                        (!e.secret.is_empty()).then_some(e.secret.as_str()),
+                    )),
+                    // Deliberately omitted for SSH. The socket path *is* the
+                    // capability — the ssh-agent protocol offers no place to
+                    // present a secret — so putting it in the ordinary connection
+                    // listing handed a working signing oracle to every manage
+                    // caller that asked for the list, not only to one that asked
+                    // for the endpoint. `GET .../endpoint` still returns it.
+                    Ssh { .. } => None,
+                    Api { .. } => e
+                        .port
+                        .map(|port| format!("http://{}:{port}", broker.advertise_host())),
+                };
+                EndpointChip {
+                    endpoint_id: e.id.to_string(),
+                    kind: e.kind.as_str().to_string(),
+                    dsn,
+                    require_auth: e.require_auth,
+                    expires_at: e.expires_at.map(|at| at.to_rfc3339()).unwrap_or_default(),
+                    expires_in_secs: e.expires_at.map(secs_until),
+                }
+            }),
     };
     let health = broker.health.get(&conn.id);
     let mut dto = ConnectionDto {
@@ -327,7 +342,7 @@ pub fn identity_dto(broker: &Broker) -> IdentityDto {
         socket_path: broker.paths.socket_display(),
         minted_at: identity.minted_at.to_rfc3339(),
         last_used: identity.last_used.to_rfc3339(),
-        legacy_aliases: broker.identity.active_alias_count(),
+        legacy_aliases: broker.identity.active_alias_count(&broker.workspace),
     }
 }
 
@@ -1756,7 +1771,7 @@ impl ManagementBackend for LocalBackend {
         let broker = &self.broker;
         Ok(broker
             .store
-            .list_secrets()
+            .list_secrets(&broker.workspace)
             .iter()
             .map(|meta| secret_dto(broker, meta))
             .collect())
@@ -1821,7 +1836,7 @@ impl ManagementBackend for LocalBackend {
         Ok(self
             .broker
             .store
-            .list_onepassword_integrations()
+            .list_onepassword_integrations(&self.broker.workspace)
             .iter()
             .map(crate::onepassword::OnePasswordIntegration::dto)
             .collect())
@@ -1837,6 +1852,7 @@ impl ManagementBackend for LocalBackend {
         self.broker
             .store
             .validate_new_onepassword_integration(
+                &self.broker.workspace,
                 id,
                 &label,
                 &auth,
@@ -1853,7 +1869,9 @@ impl ManagementBackend for LocalBackend {
             })
             .await;
         if result.is_err() {
-            self.broker.store.invalidate_onepassword_integration(&id);
+            self.broker
+                .store
+                .invalidate_onepassword_integration(&self.broker.workspace, &id);
         }
         result
     }
@@ -1865,7 +1883,7 @@ impl ManagementBackend for LocalBackend {
     ) -> ManageResult<OnePasswordIntegrationDto> {
         self.broker
             .store
-            .validate_onepassword_replacement_token(&id, token.as_str())
+            .validate_onepassword_replacement_token(&self.broker.workspace, &id, token.as_str())
             .await
             .map_err(ManageError::from)?;
         self.blocking_async(move |broker| async move {
@@ -1931,7 +1949,7 @@ impl ManagementBackend for LocalBackend {
         let broker = &self.broker;
         Ok(broker
             .store
-            .list_connections()
+            .list_connections(&broker.workspace)
             .iter()
             .map(|conn| connection_dto(broker, conn))
             .collect())
@@ -1977,7 +1995,10 @@ impl ManagementBackend for LocalBackend {
         expected_updated_at: String,
         spec: ConnectionSpec,
     ) -> ManageResult<()> {
-        let old = self.broker.store.connection_by_id(&id)?;
+        let old = self
+            .broker
+            .store
+            .connection_by_id(&self.broker.workspace, &id)?;
         if old.version() != expected_updated_at {
             return Err(ManageError::ConnectionChanged);
         }
@@ -2016,7 +2037,10 @@ impl ManagementBackend for LocalBackend {
         expected_updated_at: String,
         patch: ConnectionConfigPatch,
     ) -> ManageResult<()> {
-        let current = self.broker.store.connection_by_id(&id)?;
+        let current = self
+            .broker
+            .store
+            .connection_by_id(&self.broker.workspace, &id)?;
         if current.version() != expected_updated_at {
             return Err(ManageError::ConnectionChanged);
         }

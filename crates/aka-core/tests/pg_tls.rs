@@ -59,24 +59,34 @@ async fn add_connection(
 ) -> aka_core::types::Connection {
     broker
         .store
-        .add_secret("PG_PASSWORD", Zeroizing::new(PG_PASSWORD.into()))
+        .add_secret(
+            &broker.workspace,
+            "PG_PASSWORD",
+            Zeroizing::new(PG_PASSWORD.into()),
+        )
         .await
         .unwrap();
-    let secret = broker.store.secret_by_name("PG_PASSWORD").unwrap();
+    let secret = broker
+        .store
+        .secret_by_name(&broker.workspace, "PG_PASSWORD")
+        .unwrap();
     broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "prod-db".into(),
-            config: ConnectionConfig::Pg {
-                host: host.into(),
-                port,
-                dbname: "app_production".into(),
-                user: "app".into(),
-                sslmode,
-                trusted_ca_bundle_path: ca_bundle,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "prod-db".into(),
+                config: ConnectionConfig::Pg {
+                    host: host.into(),
+                    port,
+                    dbname: "app_production".into(),
+                    user: "app".into(),
+                    sslmode,
+                    trusted_ca_bundle_path: ca_bundle,
+                },
+                secrets: vec![secret.id],
             },
-            secrets: vec![secret.id],
-        })
+        )
         .await
         .unwrap()
 }
@@ -381,7 +391,7 @@ async fn test_pg(
     h: &Harness,
     connection: &aka_core::types::Connection,
 ) -> Result<String, TestError> {
-    pg::test_upstream(&h.broker.store, connection)
+    pg::test_upstream(&h.broker.store, &h.broker.workspace, connection)
         .await
         .map(|success| success.detail)
 }

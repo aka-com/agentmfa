@@ -355,24 +355,29 @@ fn parse_supported_private_key(pem: &[u8]) -> Result<PrivateKey, String> {
 impl SshSigner {
     async fn load_optional(
         store: &dyn CatalogReader,
+        workspace: &crate::repository::WorkspaceContext,
         connection: &Connection,
     ) -> Result<Option<Self>, String> {
         if connection.secrets.is_empty() {
             Ok(None)
         } else {
-            Self::load(store, connection).await.map(Some)
+            Self::load(store, workspace, connection).await.map(Some)
         }
     }
 
     /// Read and parse the connection's bound private key. Fails the open (not
     /// each later signature) on a missing, encrypted, or unsupported key.
-    pub async fn load(store: &dyn CatalogReader, connection: &Connection) -> Result<Self, String> {
+    pub async fn load(
+        store: &dyn CatalogReader,
+        workspace: &crate::repository::WorkspaceContext,
+        connection: &Connection,
+    ) -> Result<Self, String> {
         let secret_id = connection
             .secrets
             .first()
             .ok_or_else(|| "connection binds no secret".to_string())?;
         let pem = store
-            .secret_value(secret_id)
+            .secret_value(workspace, secret_id)
             .await
             .map_err(|e| format!("The saved credential could not be read: {e}"))?;
         Self::from_pem(pem.as_bytes())
@@ -786,12 +791,15 @@ pub const SSH_BROKER_OPTIONS: &[&str] = &[
 /// No key exchange is performed, so login and the host key stay unverified.
 pub async fn test_reachability(
     store: &dyn CatalogReader,
+    workspace: &crate::repository::WorkspaceContext,
     connection: &Connection,
 ) -> Result<String, TestError> {
     let ConnectionConfig::Ssh { host, port, .. } = &connection.config else {
         return Err("not an ssh connection".into());
     };
-    let has_key = SshSigner::load_optional(store, connection).await?.is_some();
+    let has_key = SshSigner::load_optional(store, workspace, connection)
+        .await?
+        .is_some();
     let stream = tokio::net::TcpStream::connect((host.as_str(), *port))
         .await
         .map_err(|_e| {
@@ -826,8 +834,10 @@ pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<Stri
     else {
         return Err("not an ssh connection".into());
     };
-    let Some(signer) = SshSigner::load_optional(broker.store.as_ref(), connection).await? else {
-        return test_reachability(broker.store.as_ref(), connection).await;
+    let Some(signer) =
+        SshSigner::load_optional(broker.store.as_ref(), &broker.workspace, connection).await?
+    else {
+        return test_reachability(broker.store.as_ref(), &broker.workspace, connection).await;
     };
     let expected_host_key = if host_key_fingerprint.is_empty() {
         None
@@ -1017,7 +1027,7 @@ async fn grade_login(
                 })?;
             let pinned = match broker
                 .store
-                .pin_ssh_host_key(&connection.id, &observed)
+                .pin_ssh_host_key(&broker.workspace, &connection.id, &observed)
                 .await
             {
                 // Trust-on-first-use, same as the open path: record the pin
@@ -1307,7 +1317,7 @@ pub async fn open_agent(
                 .map_err(|e| format!("SSH host key fingerprint is invalid: {e}"))?,
         )
     };
-    let signer = SshSigner::load_optional(broker.store.as_ref(), &connection)
+    let signer = SshSigner::load_optional(broker.store.as_ref(), &broker.workspace, &connection)
         .await?
         .map(Arc::new);
 
@@ -1418,12 +1428,20 @@ async fn handle_conn(state: Arc<AgentState>, mut stream: UnixStream) -> std::io:
     // the user switched the connection off went on signing, and a retarget was
     // invisible to it. The endpoint path has always re-checked both; this is the
     // same check, on the path that hands out a signing oracle from a ticket.
-    if !state.broker.access.allows(&state.connection_id) {
+    if !state
+        .broker
+        .access
+        .allows(&state.broker.workspace, &state.connection_id)
+    {
         audit_refused_connection(&state, "denied_by_policy", "agent access is disabled");
         let _ = stream.shutdown().await;
         return Ok(());
     }
-    match state.broker.store.connection_by_id(&state.connection_id) {
+    match state
+        .broker
+        .store
+        .connection_by_id(&state.broker.workspace, &state.connection_id)
+    {
         Ok(current) if current.updated_at == state.approved_version => {}
         Ok(_) => {
             audit_refused_connection(
@@ -1524,7 +1542,7 @@ pub async fn bind_endpoint(
 ) -> std::io::Result<EndpointListenerHandle> {
     let connection = broker
         .store
-        .connection_by_id(&endpoint.connection_id)
+        .connection_by_id(&broker.workspace, &endpoint.connection_id)
         .map_err(|e| std::io::Error::other(format!("ssh endpoint: {e}")))?;
     let ConnectionConfig::Ssh {
         user,
@@ -1650,7 +1668,7 @@ async fn handle_endpoint_conn(
     let endpoint_is_active = state
         .broker
         .endpoints
-        .get(&ctx.endpoint_id)
+        .get(&state.broker.workspace, &ctx.endpoint_id)
         .is_some_and(|endpoint| {
             endpoint.connection_id == ctx.connection_id && !endpoint.is_expired()
         });
@@ -1663,12 +1681,20 @@ async fn handle_endpoint_conn(
         let _ = stream.shutdown().await;
         return Ok(());
     }
-    if !state.broker.access.allows(&ctx.connection_id) {
+    if !state
+        .broker
+        .access
+        .allows(&state.broker.workspace, &ctx.connection_id)
+    {
         audit_refused_connection(&state, "denied_by_policy", "agent access is disabled");
         let _ = stream.shutdown().await;
         return Ok(());
     }
-    let Ok(connection) = state.broker.store.connection_by_id(&ctx.connection_id) else {
+    let Ok(connection) = state
+        .broker
+        .store
+        .connection_by_id(&state.broker.workspace, &ctx.connection_id)
+    else {
         audit_refused_connection(&state, "unknown_connection", "the tool no longer exists");
         let _ = stream.shutdown().await;
         return Ok(());
@@ -1697,22 +1723,32 @@ async fn handle_endpoint_conn(
     // Close the establishment race with disable/revoke: either teardown sees
     // the registered session, or this post-registration check sees that the
     // endpoint or access disappeared before the protocol is served.
-    let endpoint_still_valid =
-        state
+    let endpoint_still_valid = state
+        .broker
+        .endpoints
+        .get(&state.broker.workspace, &ctx.endpoint_id)
+        .is_some_and(|endpoint| {
+            endpoint.connection_id == ctx.connection_id && !endpoint.is_expired()
+        });
+    if !endpoint_still_valid
+        || !state
             .broker
-            .endpoints
-            .get(&ctx.endpoint_id)
-            .is_some_and(|endpoint| {
-                endpoint.connection_id == ctx.connection_id && !endpoint.is_expired()
-            });
-    if !endpoint_still_valid || !state.broker.access.allows(&ctx.connection_id) {
+            .access
+            .allows(&state.broker.workspace, &ctx.connection_id)
+    {
         session.finish("access_revoked");
         let _ = stream.shutdown().await;
         return Ok(());
     }
     // Load the key for this connection at each login so rotating a
     // compromised key takes effect without restarting the broker.
-    let signer = match SshSigner::load_optional(state.broker.store.as_ref(), &connection).await {
+    let signer = match SshSigner::load_optional(
+        state.broker.store.as_ref(),
+        &state.broker.workspace,
+        &connection,
+    )
+    .await
+    {
         Ok(signer) => signer.map(Arc::new),
         Err(e) => {
             // A key that cannot be read is not a signature the client should
@@ -1841,7 +1877,7 @@ impl AgentAuthState {
     fn for_connection(state: &AgentState) -> Self {
         let required = state
             .endpoint_id
-            .and_then(|id| state.broker.endpoints.get(&id))
+            .and_then(|id| state.broker.endpoints.get(&state.broker.workspace, &id))
             .is_some_and(|endpoint| endpoint.require_auth);
         Self {
             required,
@@ -1949,7 +1985,7 @@ fn authenticate_extension(
     let matches = state
         .broker
         .endpoints
-        .resolve_secret(&presented)
+        .resolve_secret(&state.broker.workspace, &presented)
         .is_some_and(|resolved| resolved.id == endpoint_id);
     if !matches {
         auth.refused = true;
@@ -2021,7 +2057,11 @@ async fn tofu_session_bind(
     // Re-read the store: another agent socket for the same connection (or a
     // manual edit) may have pinned a key since this socket opened. If so,
     // cache and verify against it — no prompt.
-    let conn = match state.broker.store.connection_by_id(&state.connection_id) {
+    let conn = match state
+        .broker
+        .store
+        .connection_by_id(&state.broker.workspace, &state.connection_id)
+    {
         Ok(conn) => conn,
         Err(_) => return refuse(state, "connection no longer exists"),
     };
@@ -2059,7 +2099,12 @@ async fn tofu_session_bind(
     // carries its signature over the session id — but nothing yet says that
     // whoever answered is the server the user meant. That is the question a
     // pin settles permanently, and it is the one moment it can be asked.
-    if state.broker.store.settings().confirm_ssh_host_keys {
+    if state
+        .broker
+        .store
+        .settings(&state.broker.workspace)
+        .confirm_ssh_host_keys
+    {
         if let Some(refusal) = confirm_host_key(state, &observed).await {
             return refusal;
         }
@@ -2069,7 +2114,7 @@ async fn tofu_session_bind(
     let pinned = match state
         .broker
         .store
-        .pin_ssh_host_key(&state.connection_id, &observed)
+        .pin_ssh_host_key(&state.broker.workspace, &state.connection_id, &observed)
         .await
     {
         Ok(PinOutcome::Pinned(pinned)) => {
@@ -2115,7 +2160,11 @@ const HOST_KEY_CONSEQUENCE: &str =
 /// yes. The refusal reaches the client as an ordinary agent failure, so the
 /// reason lives in the activity log like every other one here.
 async fn confirm_host_key(state: &Arc<AgentState>, observed: &Fingerprint) -> Option<Vec<u8>> {
-    let Ok(connection) = state.broker.store.connection_by_id(&state.connection_id) else {
+    let Ok(connection) = state
+        .broker
+        .store
+        .connection_by_id(&state.broker.workspace, &state.connection_id)
+    else {
         return Some(refuse(state, "the connection has been removed"));
     };
     let verdict = state
@@ -2217,12 +2266,16 @@ async fn confirm_login(state: &Arc<AgentState>, user: &str) -> Option<Vec<u8>> {
     if !state
         .broker
         .access
-        .confirm_mode(&state.connection_id)
+        .confirm_mode(&state.broker.workspace, &state.connection_id)
         .is_on()
     {
         return None;
     }
-    let Ok(connection) = state.broker.store.connection_by_id(&state.connection_id) else {
+    let Ok(connection) = state
+        .broker
+        .store
+        .connection_by_id(&state.broker.workspace, &state.connection_id)
+    else {
         return Some(refuse(state, "the connection has been removed"));
     };
     let summary = format!("SSH login as {user}@{}", connection.target());
@@ -2231,7 +2284,7 @@ async fn confirm_login(state: &Arc<AgentState>, user: &str) -> Option<Vec<u8>> {
         .approvals
         .gate(
             crate::approvals::ApprovalRequest::new(&connection, state.agent.clone(), summary)
-                .credentials_from(state.broker.store.as_ref())
+                .credentials_from(state.broker.store.as_ref(), &state.broker.workspace)
                 .maybe_detail(
                     state
                         .host_key_fingerprint

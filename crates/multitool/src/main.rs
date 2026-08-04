@@ -4382,19 +4382,19 @@ struct ServeArgs {
 /// This is bootstrap, not an unauthenticated API: possession of the file is
 /// what lets the host operator make the first authenticated online rotation.
 async fn ensure_first_start_management_token(broker: &Broker) -> Result<Option<PathBuf>, String> {
-    if broker.identity.manage_token_issued() {
+    if broker.identity.manage_token_issued(&broker.workspace) {
         return Ok(None);
     }
     let ttl = std::time::Duration::from_secs(DEFAULT_MANAGE_TOKEN_TTL_DAYS * 86_400);
     let token = Zeroizing::new(
         broker
             .identity
-            .issue_manage_token_with_ttl(Some(ttl))
+            .issue_manage_token_with_ttl(&broker.workspace, Some(ttl))
             .await
             .map_err(|error| format!("could not issue first-start management token: {error}"))?,
     );
     if let Err(error) = broker.paths.write_manage_bootstrap_token(&token) {
-        let rollback = broker.identity.revoke_manage_token().await;
+        let rollback = broker.identity.revoke_manage_token(&broker.workspace).await;
         return Err(match rollback {
             Ok(_) => format!("could not write first-start management token: {error}"),
             Err(rollback) => format!(
@@ -4405,7 +4405,7 @@ async fn ensure_first_start_management_token(broker: &Broker) -> Result<Option<P
     }
     let expires_at = broker
         .identity
-        .manage_token_expires_at()
+        .manage_token_expires_at(&broker.workspace)
         .expect("first-start management tokens are bounded");
     broker.audit.append(
         aka_core::audit::AuditEntry::new(
@@ -4520,9 +4520,14 @@ fn cmd_serve(args: ServeArgs) {
     }
     let confirm_count = broker
         .store
-        .list_connections()
+        .list_connections(&broker.workspace)
         .iter()
-        .filter(|connection| broker.access.confirm_mode(&connection.id).is_on())
+        .filter(|connection| {
+            broker
+                .access
+                .confirm_mode(&broker.workspace, &connection.id)
+                .is_on()
+        })
         .count();
     if let Some(warning) = headless_confirmation_warning(confirm_count) {
         eprintln!("  {warning}");
@@ -4902,12 +4907,18 @@ mod tests {
             .unwrap()
             .expect("a new broker needs a bootstrap credential");
         let token = std::fs::read_to_string(&path).unwrap();
-        broker.identity.verify_manage(token.trim()).unwrap();
+        broker
+            .identity
+            .verify_manage(&broker.workspace, token.trim())
+            .unwrap();
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert!(broker.identity.manage_token_expires_at().is_some());
+        assert!(broker
+            .identity
+            .manage_token_expires_at(&broker.workspace)
+            .is_some());
         assert!(
             runtime
                 .block_on(ensure_first_start_management_token(&broker))

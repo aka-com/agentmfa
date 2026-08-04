@@ -42,7 +42,11 @@ async fn harness() -> Harness {
     )
     .await
     .unwrap();
-    let manage_token = broker.identity.issue_manage_token().await.unwrap();
+    let manage_token = broker
+        .identity
+        .issue_manage_token(&broker.workspace)
+        .await
+        .unwrap();
     let handle = daemon::serve(broker.clone()).await.unwrap();
     let socket = handle.socket_path.clone();
     Harness {
@@ -291,7 +295,7 @@ async fn manage_routes_require_the_management_token() {
     assert_eq!(status, 401, "{body}");
 
     // The agent key must never open the manage plane.
-    let agent_key = h.broker.identity.token();
+    let agent_key = h.broker.identity.token(&h.broker.workspace);
     let (status, body) = uds_request(
         &h.socket,
         "GET",
@@ -359,7 +363,10 @@ async fn management_token_rotation_and_revocation_require_current_authority() {
     )
     .await;
     assert_eq!(status, 422, "{invalid}");
-    h.broker.identity.verify_manage(&first).unwrap();
+    h.broker
+        .identity
+        .verify_manage(&h.broker.workspace, &first)
+        .unwrap();
 
     let (status, rotated) = uds_request(
         &h.socket,
@@ -374,10 +381,13 @@ async fn management_token_rotation_and_revocation_require_current_authority() {
     assert!(second.starts_with("akamgr_"));
     assert!(rotated["expires_at"].as_str().is_some());
     assert_eq!(
-        h.broker.identity.verify_manage(&first),
+        h.broker.identity.verify_manage(&h.broker.workspace, &first),
         Err(aka_core::identity::TokenError::Invalid)
     );
-    h.broker.identity.verify_manage(&second).unwrap();
+    h.broker
+        .identity
+        .verify_manage(&h.broker.workspace, &second)
+        .unwrap();
 
     // A stale administrator cannot overwrite the winning rotation.
     let (status, stale) = uds_request(
@@ -389,7 +399,10 @@ async fn management_token_rotation_and_revocation_require_current_authority() {
     )
     .await;
     assert_eq!(status, 401, "{stale}");
-    h.broker.identity.verify_manage(&second).unwrap();
+    h.broker
+        .identity
+        .verify_manage(&h.broker.workspace, &second)
+        .unwrap();
 
     let (status, revoked) = uds_request(
         &h.socket,
@@ -401,7 +414,7 @@ async fn management_token_rotation_and_revocation_require_current_authority() {
     .await;
     assert_eq!(status, 200, "{revoked}");
     assert_eq!(revoked["revoked"], true);
-    assert!(!h.broker.identity.manage_token_issued());
+    assert!(!h.broker.identity.manage_token_issued(&h.broker.workspace));
 
     let entries = h.broker.audit.recent(20);
     assert!(entries.iter().any(|entry| {
@@ -457,7 +470,7 @@ async fn an_expired_manage_token_is_rejected_over_http() {
     let expired = h
         .broker
         .identity
-        .issue_manage_token_with_ttl(Some(std::time::Duration::ZERO))
+        .issue_manage_token_with_ttl(&h.broker.workspace, Some(std::time::Duration::ZERO))
         .await
         .unwrap();
     let (status, body) = uds_request(
@@ -792,14 +805,18 @@ async fn request_history_round_trips_pending_and_terminal_lifecycles() {
     // event observers do not keep confirmed traffic parked.
     let surface = h.broker.manage_bus().lease_approval_surface();
     assert!(h.broker.manage_bus().renew_approval_surface(&surface.id()));
-    let connection = h.broker.store.connection_by_name("github").unwrap();
+    let connection = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
     let broker = h.broker.clone();
     let call = tokio::spawn(async move {
         broker
             .approvals
             .gate(
                 ApprovalRequest::new(&connection, "codex", "GET /user")
-                    .credentials_from(broker.store.as_ref())
+                    .credentials_from(broker.store.as_ref(), &broker.workspace)
                     .http_operation(&http::Method::GET, "/user"),
             )
             .await
@@ -900,10 +917,10 @@ async fn identity_settings_and_activity_surface_over_the_manage_api() {
 
     // Rotating the agent key works over the manage API and leaves the
     // manage token itself valid (they are independent credentials).
-    let key_before = h.broker.identity.token();
+    let key_before = h.broker.identity.token(&h.broker.workspace);
     let (status, _) = h.manage("POST", "/v1/manage/identity/rotate", None).await;
     assert_eq!(status, 200);
-    assert_ne!(h.broker.identity.token(), key_before);
+    assert_ne!(h.broker.identity.token(&h.broker.workspace), key_before);
     let (status, _) = h.manage("GET", "/v1/manage/whoami", None).await;
     assert_eq!(status, 200);
 
@@ -1231,7 +1248,12 @@ async fn revoking_a_manage_token_closes_its_live_event_stream() {
         }
     }
 
-    assert!(h.broker.identity.revoke_manage_token().await.unwrap());
+    assert!(h
+        .broker
+        .identity
+        .revoke_manage_token(&h.broker.workspace)
+        .await
+        .unwrap());
     let ended = tokio::time::timeout(std::time::Duration::from_secs(3), body.frame())
         .await
         .expect("revoked stream did not close");

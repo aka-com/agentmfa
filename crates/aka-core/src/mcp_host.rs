@@ -512,7 +512,7 @@ async fn handle(State(state): State<HostState>, request: Request<Body>) -> Respo
     let Some(token) = bearer(&parts.headers) else {
         return unauthorized(id);
     };
-    let verified = match state.broker.identity.verify(token) {
+    let verified = match state.broker.identity.verify(&state.broker.workspace, token) {
         Ok(verified) => verified,
         Err(error) => {
             state.broker.audit_auth_failure(

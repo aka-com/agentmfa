@@ -122,7 +122,7 @@ async fn harness_with(mut config: BrokerConfig, user: Arc<ScriptedUser>) -> Harn
     *user.broker.lock().unwrap() = Some(broker.clone());
     let handle = daemon::serve(broker.clone()).await.unwrap();
     let socket = handle.socket_path.clone();
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     Harness {
         broker,
         _daemon: handle,
@@ -155,7 +155,11 @@ impl Harness {
     }
 
     fn confirm(&self, name: &str) {
-        let conn = self.broker.store.connection_by_name(name).unwrap();
+        let conn = self
+            .broker
+            .store
+            .connection_by_name(&self.broker.workspace, name)
+            .unwrap();
         futures::executor::block_on(self.broker.ui_set_confirm_mode(&conn.id, ConfirmMode::On))
             .unwrap();
     }
@@ -273,29 +277,36 @@ fn api_connection(harness: &Harness, name: &str, port: u16, mcp_path: Option<&st
         harness
             .broker
             .store
-            .add_secret(&secret, Zeroizing::new("token-value".into()))
+            .add_secret(
+                &harness.broker.workspace,
+                &secret,
+                Zeroizing::new("token-value".into()),
+            )
             .await
             .unwrap();
         harness
             .broker
             .store
-            .add_connection(ConnectionSpec {
-                name: name.into(),
-                config: ConnectionConfig::Api {
-                    host: "127.0.0.1".into(),
-                    scheme: "http".into(),
-                    port: Some(port),
-                    trusted_ca_bundle_path: None,
-                    template: format!("Authorization: Bearer {{{{{secret}}}}}"),
-                    mcp_path: mcp_path.map(str::to_string),
-                    test_path: None,
-                    oauth: None,
-                    signer: None,
-                    client_cert_path: None,
-                    client_key_path: None,
+            .add_connection(
+                &harness.broker.workspace,
+                ConnectionSpec {
+                    name: name.into(),
+                    config: ConnectionConfig::Api {
+                        host: "127.0.0.1".into(),
+                        scheme: "http".into(),
+                        port: Some(port),
+                        trusted_ca_bundle_path: None,
+                        template: format!("Authorization: Bearer {{{{{secret}}}}}"),
+                        mcp_path: mcp_path.map(str::to_string),
+                        test_path: None,
+                        oauth: None,
+                        signer: None,
+                        client_cert_path: None,
+                        client_key_path: None,
+                    },
+                    secrets: vec![],
                 },
-                secrets: vec![],
-            })
+            )
             .await
             .unwrap();
     });
@@ -473,28 +484,35 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
     let up = upstream().await;
     broker
         .store
-        .add_secret("GITHUB_KEY", Zeroizing::new("token-value".into()))
+        .add_secret(
+            &broker.workspace,
+            "GITHUB_KEY",
+            Zeroizing::new("token-value".into()),
+        )
         .await
         .unwrap();
     let conn = broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "github".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(up.port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{GITHUB_KEY}}".into(),
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "github".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(up.port),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{GITHUB_KEY}}".into(),
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     broker
@@ -502,7 +520,7 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
         .await
         .unwrap();
 
-    let token = broker.identity.token();
+    let token = broker.identity.token(&broker.workspace);
     // Monitoring the feed does not claim a user-facing request inbox.
     let events = broker.manage_bus().subscribe();
     let (status, body) = uds_request(
@@ -874,13 +892,17 @@ async fn approving_all_turns_the_switch_off() {
     let up = upstream().await;
     api_connection(&h, "github", up.port, None);
     h.confirm("github");
-    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
 
     let (status, _) = h.get_repos("github").await;
     assert_eq!(status, 200);
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
     assert_eq!(
-        h.broker.access.confirm_mode(&conn.id),
+        h.broker.access.confirm_mode(&h.broker.workspace, &conn.id),
         ConfirmMode::Off,
         "\"approve all\" is the switch going off, persisted"
     );
@@ -901,7 +923,11 @@ async fn turning_the_switch_off_releases_traffic_already_parked() {
     let up = upstream().await;
     api_connection(&h, "github", up.port, None);
     h.confirm("github");
-    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
 
     let socket = h.socket.clone();
     let token = h.token.clone();
@@ -941,7 +967,11 @@ async fn disabling_the_tool_refuses_traffic_parked_on_it() {
     let up = upstream().await;
     api_connection(&h, "github", up.port, None);
     h.confirm("github");
-    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
 
     let socket = h.socket.clone();
     let token = h.token.clone();
@@ -978,7 +1008,11 @@ async fn a_stale_prompt_cannot_open_a_window_after_the_connection_changes() {
     let up = upstream().await;
     api_connection(&h, "github", up.port, None);
     h.confirm("github");
-    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let conn = h
+        .broker
+        .store
+        .connection_by_name(&h.broker.workspace, "github")
+        .unwrap();
 
     let socket = h.socket.clone();
     let token = h.token.clone();

@@ -215,23 +215,26 @@ async fn broker_http_relay_matches_the_shared_mcp_fixture() {
     .unwrap();
     broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "golden-mcp".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(port),
-                trusted_ca_bundle_path: None,
-                template: String::new(),
-                mcp_path: Some("/mcp".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "golden-mcp".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(port),
+                    trusted_ca_bundle_path: None,
+                    template: String::new(),
+                    mcp_path: Some("/mcp".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     let daemon = daemon::serve(broker).await.unwrap();
@@ -300,23 +303,26 @@ async fn broker_mcp_relay_returns_when_the_matching_sse_frame_arrives() {
     .unwrap();
     broker
         .store
-        .add_connection(ConnectionSpec {
-            name: "streaming-mcp".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(port),
-                trusted_ca_bundle_path: None,
-                template: String::new(),
-                mcp_path: Some("/mcp".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "streaming-mcp".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(port),
+                    trusted_ca_bundle_path: None,
+                    template: String::new(),
+                    mcp_path: Some("/mcp".into()),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
             },
-            secrets: vec![],
-        })
+        )
         .await
         .unwrap();
     let daemon = daemon::serve(broker).await.unwrap();
@@ -438,22 +444,54 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     // Two connections, so "wired" has something to be distinguished from.
     broker
         .store
-        .add_secret("API_KEY", Zeroizing::new("secret-value".into()))
+        .add_secret(
+            &broker.workspace,
+            "API_KEY",
+            Zeroizing::new("secret-value".into()),
+        )
         .await
         .expect("secret");
     for name in ["prod-db", "deploy-host"] {
         broker
             .store
-            .add_connection(ConnectionSpec {
-                name: name.into(),
+            .add_connection(
+                &broker.workspace,
+                ConnectionSpec {
+                    name: name.into(),
+                    config: ConnectionConfig::Api {
+                        host: "127.0.0.1".into(),
+                        scheme: "http".into(),
+                        port: Some(upstream_port),
+                        trusted_ca_bundle_path: None,
+                        template: "Authorization: Bearer {{API_KEY}}".into(),
+
+                        mcp_path: None,
+                        test_path: None,
+                        oauth: None,
+                        signer: None,
+                        client_cert_path: None,
+                        client_key_path: None,
+                    },
+                    secrets: vec![],
+                },
+            )
+            .await
+            .expect("connection");
+    }
+
+    broker
+        .store
+        .add_connection(
+            &broker.workspace,
+            ConnectionSpec {
+                name: "notes".into(),
                 config: ConnectionConfig::Api {
                     host: "127.0.0.1".into(),
                     scheme: "http".into(),
                     port: Some(upstream_port),
                     trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{API_KEY}}".into(),
-
-                    mcp_path: None,
+                    mcp_path: Some("/mcp".into()),
                     test_path: None,
                     oauth: None,
                     signer: None,
@@ -461,30 +499,8 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                     client_key_path: None,
                 },
                 secrets: vec![],
-            })
-            .await
-            .expect("connection");
-    }
-
-    broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "notes".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(upstream_port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{API_KEY}}".into(),
-                mcp_path: Some("/mcp".into()),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
             },
-            secrets: vec![],
-        })
+        )
         .await
         .expect("mcp connection");
 
@@ -495,7 +511,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     // for each other.
     let deploy = broker
         .store
-        .list_connections()
+        .list_connections(&broker.workspace)
         .into_iter()
         .find(|c| c.name == "deploy-host")
         .expect("deploy-host");
@@ -653,7 +669,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     // With every connection disabled, a session gets the status +
     // connect-request tools and nothing else — access is per tool, shared
     // by every client of the one key.
-    for connection in broker.store.list_connections() {
+    for connection in broker.store.list_connections(&broker.workspace) {
         broker
             .ui_set_tool_access(&connection.id, false)
             .await
