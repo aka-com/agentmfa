@@ -7,6 +7,7 @@
 
 import { Fragment } from 'react';
 import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { state } from '../app-state';
 import { canQuickConnectMcp, catalogEntryById } from '../catalog';
 import { EndpointStrip } from './endpoint-view';
@@ -142,6 +143,7 @@ function SentenceBlank({ kind, label, menu }: {
   menu: ReactNode;
 }): ReactNode {
   const open = state.startMenuOpen === kind;
+  const portalRoot = document.getElementById('overlays');
   return (
     <span className="start-blank-wrap">
       <button id={startBlankId(kind)} className={`start-blank ${open ? 'on' : ''}`}
@@ -152,7 +154,14 @@ function SentenceBlank({ kind, label, menu }: {
           <AppIcon icon={ICONS.chevronDown} />
         </span>
       </button>
-      {open ? menu : null}
+      {open && portalRoot
+        ? createPortal(
+            <div className="anchored-menu-portal start-menu-portal" data-start-menu-portal={kind}>
+              {menu}
+            </div>,
+            portalRoot,
+          )
+        : null}
     </span>
   );
 }

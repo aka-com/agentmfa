@@ -739,16 +739,14 @@
   .start-blank.on{ background: var(--accent-wash-2); }
   .start-blank-chev{ display: inline-flex; opacity: .65; }
   .start-blank-chev svg{ width: 13px; height: 13px; }
+  /* Portaled under #overlays (see .start-menu-portal); no absolute offset. */
   .start-menu{
-    position: absolute; left: 50%; top: calc(100% + 6px); transform: translateX(-50%);
-    z-index: 16; min-width: 232px; max-height: 324px; overflow: auto;
     display: flex; flex-direction: column; gap: 1px; padding: 4px;
     background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
     box-shadow: var(--shadow-menu);
     font-size: 0.8125rem; font-weight: 400; letter-spacing: normal;
     line-height: 1.4; text-align: left;
   }
-  .start-menu-clients{ min-width: 276px; }
   /* Rules group the client menu: direct / named agents / escape hatches. */
   .start-menu-rule{ margin: 3px 5px; border-top: 1px solid var(--line); }
   .start-menu-item{
@@ -956,17 +954,38 @@
   background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
   box-shadow: var(--shadow-menu);
 }
+/* Portaled menus sit under #overlays so scrolling sheets/panes cannot clip
+   them. Visibility stays hidden until placeAnchoredMenu measures and places. */
+.anchored-menu-portal,
 .conn-context-menu-wrap,
 .conn-action-menu-wrap {
   position: fixed; z-index: 16; visibility: hidden;
   max-width: calc(100vw - 16px); max-height: calc(100vh - 16px);
 }
+.anchored-menu-portal .tile-menu,
+.anchored-menu-portal .cat-connect-menu,
+.anchored-menu-portal .start-menu,
+.anchored-menu-portal .act-filter-menu,
 .conn-context-menu-wrap .tile-menu,
 .conn-action-menu-wrap .tile-menu {
-  position: static; width: min(250px, calc(100vw - 16px)); min-width: 0;
+  position: static; left: auto; right: auto; top: auto; bottom: auto;
+  transform: none; width: max-content; min-width: 0;
   max-width: calc(100vw - 16px); max-height: calc(100vh - 16px);
   box-sizing: border-box; overflow-y: auto;
 }
+.conn-context-menu-wrap .tile-menu,
+.conn-action-menu-wrap .tile-menu {
+  width: min(250px, calc(100vw - 16px));
+}
+.ep-copy-menu { min-width: 180px; }
+.ep-opts-menu { min-width: 220px; }
+.cat-connect-menu-wrap .cat-connect-menu { min-width: 208px; }
+.act-filter-menu-wrap .act-filter-menu {
+  min-width: 180px; max-width: min(280px, calc(100vw - 16px));
+  max-height: min(320px, calc(100vh - 16px));
+}
+.start-menu-portal .start-menu { min-width: 232px; max-height: min(324px, calc(100vh - 16px)); }
+.start-menu-portal .start-menu-clients { min-width: 276px; }
 .menu-divider{ height: 1px; margin: 4px 6px; background: var(--line-soft); }
   .menu-item:disabled{ opacity: .5; cursor: default; }
   .menu-item:disabled:hover{ background: transparent; }
@@ -1328,17 +1347,10 @@
 }
 .cat-connect-menu-btn svg { width: 13px; height: 13px; transform: translate(-1px, 2px); }
 .cat-connect-menu {
-  position: absolute; right: 0; top: calc(100% + 5px); z-index: 20;
-  min-width: 208px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px;
   background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
   box-shadow: var(--shadow-menu);
 }
-/* Any open menu inside a card — catalog rows and flat connection rows
-   alike — lifts the card's clipping so the dropdown can escape it. */
-.cat-section:has(.cat-row-wrap.menu-open),
-.cat-section:has(.tile-menu) { position: relative; z-index: 2; }
-.cat-rows:has(.cat-row-wrap.menu-open),
-.cat-rows:has(.tile-menu) { overflow: visible; }
 .cat-more {
   display: flex; align-items: center; justify-content: center; gap: 5px; width: 100%;
   padding: 9px 14px; border: 0; border-top: 1px solid var(--line);
@@ -1558,13 +1570,12 @@
 .cd-connect + .cd-sec { margin-top: 12px; padding-top: 0; }
 .cd-connect-lbl > span { flex: 1; min-width: 0; }
 .cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
-/* Address lifecycle ⋯ sits on the Connect label; menu opens below-right. */
+/* Address lifecycle ⋯ sits on the Connect label; menu portals under #overlays. */
 .cd-connect-lbl .ep-opts-wrap { margin-left: auto; }
 .cd-connect-lbl .ep-opts-wrap .tile-menu-btn {
   width: 22px; height: 22px; color: var(--muted);
 }
 .cd-connect-lbl .ep-opts-wrap .tile-menu-btn svg { width: 15px; height: 15px; }
-.ep-opts-menu { min-width: 220px; }
 /* Non-action row: the opt-in expiry date at the top of the address menu. */
 .menu-meta {
   padding: 6px 9px 4px; font-size: 0.75rem; color: var(--muted);
@@ -1680,9 +1691,8 @@
 /* On the connection edit sheet, Delete (and any Reconnect / ⋯ beside it) sits
    left while Cancel + Save stay right. Pushing Cancel handles every branch. */
 .sheet-actions:has(.conn-delete-btn) [data-act="sheet-cancel"] { margin-left: auto; }
-/* The ⋯ menu drops upward, clear of the sheet edge. */
+/* Sheet reconnect ⋯ — menu portals under #overlays (not clipped by sheet scroll). */
 .sheet-actions .sheet-conn-menu { margin-right: auto; }
-.sheet-conn-menu .tile-menu { top: auto; bottom: calc(100% + 5px); right: auto; left: 0; }
 /* The row's issue list: each issue is an attention card — amber accent bar,
    a plain-words headline when the failure kind names one, the diagnosis,
    and the fix actions — so a problem and its remedy read as one unit. */
@@ -2247,11 +2257,8 @@
 .act-filter-chev { display: inline-flex; margin-right: -2px; opacity: .7; }
 .act-filter-chev svg { width: 12px; height: 12px; }
 .act-filter-select.open .act-filter-chev { transform: rotate(180deg); }
-/* Right-anchored: the picker is the last control in the filter row, so a
-   left-anchored menu would hang off the narrow menu-bar surface. */
+/* Agent filter menu portals under #overlays; chrome matches other menus. */
 .act-filter-menu {
-  position: absolute; right: 0; top: calc(100% + 5px); z-index: 20;
-  min-width: 180px; max-width: 280px; max-height: 320px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 2px; padding: 4px;
   background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
   box-shadow: var(--shadow-menu);
@@ -2359,11 +2366,11 @@
 .ep-expiry.expired{ color: var(--danger); font-weight: 600; }
 /* One Copy ▾ control replaces the per-application chip row: the button
    copies nothing by itself, its menu lists the plain address and every
-   client rendering (psql, libpq keywords, .env, ssh config, …). */
+   client rendering (psql, libpq keywords, .env, ssh config, …). The menu
+   portals under #overlays so the scrolling detail pane cannot clip it. */
 .ep-copy-wrap{ position: relative; flex: 0 0 auto; }
 .ep-copy-wrap .ep-copy{ white-space: nowrap; }
 .ep-copy-wrap .ep-copy svg{ width: 12px; height: 12px; }
-.ep-copy-menu{ min-width: 180px; }
 
 /* --------------------------- Add-a-tool palette --------------------------- */
 /* Adding is a search: one header button (or the dropdown's trailing row)

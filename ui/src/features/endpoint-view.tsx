@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { state } from '../app-state';
 import { ENDPOINT_FORMATS } from '../endpoint-formats';
 import { endpointExpired, expiredAgoLabel } from '../endpoint-expiry';
@@ -6,6 +7,13 @@ import { directEndpointAddress, sshDirectCommand } from '../connect-agents';
 import { AppIcon } from '../icon';
 import type { ConnectionSummary, ConnectionType } from '../types';
 import { ICONS } from '../util';
+
+/** Portal target for menus that must escape the scrolling detail pane. */
+function portalRoot(): HTMLElement {
+  const element = document.getElementById('overlays');
+  if (!element) throw new Error('Missing #overlays element');
+  return element;
+}
 
 export const ENDPOINTABLE: Record<ConnectionType, boolean> = {
   pg: true,
@@ -47,25 +55,30 @@ function EndpointCopyMenu({ connection: c, address, copyTitle }: {
   return <div className="ep-copy-wrap">
     <button className="btn sm ep-copy" title={copyTitle}
       aria-label={`${copyTitle} for ${c.name}`} aria-haspopup="menu" aria-expanded={open}
-      data-act="toggle-ep-menu" data-conn={c.id}>
+      data-act="toggle-ep-menu" data-conn={c.id} data-ep-menu-trigger={c.id}>
       {copied
         ? <><AppIcon icon={ICONS.check} /> Copied</>
         : <><AppIcon icon={ICONS.copy} /> Copy <AppIcon icon={ICONS.chevronDown} /></>}
     </button>
     {open
-      ? <div className="tile-menu ep-copy-menu" role="menu"
-          aria-label={`Copy formats for ${c.name}`}>
-          <button className="menu-item" role="menuitem"
-            data-act="copy-endpoint-dsn" data-conn={c.id}>
-            {c.type === 'ssh' ? 'SSH command' : 'Connection address'}
-          </button>
-          {formats.map((format) => (
-            <button key={format.key} className="menu-item" role="menuitem" title={format.title}
-              data-act="copy-endpoint-format" data-conn={c.id} data-format={format.key}>
-              {format.label}
-            </button>
-          ))}
-        </div>
+      ? createPortal(
+          <div className="anchored-menu-portal ep-copy-menu-wrap" data-ep-menu-portal={c.id}>
+            <div className="tile-menu ep-copy-menu" role="menu"
+              aria-label={`Copy formats for ${c.name}`}>
+              <button className="menu-item" role="menuitem"
+                data-act="copy-endpoint-dsn" data-conn={c.id}>
+                {c.type === 'ssh' ? 'SSH command' : 'Connection address'}
+              </button>
+              {formats.map((format) => (
+                <button key={format.key} className="menu-item" role="menuitem" title={format.title}
+                  data-act="copy-endpoint-format" data-conn={c.id} data-format={format.key}>
+                  {format.label}
+                </button>
+              ))}
+            </div>
+          </div>,
+          portalRoot(),
+        )
       : null}
   </div>;
 }
@@ -98,32 +111,37 @@ export function EndpointOptionsMenu({ connection: c }: {
       title="Connection address options"
       aria-label={`Connection address options for ${c.name}`}
       aria-haspopup="menu" aria-expanded={open}
-      data-act="toggle-ep-opts-menu" data-conn={c.id}>
+      data-act="toggle-ep-opts-menu" data-conn={c.id} data-ep-opts-trigger={c.id}>
       <AppIcon icon={ICONS.ellipsis} />
     </button>
     {open
-      ? <div className="tile-menu ep-opts-menu" role="menu"
-          aria-label={`Connection address options for ${c.name}`}>
-          {dateLabel
-            ? <div className="menu-meta" role="presentation">{dateLabel}</div>
-            : null}
-          {expiryOn
-            ? <button className="menu-item" role="menuitem"
-                data-act="renew-endpoint" data-conn={c.id}>
-                <AppIcon icon={ICONS.clockAlert} /> Renew connection address
+      ? createPortal(
+          <div className="anchored-menu-portal ep-opts-menu-wrap" data-ep-opts-portal={c.id}>
+            <div className="tile-menu ep-opts-menu" role="menu"
+              aria-label={`Connection address options for ${c.name}`}>
+              {dateLabel
+                ? <div className="menu-meta" role="presentation">{dateLabel}</div>
+                : null}
+              {expiryOn
+                ? <button className="menu-item" role="menuitem"
+                    data-act="renew-endpoint" data-conn={c.id}>
+                    <AppIcon icon={ICONS.clockAlert} /> Renew connection address
+                  </button>
+                : null}
+              {!expired
+                ? <button className="menu-item" role="menuitem"
+                    data-act="reissue-endpoint-ask" data-conn={c.id}>
+                    <AppIcon icon={ICONS.refresh} /> Rotate connection address
+                  </button>
+                : null}
+              <button className="menu-item danger" role="menuitem"
+                data-act="revoke-endpoint-ask" data-conn={c.id}>
+                <AppIcon icon={ICONS.x} /> Revoke connection address
               </button>
-            : null}
-          {!expired
-            ? <button className="menu-item" role="menuitem"
-                data-act="reissue-endpoint-ask" data-conn={c.id}>
-                <AppIcon icon={ICONS.refresh} /> Rotate connection address
-              </button>
-            : null}
-          <button className="menu-item danger" role="menuitem"
-            data-act="revoke-endpoint-ask" data-conn={c.id}>
-            <AppIcon icon={ICONS.x} /> Revoke connection address
-          </button>
-        </div>
+            </div>
+          </div>,
+          portalRoot(),
+        )
       : null}
   </div>;
 }

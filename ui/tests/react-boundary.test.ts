@@ -357,6 +357,27 @@ test('the connection menu escapes the clipping detail pane through a portal', as
   );
 });
 
+test('detail-pane endpoint menus and other scroll-contained menus portal out', async () => {
+  const endpoint = await readFile(new URL('../src/features/endpoint-view.tsx', import.meta.url), 'utf8');
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const start = await readFile(
+    new URL('../src/features/connect-agents-view.tsx', import.meta.url),
+    'utf8',
+  );
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+
+  assert.match(endpoint, /createPortal\([\s\S]*?ep-copy-menu-wrap/);
+  assert.match(endpoint, /createPortal\([\s\S]*?ep-opts-menu-wrap/);
+  // Menus that used to live under overflow:auto surfaces now portal.
+  assert.match(app, /createPortal\([\s\S]*?cat-connect-menu-wrap/);
+  assert.match(app, /createPortal\([\s\S]*?act-filter-menu-wrap/);
+  assert.match(app, /createPortal\([\s\S]*?sheet-conn-menu-wrap/);
+  assert.match(start, /createPortal\([\s\S]*?start-menu-portal/);
+  assert.match(app, /function positionEpCopyMenu/);
+  assert.match(app, /function positionOpenMenus/);
+  assert.match(styles, /\.anchored-menu-portal/);
+});
+
 test('Inbox and Activity Log sit above the normal sidebar footer', async () => {
   const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
 

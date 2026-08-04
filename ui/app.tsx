@@ -79,7 +79,7 @@ import { activeRequestCount, activeRequests, anchorExpiry, recentRequests } from
 import { anchorEndpointExpiries } from '/src/endpoint-expiry';
 import { APP_VERSION } from '/src/version';
 import { virtualListWindow } from '/src/virtual-list';
-import { anchoredMenuPosition } from '/src/menu-position';
+import { placeAnchoredMenu } from '/src/menu-position';
 import type {
   ActivityEntry,
   ActivityPage,
@@ -629,9 +629,7 @@ function finishRender(
     }
   }
 
-  if (state.formMenuOpen) positionFormMenu();
-  if (state.connMenuPoint) positionConnContextMenu();
-  else if (state.connMenuOpen) positionConnActionMenu();
+  positionOpenMenus();
 
   // First render of a connection sheet: snapshot the draft so cancelling
   // can detect real edits.
@@ -639,6 +637,18 @@ function finishRender(
       state.sheetBaseline === null) {
     state.sheetBaseline = connDraftSignature();
   }
+}
+
+/** Re-anchor every open portaled menu after layout (render, scroll, resize). */
+function positionOpenMenus(): void {
+  if (state.formMenuOpen) positionFormMenu();
+  if (state.connMenuPoint) positionConnContextMenu();
+  else if (state.connMenuOpen) positionConnActionMenu();
+  if (state.epMenuOpen) positionEpCopyMenu();
+  if (state.epOptsMenuOpen) positionEpOptsMenu();
+  if (state.catalogActionMenuOpen) positionCatalogConnectMenu();
+  if (state.startMenuOpen) positionStartMenu();
+  if (state.activityAgentMenuOpen) positionActivityAgentMenu();
 }
 
 /**
@@ -2043,16 +2053,22 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
           </button>
         </div>
         {actionMenuOpen
-          ? <div className="cat-connect-menu" aria-label={`Connect ${entry.name}`}>
-              <button className="menu-item" data-act="catalog-connect-oauth"
-                data-id={entry.id}>Connect</button>
-              <button className="menu-item" data-act="catalog-connect-manual"
-                data-id={entry.id}>Connect via custom URL</button>
-              {entry.preset
-                ? <button className="menu-item" data-act="catalog-connect-api"
-                    data-id={entry.id}>Connect custom API</button>
-                : null}
-            </div>
+          ? createPortal(
+              <div className="anchored-menu-portal cat-connect-menu-wrap"
+                data-catalog-menu-portal={entry.id}>
+                <div className="cat-connect-menu" aria-label={`Connect ${entry.name}`}>
+                  <button className="menu-item" data-act="catalog-connect-oauth"
+                    data-id={entry.id}>Connect</button>
+                  <button className="menu-item" data-act="catalog-connect-manual"
+                    data-id={entry.id}>Connect via custom URL</button>
+                  {entry.preset
+                    ? <button className="menu-item" data-act="catalog-connect-api"
+                        data-id={entry.id}>Connect custom API</button>
+                    : null}
+                </div>
+              </div>,
+              overlays(),
+            )
           : null}
       </div>
     );
@@ -3246,19 +3262,24 @@ function ActivityAgentFilter({ agents }: { agents: string[] }): ReactNode {
         </span>
       </button>
       {open
-        ? <div className="act-filter-menu" role="listbox" aria-label="Filter activity by agent">
-            <button className={`menu-item ${selected ? '' : 'on'}`} role="option"
-              aria-selected={!selected} data-act="act-filter-agent" data-value="">
-              All agents
-            </button>
-            {agents.map((agent) => (
-              <button key={agent} className={`menu-item ${selected === agent ? 'on' : ''}`}
-                role="option" aria-selected={selected === agent}
-                data-act="act-filter-agent" data-value={agent}>
-                <span className="untrusted-identity" dir="auto">{agent}</span>
-              </button>
-            ))}
-          </div>
+        ? createPortal(
+            <div className="anchored-menu-portal act-filter-menu-wrap">
+              <div className="act-filter-menu" role="listbox" aria-label="Filter activity by agent">
+                <button className={`menu-item ${selected ? '' : 'on'}`} role="option"
+                  aria-selected={!selected} data-act="act-filter-agent" data-value="">
+                  All agents
+                </button>
+                {agents.map((agent) => (
+                  <button key={agent} className={`menu-item ${selected === agent ? 'on' : ''}`}
+                    role="option" aria-selected={selected === agent}
+                    data-act="act-filter-agent" data-value={agent}>
+                    <span className="untrusted-identity" dir="auto">{agent}</span>
+                  </button>
+                ))}
+              </div>
+            </div>,
+            overlays(),
+          )
         : null}
     </div>
   );
@@ -5507,13 +5528,16 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
                     aria-expanded={menuOpen}
                     data-act="toggle-conn-menu" data-id={`sheet:${conn.id}`}>
                     <Icon markup={ICONS.ellipsis} /></button>
-                  {menuOpen && (
-                    <div className="tile-menu" aria-label={`More options for ${conn.name}`}>
-                      <button className="menu-item"
-                        data-act={conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}
-                        data-id={conn.id}>
-                        <Icon markup={ICONS.refresh} /> Reconnect (sign in again)</button>
-                    </div>
+                  {menuOpen && createPortal(
+                    <div className="anchored-menu-portal sheet-conn-menu-wrap">
+                      <div className="tile-menu" aria-label={`More options for ${conn.name}`}>
+                        <button className="menu-item"
+                          data-act={conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}
+                          data-id={conn.id}>
+                          <Icon markup={ICONS.refresh} /> Reconnect (sign in again)</button>
+                      </div>
+                    </div>,
+                    overlays(),
                   )}
                 </div>
               : null}
@@ -6718,20 +6742,71 @@ function positionConnContextMenu(): void {
 function positionConnActionMenu(): void {
   const id = state.connMenuOpen;
   if (!id || state.connMenuPoint) return;
+  // Sheet reconnect ⋯ uses the same toggle id prefix and its own portal.
+  if (id.startsWith('sheet:')) {
+    const trigger = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-act="toggle-conn-menu"]'),
+    ).find((candidate) => candidate.dataset.id === id);
+    const wrap = document.querySelector<HTMLElement>('.sheet-conn-menu-wrap');
+    if (trigger && wrap) placeAnchoredMenu(wrap, trigger, 'start');
+    return;
+  }
   const trigger = Array.from(
     document.querySelectorAll<HTMLElement>('[data-conn-menu-trigger]'),
   ).find((candidate) => candidate.dataset.connMenuTrigger === id);
   const wrap = document.querySelector<HTMLElement>('.conn-action-menu-wrap');
   if (!trigger || !wrap) return;
-  const anchor = trigger.getBoundingClientRect();
-  const box = wrap.getBoundingClientRect();
-  const position = anchoredMenuPosition(anchor, box, {
-    width: window.innerWidth,
-    height: window.innerHeight,
-  });
-  wrap.style.left = `${position.left}px`;
-  wrap.style.top = `${position.top}px`;
-  wrap.style.visibility = 'visible';
+  placeAnchoredMenu(wrap, trigger);
+}
+
+/** Copy-format menu on the detail-pane address field. */
+function positionEpCopyMenu(): void {
+  const id = state.epMenuOpen;
+  if (!id) return;
+  const trigger = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-ep-menu-trigger]'),
+  ).find((candidate) => candidate.dataset.epMenuTrigger === id);
+  const wrap = document.querySelector<HTMLElement>('.ep-copy-menu-wrap');
+  if (trigger && wrap) placeAnchoredMenu(wrap, trigger);
+}
+
+/** Address lifecycle ⋯ on the Connect section label. */
+function positionEpOptsMenu(): void {
+  const id = state.epOptsMenuOpen;
+  if (!id) return;
+  const trigger = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-ep-opts-trigger]'),
+  ).find((candidate) => candidate.dataset.epOptsTrigger === id);
+  const wrap = document.querySelector<HTMLElement>('.ep-opts-menu-wrap');
+  if (trigger && wrap) placeAnchoredMenu(wrap, trigger);
+}
+
+/** Catalog "more ways to connect" split-button menu. */
+function positionCatalogConnectMenu(): void {
+  const id = state.catalogActionMenuOpen;
+  if (!id) return;
+  const trigger = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-act="toggle-catalog-connect-menu"]'),
+  ).find((candidate) => candidate.dataset.id === id);
+  const wrap = document.querySelector<HTMLElement>('.cat-connect-menu-wrap');
+  if (trigger && wrap) placeAnchoredMenu(wrap, trigger);
+}
+
+/** Connect-agents sentence blanks (tool / client). */
+function positionStartMenu(): void {
+  const kind = state.startMenuOpen;
+  if (!kind) return;
+  const trigger = document.getElementById(`start-blank-${kind}`);
+  const wrap = document.querySelector<HTMLElement>('.start-menu-portal');
+  if (trigger && wrap) placeAnchoredMenu(wrap, trigger, 'center', 6);
+}
+
+/** Activity Log agent filter menu. */
+function positionActivityAgentMenu(): void {
+  if (!state.activityAgentMenuOpen) return;
+  const trigger = document.querySelector<HTMLElement>('.act-filter-trigger');
+  const wrap = document.querySelector<HTMLElement>('.act-filter-menu-wrap');
+  if (trigger && wrap) placeAnchoredMenu(wrap, trigger);
 }
 
 // Opportunistic re-check: coming back to the app re-tests anything the
@@ -6785,33 +6860,47 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
-  if (state.startMenuOpen && !target?.closest('.start-blank-wrap')) {
+  if (state.startMenuOpen
+      && !target?.closest('.start-blank-wrap')
+      && !target?.closest('.start-menu-portal')) {
     state.startMenuOpen = null;
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
-  if (state.catalogActionMenuOpen && !target?.closest('.cat-connect-wrap')) {
+  if (state.catalogActionMenuOpen
+      && !target?.closest('.cat-connect-wrap')
+      && !target?.closest('.cat-connect-menu-wrap')) {
     state.catalogActionMenuOpen = null;
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
-  if (state.activityAgentMenuOpen && !target?.closest('.act-filter-select')) {
+  if (state.activityAgentMenuOpen
+      && !target?.closest('.act-filter-select')
+      && !target?.closest('.act-filter-menu-wrap')) {
     state.activityAgentMenuOpen = false;
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
-  if (state.connMenuOpen && !target?.closest('.tile-menu-wrap')) {
+  if (state.connMenuOpen
+      && !target?.closest('.tile-menu-wrap')
+      && !target?.closest('.sheet-conn-menu-wrap')
+      && !target?.closest('.conn-action-menu-wrap')
+      && !target?.closest('.conn-context-menu-wrap')) {
     state.connMenuOpen = null;
     state.connMenuPoint = null;
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
-  if (state.epMenuOpen && !target?.closest('.ep-copy-wrap')) {
+  if (state.epMenuOpen
+      && !target?.closest('.ep-copy-wrap')
+      && !target?.closest('.ep-copy-menu-wrap')) {
     state.epMenuOpen = null;
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
-  if (state.epOptsMenuOpen && !target?.closest('.ep-opts-wrap')) {
+  if (state.epOptsMenuOpen
+      && !target?.closest('.ep-opts-wrap')
+      && !target?.closest('.ep-opts-menu-wrap')) {
     state.epOptsMenuOpen = null;
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
@@ -8551,14 +8640,11 @@ const ERR_KEY_BY_INPUT = {
 // draft updates, error clearing, and the draft-test-override disarm.
 
 function handleDocumentScroll(): void {
-  if (state.formMenuOpen) positionFormMenu();
-  if (state.connMenuOpen && !state.connMenuPoint) positionConnActionMenu();
+  positionOpenMenus();
 }
 
 function handleWindowResize(): void {
-  if (state.formMenuOpen) positionFormMenu();
-  if (state.connMenuPoint) positionConnContextMenu();
-  else if (state.connMenuOpen) positionConnActionMenu();
+  positionOpenMenus();
 }
 
 // Browser-level events that are genuinely global stay native, but their

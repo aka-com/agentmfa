@@ -37,3 +37,31 @@ test('connection menu clamps every edge in a constrained viewport', () => {
     { left: 8, top: 8 },
   );
 });
+
+test('start-aligned menus match the trigger left edge', () => {
+  assert.deepEqual(
+    anchoredMenuPosition(
+      { left: 100, right: 124, top: 40, bottom: 64 },
+      menu,
+      viewport,
+      4,
+      8,
+      'start',
+    ),
+    { left: 100, top: 68 },
+  );
+});
+
+test('center-aligned menus sit under the trigger midpoint', () => {
+  assert.deepEqual(
+    anchoredMenuPosition(
+      { left: 200, right: 260, top: 40, bottom: 64 },
+      menu,
+      viewport,
+      4,
+      8,
+      'center',
+    ),
+    { left: 120, top: 68 },
+  );
+});
