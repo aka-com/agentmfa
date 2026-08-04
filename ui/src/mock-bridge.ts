@@ -883,7 +883,15 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (mockFault('locked_vault')) {
         throw 'the encrypted vault could not be opened with this installation’s key';
       }
-      return db.secrets.map(secretDto);
+      // Local secrets first (by name), then 1Password-linked ones (by name).
+      return db.secrets
+        .slice()
+        .sort((a, b) => {
+          const aOp = a.source?.kind === 'one_password' ? 1 : 0;
+          const bOp = b.source?.kind === 'one_password' ? 1 : 0;
+          return aOp - bOp || a.name.localeCompare(b.name);
+        })
+        .map(secretDto);
     case 'list_onepassword_integrations': return db.onepasswordIntegrations.slice();
     case 'add_onepassword_integration': {
       const label = args.label?.trim() ?? '';

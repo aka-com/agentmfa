@@ -264,7 +264,12 @@ impl Store {
 
     pub fn list_secrets(&self) -> Vec<SecretMeta> {
         let mut secrets = self.state.lock().unwrap().secrets.clone();
-        secrets.sort_by(|a, b| a.name.cmp(&b.name));
+        // Local secrets first (by name), then 1Password-linked ones (by name).
+        secrets.sort_by(|a, b| {
+            let a_op = matches!(a.source, SecretSource::OnePassword { .. });
+            let b_op = matches!(b.source, SecretSource::OnePassword { .. });
+            a_op.cmp(&b_op).then_with(|| a.name.cmp(&b.name))
+        });
         secrets
     }
 
@@ -1984,6 +1989,78 @@ mod tests {
             .delete_onepassword_integration(&integration.id)
             .unwrap();
         assert_eq!(vault.len(), baseline);
+    }
+
+    #[tokio::test]
+    async fn list_secrets_sorts_onepassword_links_to_the_bottom() {
+        let (store, _vault, _dir) = store().await;
+        let integration = store
+            .add_onepassword_integration(
+                "Work",
+                OnePasswordAuth::DesktopApp {
+                    account: "Work".into(),
+                },
+                None,
+            )
+            .unwrap();
+        // Names are interleaved alphabetically so a pure name sort would
+        // interleave sources; linked secrets must still trail locals.
+        store.add_secret("ZEBRA_LOCAL", val("z")).unwrap();
+        store
+            .add_onepassword_secret(
+                "ALPHA_OP",
+                OnePasswordSecretRef {
+                    integration_id: integration.id,
+                    vault_id: "vault1".into(),
+                    vault_label: "Production".into(),
+                    item_id: "item1".into(),
+                    item_label: "Alpha".into(),
+                    section_id: None,
+                    section_label: None,
+                    field_id: "password".into(),
+                    field_label: "password".into(),
+                    field_type: Some("Concealed".into()),
+                },
+            )
+            .unwrap();
+        store.add_secret("MIDDLE_LOCAL", val("m")).unwrap();
+        store
+            .add_onepassword_secret(
+                "ZULU_OP",
+                OnePasswordSecretRef {
+                    integration_id: integration.id,
+                    vault_id: "vault1".into(),
+                    vault_label: "Production".into(),
+                    item_id: "item2".into(),
+                    item_label: "Zulu".into(),
+                    section_id: None,
+                    section_label: None,
+                    field_id: "password".into(),
+                    field_label: "password".into(),
+                    field_type: Some("Concealed".into()),
+                },
+            )
+            .unwrap();
+
+        let listed: Vec<_> = store
+            .list_secrets()
+            .into_iter()
+            .map(|secret| {
+                (
+                    secret.name,
+                    matches!(secret.source, SecretSource::OnePassword { .. }),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("MIDDLE_LOCAL".into(), false),
+                ("ZEBRA_LOCAL".into(), false),
+                ("ALPHA_OP".into(), true),
+                ("ZULU_OP".into(), true),
+            ]
+        );
     }
 
     #[tokio::test]
