@@ -640,20 +640,19 @@ async fn secrets_and_connections_round_trip_over_the_manage_api() {
         .collect();
     assert_eq!(names, vec!["gitlab", "github"], "reorder persisted");
 
-    // Reveal returns only the short prefix; copy-value returns the value
-    // (the shell writes it to the clipboard, never the webview).
+    // Reveal returns the value for the client to show on screen; copy-value
+    // returns it for the shell's clipboard.
     let (_, secrets) = h.manage("GET", "/v1/manage/secrets", None).await;
     let secret_id = secrets[0]["id"].as_str().unwrap().to_string();
     let (status, body) = h
         .manage(
             "POST",
-            &format!("/v1/manage/secrets/{secret_id}/reveal-prefix"),
+            &format!("/v1/manage/secrets/{secret_id}/reveal"),
             None,
         )
         .await;
     assert_eq!(status, 200, "{body}");
-    let prefix = body["prefix"].as_str().unwrap();
-    assert!(prefix.len() < "ghp_test".len());
+    assert_eq!(body["value"], "ghp_test");
     let (status, body) = h
         .manage(
             "POST",

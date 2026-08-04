@@ -826,18 +826,17 @@ impl Broker {
         self.store.onepassword_fields(id, vault_id, item_id).await
     }
 
-    /// Core-side reveal: only the short prefix ever leaves.
-    pub async fn ui_reveal_secret_prefix(&self, id: &Uuid) -> Result<String> {
+    /// Release a value for the shell to show on screen. The user asks for
+    /// this per secret and confirms it first; the audit trail records that
+    /// the whole value was put on display, never the value itself.
+    pub async fn ui_reveal_secret_value(&self, id: &Uuid) -> Result<SecretValue> {
         let meta = self.store.secret_by_id(id)?;
-        let prefix = self.store.reveal_secret_prefix(id).await?;
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::SecretRevealed,
-                format!("Secret prefix revealed: {}", meta.name),
-            )
-            .field("characters", prefix.chars().count().saturating_sub(1)),
-        );
-        Ok(prefix)
+        let value = self.store.secret_value(id).await?;
+        self.audit.append(AuditEntry::new(
+            AuditKind::SecretRevealed,
+            format!("Secret revealed: {}", meta.name),
+        ));
+        Ok(value)
     }
 
     /// Fetch a value for the shell's core-side clipboard copy.

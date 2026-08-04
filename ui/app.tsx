@@ -2,14 +2,14 @@
 // and dropdown), chosen from location.hash.
 //
 // Every mutation and read goes through the Rust core via Tauri
-// commands; the webview never holds a secret value. When run outside
-// Tauri (a plain browser), a dev mock stands in for the core so the
-// UI is developable standalone.
+// commands; the webview holds a secret value only while the user has
+// a reveal open on it. When run outside Tauri (a plain browser), a dev
+// mock stands in for the core so the UI is developable standalone.
 
 import { invoke, listen, mode } from '/src/bridge';
 import { QueryClientProvider } from '@tanstack/react-query';
 import {
-  StrictMode, useEffect, useLayoutEffect, useRef, useState,
+  Fragment, StrictMode, useEffect, useLayoutEffect, useRef, useState,
 } from 'react';
 import type {
   DragEvent as ReactDragEvent,
@@ -32,6 +32,7 @@ import {
 } from '/src/app-state';
 import type {
   ConnectionDraft,
+  ConnMenuPoint,
   LoadKey,
   SheetState,
   Tab,
@@ -192,6 +193,8 @@ function clearBrokerOwnedState(): void {
   state.selectedConn = null;
   state.connMenuOpen = null;
   state.connMenuPoint = null;
+  state.secretMenuOpen = null;
+  state.secretMenuPoint = null;
   state.connectionReady = null;
   state.connTests = {};
   state.draftTest = null;
@@ -276,9 +279,15 @@ function resetScroll(): void {
 }
 
 function clearSensitivePresentation(): boolean {
-  const changed = Object.keys(state.reveal).length > 0 || Object.keys(state.epExpanded).length > 0;
+  const changed = Object.keys(state.reveal).length > 0
+    || Object.keys(state.epExpanded).length > 0
+    || state.secretMenuOpen !== null;
   state.reveal = {};
   state.epExpanded = {};
+  // The menu names the reveal state it was opened over; dropping the reveals
+  // without it would leave "Unreveal secret" pointing at a hidden value.
+  state.secretMenuOpen = null;
+  state.secretMenuPoint = null;
   return changed;
 }
 
@@ -647,6 +656,7 @@ function positionOpenMenus(): void {
   if (state.formMenuOpen) positionFormMenu();
   if (state.connMenuPoint) positionConnContextMenu();
   else if (state.connMenuOpen) positionConnActionMenu();
+  if (state.secretMenuPoint) positionSecretContextMenu();
   if (state.epMenuOpen) positionEpCopyMenu();
   if (state.epOptsMenuOpen) positionEpOptsMenu();
   if (state.catalogActionMenuOpen) positionCatalogConnectMenu();
@@ -1095,24 +1105,17 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
       <thead><tr><th>Credential</th><th>Used by</th><th><span className="sr-only">Value</span></th>
         <th><span className="sr-only">Actions</span></th></tr></thead>
       <tbody>{secrets.map((s) => {
-    // The eye reveals only a short prefix (the full value never
-    // enters the webview).
+    // A reveal is the whole value, asked for by name through the row's
+    // right-click menu and confirmed there; it lands on its own line under
+    // the row rather than in the masked value slot.
     const revealed = state.reveal[s.id];
     const copied = state.copied === s.id;
-    // the eye toggles reveal ↔ conceal; copy is a ghost button that surfaces on
-    // hovering the value (available whether or not the prefix is revealed)
-    const eyeBtn = mode === 'dropdown' ? null : revealed
-      ? <button className="icon-btn eye-btn" title="Hide prefix" aria-label="Hide prefix"
-          data-act="hide-secret" data-id={s.id}><Icon markup={ICONS.eyeOff} /></button>
-      : <button className="icon-btn eye-btn" title="Reveal prefix" aria-label="Reveal prefix"
-          data-act="reveal-secret" data-id={s.id}><Icon markup={ICONS.eye} /></button>;
     // The copy affordance and the post-copy "Copied" status both overlay the
     // masked value, centered — never beside it (the placeholder dims behind).
     const overlay = copied
       ? <span className="copied-badge"><Icon markup={ICONS.check} /><span>Copied</span></span>
       : <button className="ghost-copy" title="Copy value" data-act="copy-secret"
           data-id={s.id}><Icon markup={ICONS.copy} /><span>Copy</span></button>;
-    const valText = revealed || '••••••••';
     const usedBy = s.used_by_names.length ? (
       <div className="used-by-links">{s.used_by_names.map((name) => {
           const connection = state.connections.find((candidate) => candidate.name === name);
@@ -1122,23 +1125,38 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
             : <span key={name}>{name}</span>;
         })}</div>
     ) : <span className="used-by-empty">Not in use</span>;
-    return <tr key={s.id}>
-      <td><div className="s-name">{s.name}</div>
-        {s.source?.kind === 'one_password'
-          ? <div className="s-source"><Icon markup={ICONS.onepassword} />{s.source.integration_label}</div>
-          : null}</td>
-      <td className="used-by-cell">{usedBy}</td>
-      <td className="val"><span className="val-wrap">
-        <span className={`val-slot ${copied ? 'is-copied' : ''}`}><code>{valText}</code>
-          <span className="val-overlay">{overlay}</span></span>
-        </span> {eyeBtn}</td>
-      <td className="rowdel">
-        <button className="icon-btn" title="Edit secret" aria-label={`Edit secret ${s.name}`}
-          data-act="edit-secret" data-id={s.id}><Icon markup={ICONS.pencil} /></button>
-        <button className="icon-btn" title="Delete secret" aria-label={`Delete secret ${s.name}`}
-          data-act="del-secret-ask" data-id={s.id}><Icon markup={ICONS.trash} /></button>
-      </td>
-    </tr>;
+    return <Fragment key={s.id}>
+      {/* data-secret-row is what the right-click handler reads; the whole
+          row is the target, so the menu opens wherever it is pressed. */}
+      <tr className={revealed === undefined ? undefined : 'is-revealed'}
+        data-secret-row={s.id}>
+        <td><div className="s-name">{s.name}</div>
+          {s.source?.kind === 'one_password'
+            ? <div className="s-source"><Icon markup={ICONS.onepassword} />{s.source.integration_label}</div>
+            : null}</td>
+        <td className="used-by-cell">{usedBy}</td>
+        <td className="val"><span className="val-wrap">
+          <span className={`val-slot ${copied ? 'is-copied' : ''}`}><code>••••••••</code>
+            <span className="val-overlay">{overlay}</span></span>
+          </span></td>
+        <td className="rowdel">
+          <button className="icon-btn" title="Edit secret" aria-label={`Edit secret ${s.name}`}
+            data-act="edit-secret" data-id={s.id}><Icon markup={ICONS.pencil} /></button>
+          <button className="icon-btn" title="Delete secret" aria-label={`Delete secret ${s.name}`}
+            data-act="del-secret-ask" data-id={s.id}><Icon markup={ICONS.trash} /></button>
+        </td>
+      </tr>
+      {/* The revealed value gets the full width of the row, starting at the
+          credential name's own left edge, so a long secret reads as one line
+          instead of wrapping inside a column. */}
+      {revealed === undefined
+        ? null
+        : <tr className="sec-reveal-row" data-secret-row={s.id}>
+            <td colSpan={4}>
+              <code className="sec-reveal-value">{revealed}</code>
+            </td>
+          </tr>}
+    </Fragment>;
       })}</tbody>
     </table>
   );
@@ -3761,6 +3779,31 @@ function ConnectionContextMenu(): ReactNode {
   );
 }
 
+/** A credential row's right-click menu, portaled and pointer-anchored like
+ * the tool rows'. It carries the reveal, which has no other affordance: a
+ * value only goes on screen when it is asked for by name and confirmed. */
+function SecretContextMenu(): ReactNode {
+  const secret = state.secretMenuPoint && state.secretMenuOpen
+    ? state.secrets.find((candidate) => candidate.id === state.secretMenuOpen)
+    : null;
+  if (!secret) return null;
+  const revealed = state.reveal[secret.id] !== undefined;
+  return createPortal(
+    <div className="tile-menu-wrap secret-context-menu-wrap">
+      <div className="tile-menu" aria-label={`Options for ${secret.name}`}>
+        {revealed
+          ? <button className="menu-item" data-act="unreveal-secret" data-id={secret.id}>
+              <Icon markup={ICONS.eyeOff} /> Unreveal secret
+            </button>
+          : <button className="menu-item" data-act="reveal-secret-ask" data-id={secret.id}>
+              <Icon markup={ICONS.eye} /> Reveal secret…
+            </button>}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 /** The detail-pane action menu is portaled out of its scrolling card so the
  * card cannot clip it. positionConnActionMenu keeps it attached to the ⋯
  * trigger and flips it above when there is not enough viewport below. */
@@ -3803,7 +3846,7 @@ function AppRoot(): ReactNode {
   return (
     <div className="app-event-root" style={{ display: 'contents' }}
       onClick={handleActionClick}
-      onContextMenu={handleConnectionContextMenu}
+      onContextMenu={handleRowContextMenu}
       onDragStart={handleConnectionDragStart}
       onDragOver={handleConnectionDragOver}
       onDrop={handleConnectionDrop}
@@ -3812,6 +3855,7 @@ function AppRoot(): ReactNode {
       {mode === 'dropdown' ? <DropdownWindow /> : <MainWindow />}
       <ConnectionActionMenu />
       <ConnectionContextMenu />
+      <SecretContextMenu />
     </div>
   );
 }
@@ -3967,6 +4011,29 @@ function DeleteSecretConfirm(): ReactNode {
   );
 }
 
+// A reveal puts the whole credential on the screen, so it is asked for
+// rather than toggled: the confirm says what will be visible and for how
+// long, since the window drops the value again on its own.
+function RevealSecretConfirm(): ReactNode {
+  const confirm = state.confirm;
+  if (!confirm || confirm.kind !== 'reveal-secret') return null;
+  const secret = state.secrets.find((candidate) => candidate.id === confirm.id);
+  const name = secret?.name ?? 'this credential';
+  return (
+    <>
+      <h3 id="reveal-secret-title">Reveal {name}?</h3>
+      <p>The full value will be shown in the window — visible to anyone looking
+        at your screen, and to anything recording it. It stays on screen until
+        you unreveal it, leave this tab, or the window loses focus.</p>
+      <div className="sheet-actions">
+        <button className="btn" data-act="confirm-cancel">Cancel</button>
+        <button className="btn primary" data-act="reveal-secret-confirm"
+          data-id={String(confirm.id ?? '')}>Reveal</button>
+      </div>
+    </>
+  );
+}
+
 // In-use credentials cannot be deleted until their tools are gone; offer a
 // path to each tool’s delete confirm instead of an inline table-row swap.
 function SecretInUseConfirm(): ReactNode {
@@ -4067,6 +4134,14 @@ function ConfirmSheet(): ReactNode {
       <Sheet titleId="del-secret-title" className="wide confirm-sheet"
         backdropAction="confirm-cancel">
         <DeleteSecretConfirm />
+      </Sheet>
+    );
+  }
+  if (kind === 'reveal-secret') {
+    return (
+      <Sheet titleId="reveal-secret-title" className="wide confirm-sheet"
+        backdropAction="confirm-cancel">
+        <RevealSecretConfirm />
       </Sheet>
     );
   }
@@ -6828,10 +6903,9 @@ function requestCloseSheet(): void {
 }
 
 /* --------------------------------- events -------------------------------- */
-/** Keep the pointer-anchored tool menu wholly inside the current viewport. */
-function positionConnContextMenu(): void {
-  const point = state.connMenuPoint;
-  const wrap = document.querySelector<HTMLElement>('.conn-context-menu-wrap');
+/** Place a pointer-anchored menu wholly inside the current viewport. */
+function positionPointerMenu(selector: string, point: ConnMenuPoint | null): void {
+  const wrap = document.querySelector<HTMLElement>(selector);
   if (!point || !wrap) return;
   const inset = 8;
   const box = wrap.getBoundingClientRect();
@@ -6840,6 +6914,16 @@ function positionConnContextMenu(): void {
   wrap.style.left = `${Math.min(Math.max(inset, point.x), maxLeft)}px`;
   wrap.style.top = `${Math.min(Math.max(inset, point.y), maxTop)}px`;
   wrap.style.visibility = 'visible';
+}
+
+/** Keep the pointer-anchored tool menu wholly inside the current viewport. */
+function positionConnContextMenu(): void {
+  positionPointerMenu('.conn-context-menu-wrap', state.connMenuPoint);
+}
+
+/** The same for a credential row's reveal menu. */
+function positionSecretContextMenu(): void {
+  positionPointerMenu('.secret-context-menu-wrap', state.secretMenuPoint);
 }
 
 /** Anchor the detail pane's portaled action menu without letting any edge
@@ -6945,16 +7029,29 @@ function handleWindowFocus(): void {
   }
 }
 
-function handleConnectionContextMenu(e: ReactMouseEvent<HTMLDivElement>): void {
+/** Right-click opens the row menu for the two lists that have one: tools and
+ * credentials. Anything else keeps the platform's own menu. */
+function handleRowContextMenu(e: ReactMouseEvent<HTMLDivElement>): void {
   const target = e.target instanceof Element ? e.target : null;
-  const row = target?.closest<HTMLElement>('.flat-conn-wrap');
-  const id = row?.dataset.connRow;
-  if (!id) return;
+  const connectionId = target?.closest<HTMLElement>('.flat-conn-wrap')?.dataset.connRow;
+  if (connectionId) {
+    e.preventDefault();
+    state.selectedConn = connectionId;
+    state.connMenuOpen = connectionId;
+    state.connMenuPoint = { x: e.clientX, y: e.clientY };
+    state.secretMenuOpen = null;
+    state.secretMenuPoint = null;
+    state.catalogActionMenuOpen = null;
+    render();
+    return;
+  }
+  const secretId = target?.closest<HTMLElement>('[data-secret-row]')?.dataset.secretRow;
+  if (!secretId) return;
   e.preventDefault();
-  state.selectedConn = id;
-  state.connMenuOpen = id;
-  state.connMenuPoint = { x: e.clientX, y: e.clientY };
-  state.catalogActionMenuOpen = null;
+  state.secretMenuOpen = secretId;
+  state.secretMenuPoint = { x: e.clientX, y: e.clientY };
+  state.connMenuOpen = null;
+  state.connMenuPoint = null;
   render();
 }
 
@@ -7019,6 +7116,12 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       && !target?.closest('.conn-context-menu-wrap')) {
     state.connMenuOpen = null;
     state.connMenuPoint = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
+  if (state.secretMenuOpen && !target?.closest('.secret-context-menu-wrap')) {
+    state.secretMenuOpen = null;
+    state.secretMenuPoint = null;
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
@@ -7314,20 +7417,31 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       }
       break;
 
-    case 'reveal-secret': {
+    case 'reveal-secret-ask':
+      state.secretMenuOpen = null;
+      state.secretMenuPoint = null;
+      state.confirm = { kind: 'reveal-secret', id };
+      render();
+      break;
+    case 'reveal-secret-confirm': {
       const epoch = brokerEpoch;
       try {
-        const prefix = await invoke('reveal_secret_prefix', { id });
+        const value = await invoke('reveal_secret', { id });
         if (!brokerEpochIsCurrent(epoch)) break;
-        state.reveal[id] = prefix;
+        state.reveal[id] = value;
+        state.confirm = null;
         render();
       } catch (error) {
         if (brokerEpochIsCurrent(epoch)) toast('⚠ ' + errorMessage(error));
       }
       break;
     }
-    case 'hide-secret':
-      delete state.reveal[id]; render(); break;
+    case 'unreveal-secret':
+      delete state.reveal[id];
+      state.secretMenuOpen = null;
+      state.secretMenuPoint = null;
+      render();
+      break;
     case 'copy-secret':
       if (await run(() => invoke('copy_secret', { id }))) {
         toast('📋 Copied for 30s');
@@ -8696,6 +8810,12 @@ function handleAppKeyDown(e: KeyboardEvent): void {
       render();
       return;
     }
+    if (state.secretMenuOpen) {
+      state.secretMenuOpen = null;
+      state.secretMenuPoint = null;
+      render();
+      return;
+    }
     if (state.epMenuOpen) { state.epMenuOpen = null; render(); return; }
     if (state.epOptsMenuOpen) { state.epOptsMenuOpen = null; render(); return; }
     // The detail slide-over only exists in the narrow layout; in the wide
@@ -9018,6 +9138,8 @@ async function boot() {
     state.addPalette = null;
     state.connMenuOpen = null;
     state.connMenuPoint = null;
+    state.secretMenuOpen = null;
+    state.secretMenuPoint = null;
     state.epMenuOpen = null;
     state.epOptsMenuOpen = null;
     render();

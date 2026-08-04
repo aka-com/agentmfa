@@ -238,6 +238,8 @@ export interface AppState {
   notificationSettings: NotificationSettings;
   launchAtLogin: boolean;
   loadStatus: Record<LoadKey, LoadStatus>;
+  /** Secret id → the value currently on screen. Held only for as long as the
+   * reveal lasts: unrevealing, changing tab or losing the window drops it. */
   reveal: Record<string, string>;
   epExpanded: Record<string, boolean>;
   epMenuOpen: string | null;
@@ -279,6 +281,10 @@ export interface AppState {
   menuOpen: boolean;
   connMenuOpen: string | null;
   connMenuPoint: ConnMenuPoint | null;
+  /** Secret whose right-click menu is open, anchored at the pointer that
+   * opened it. Reveal and unreveal live there and nowhere else. */
+  secretMenuOpen: string | null;
+  secretMenuPoint: ConnMenuPoint | null;
   /** The Add-a-tool palette: open when non-null, with its typed query and
    * the keyboard-selected result index. */
   addPalette: { query: string; index: number } | null;
@@ -397,6 +403,8 @@ function createInitialState(): AppState {
     menuOpen: false,
     connMenuOpen: null,
     connMenuPoint: null,
+    secretMenuOpen: null,
+    secretMenuPoint: null,
     addPalette: null,
     selectedConn: null,
     connDetailOpen: false,

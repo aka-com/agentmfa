@@ -621,11 +621,6 @@ struct ClosedBody {
 }
 
 #[derive(serde::Deserialize)]
-struct PrefixBody {
-    prefix: String,
-}
-
-#[derive(serde::Deserialize)]
 struct ValueBody {
     value: String,
 }
@@ -683,10 +678,10 @@ impl ManagementBackend for RemoteBackend {
         self.delete(&format!("/v1/manage/secrets/{id}")).await
     }
 
-    async fn reveal_secret_prefix(&self, id: Uuid) -> ManageResult<String> {
-        self.post_empty::<PrefixBody>(&format!("/v1/manage/secrets/{id}/reveal-prefix"))
+    async fn reveal_secret(&self, id: Uuid) -> ManageResult<SecretValue> {
+        self.post_empty::<ValueBody>(&format!("/v1/manage/secrets/{id}/reveal"))
             .await
-            .map(|body| body.prefix)
+            .map(|body| Zeroizing::new(body.value))
     }
 
     async fn secret_value_for_copy(&self, id: Uuid) -> ManageResult<SecretValue> {

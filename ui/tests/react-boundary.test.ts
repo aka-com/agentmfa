@@ -46,7 +46,7 @@ test('React owns pointer actions and native global listeners have cleanup', asyn
     );
   }
   assert.match(app, /className="app-event-root"[\s\S]*?onClick=\{handleActionClick\}/);
-  assert.match(app, /onContextMenu=\{handleConnectionContextMenu\}/);
+  assert.match(app, /onContextMenu=\{handleRowContextMenu\}/);
   assert.match(app, /onDragStart=\{handleConnectionDragStart\}/);
   assert.match(app, /function useExternalAppEvents\(\): void \{/);
   assert.match(app, /document\.removeEventListener\('keydown', handleAppKeyDown\)/);

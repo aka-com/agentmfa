@@ -878,20 +878,6 @@ impl Default for Settings {
     }
 }
 
-/// Compute the reveal prefix: the value's first `min(6, ⌊len/2⌋)` characters,
-/// at most half the value, so a short secret isn't mostly exposed.
-/// Returns the prefix with a trailing ellipsis when truncated.
-pub fn reveal_prefix(value: &str) -> String {
-    let len = value.chars().count();
-    let n = std::cmp::min(6, len / 2);
-    if n >= len {
-        return value.to_string();
-    }
-    let mut out: String = value.chars().take(n).collect();
-    out.push('…');
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -907,16 +893,6 @@ mod tests {
         .unwrap();
         assert!(!settings.menu_bar_hides_dock);
         assert!(!settings.confirm_ssh_host_keys);
-    }
-
-    #[test]
-    fn reveal_prefix_never_exposes_more_than_half() {
-        assert_eq!(reveal_prefix("ghp_9aXf2Qe7LmNoP3demoToken41c"), "ghp_9a…");
-        assert_eq!(reveal_prefix("abcd"), "ab…");
-        assert_eq!(reveal_prefix("abc"), "a…");
-        assert_eq!(reveal_prefix("ab"), "a…");
-        assert_eq!(reveal_prefix("a"), "…");
-        assert_eq!(reveal_prefix(""), "");
     }
 
     #[test]

@@ -694,7 +694,8 @@ export interface CommandMap {
     newValue?: string | null;
   }, void>;
   delete_secret: CommandSpec<{ id: string }, void>;
-  reveal_secret_prefix: CommandSpec<{ id: string }, string>;
+  /** The whole value, for a reveal the user asked for and confirmed. */
+  reveal_secret: CommandSpec<{ id: string }, string>;
   copy_secret: CommandSpec<{ id: string }, void>;
   add_connection: CommandSpec<{ input: ConnectionInput }, void>;
   edit_connection: CommandSpec<{

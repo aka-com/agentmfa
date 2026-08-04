@@ -30,8 +30,8 @@ use crate::onepassword::{
 use crate::paths::Paths;
 use crate::template::{is_valid_secret_name, Template};
 use crate::types::{
-    reveal_prefix, Connection, ConnectionConfig, ConnectionKind, SecretMeta, SecretSource,
-    SecretValue, Settings, SignerSpec,
+    Connection, ConnectionConfig, ConnectionKind, SecretMeta, SecretSource, SecretValue, Settings,
+    SignerSpec,
 };
 use crate::vault::{SecretVault, VaultAttrs};
 use crate::Result;
@@ -481,16 +481,9 @@ impl Store {
         Ok(meta)
     }
 
-    /// Core-side Keychain read returning only the short prefix
-    /// (`min(6, ⌊len/2⌋)` chars).
-    pub async fn reveal_secret_prefix(&self, id: &Uuid) -> Result<String> {
-        let value = self.secret_value(id).await?;
-        Ok(reveal_prefix(&value))
-    }
-
-    /// Fetch a secret's full value from the vault. Core-side callers only:
-    /// upstream credential injection and the clipboard-copy command. There
-    /// is deliberately no Tauri command that returns this to the webview.
+    /// Fetch a secret's full value from the vault. Callers are the ones that
+    /// carry the value out of the core: upstream credential injection, the
+    /// clipboard-copy command, and the confirmed on-screen reveal.
     pub async fn secret_value(&self, id: &Uuid) -> Result<SecretValue> {
         let meta = self.secret_by_id(id)?;
         match meta.source {
@@ -2272,17 +2265,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reveal_prefix_is_capped() {
+    async fn secret_value_reads_back_what_was_stored() {
         let (store, _, _dir) = store().await;
         let meta = store
             .add_secret("GITHUB_API_KEY", val("ghp_9aXf2Qe7LmNoP3demoToken41c"))
             .unwrap();
         assert_eq!(
-            store.reveal_secret_prefix(&meta.id).await.unwrap(),
-            "ghp_9a…"
+            store.secret_value(&meta.id).await.unwrap().as_str(),
+            "ghp_9aXf2Qe7LmNoP3demoToken41c"
         );
-        let short = store.add_secret("SHORT", val("abcd")).unwrap();
-        assert_eq!(store.reveal_secret_prefix(&short.id).await.unwrap(), "ab…");
     }
 
     #[tokio::test]

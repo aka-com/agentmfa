@@ -54,6 +54,7 @@ const MOCK_ACTIVITY_META = {
   allowedOnce: { icon: 'circleCheck', tone: 'success' },
   paired: { icon: 'userRoundCheck', tone: 'success' },
   secretAdded: { icon: 'fileKey', tone: 'neutral' },
+  secretRevealed: { icon: 'eye', tone: 'neutral' },
   secretUpdated: { icon: 'pencil', tone: 'neutral' },
   secretDeleted: { icon: 'trash', tone: 'neutral' },
   connectionAdded: { icon: 'plug', tone: 'neutral' },
@@ -695,11 +696,6 @@ function connTarget(c: MockConnection): string {
   if (c.type === 'ssh') return c.port && c.port !== 22 ? `${c.user}@${c.host}:${c.port}` : `${c.user}@${c.host}`;
   return c.url ?? '';
 }
-function revealPrefix(value: string): string {
-  const n = Math.min(6, Math.floor(value.length / 2));
-  return n < value.length ? value.slice(0, n) + '…' : value;
-}
-
 /* --------------------------- mock MCP sign-in ----------------------------- */
 // A timer-driven walk through every phase of the broker's OAuth state
 // machine so the standalone dev page exercises the whole auth UI. Names
@@ -1101,9 +1097,11 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (users.length) throw `in use by ${users.join(', ')}`;
       db.secrets = db.secrets.filter((x) => x.id !== args.id); audit('secretDeleted', `Secret deleted: ${s.name}`); return;
     }
-    case 'reveal_secret_prefix': {
+    case 'reveal_secret': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw 'no such secret';
-      return revealPrefix(s._value);
+      const entry = audit('secretRevealed', `Secret revealed: ${s.name}`);
+      emit('aka://activity-appended', entry);
+      return s._value;
     }
     case 'copy_secret': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw 'no such secret';

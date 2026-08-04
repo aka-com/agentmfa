@@ -48,15 +48,14 @@ test('a secret in use cannot be deleted out from under a connection', async () =
   assert.deepEqual(error.connections, [connectionNames.http]);
 });
 
-test('a secret can be renamed, rotated, previewed, and copied', async () => {
+test('a secret can be renamed, rotated, revealed, and copied', async () => {
   await broker.addSecret('SPARE_TOKEN', 'first-value');
   const id = await broker.secretId('SPARE_TOKEN');
 
-  // A prefix, not the value: enough to recognize which key is stored.
-  const prefix = await broker.manage<{ prefix: string }>('POST', `/secrets/${id}/reveal-prefix`);
-  const shown = prefix.prefix.replace(/…$/, '');
-  assert.ok(shown.length > 0 && 'first-value'.startsWith(shown), `${prefix.prefix} previews the value`);
-  assert.notEqual(prefix.prefix, 'first-value', 'the whole value is not revealed');
+  // Reveal hands back the whole value: the client shows it on screen after
+  // the user has confirmed that.
+  const revealed = await broker.manage<{ value: string }>('POST', `/secrets/${id}/reveal`);
+  assert.equal(revealed.value, 'first-value');
 
   await broker.manage('PATCH', `/secrets/${id}`, { new_value: 'second-value' });
   const copied = await broker.manage<{ value: string }>('POST', `/secrets/${id}/copy-value`);

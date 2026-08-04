@@ -183,7 +183,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/secrets", get(list_secrets).post(add_secret))
         .route("/secrets/{id}", patch(edit_secret).delete(delete_secret))
-        .route("/secrets/{id}/reveal-prefix", post(reveal_secret_prefix))
+        .route("/secrets/{id}/reveal", post(reveal_secret))
         .route("/secrets/{id}/copy-value", post(secret_value_for_copy))
         .route(
             "/integrations",
@@ -661,7 +661,10 @@ async fn delete_secret(
     respond(state.manage.delete_secret(id).await)
 }
 
-async fn reveal_secret_prefix(
+/// Release a value for the client to show on screen, after the user has
+/// asked for that secret by name and confirmed it. The core audits the
+/// reveal as it releases the value.
+async fn reveal_secret(
     State(state): State<AppState>,
     _authed: ManageAuthed,
     Path(id): Path<Uuid>,
@@ -669,13 +672,13 @@ async fn reveal_secret_prefix(
     respond(
         state
             .manage
-            .reveal_secret_prefix(id)
+            .reveal_secret(id)
             .await
-            .map(|prefix| json!({ "prefix": prefix })),
+            .map(|value| json!({ "value": value.to_string() })),
     )
 }
 
-/// The one route that returns a stored secret's full value: the remote
+/// The other route that returns a stored secret's full value: the remote
 /// shell's clipboard copy (the value goes shell-side to the clipboard and
 /// never enters the webview, mirroring the local flow). Gated by the same
 /// core read-confirmation path as a local copy — and audited *here*, at

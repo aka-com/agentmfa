@@ -1,7 +1,8 @@
 //! The Tauri command surface locked to the minimal set the UI needs:
 //!
-//! - there is **no** command that returns a stored secret value; reveal
-//!   returns only the short prefix, copy writes core-side to the clipboard;
+//! - one command returns a stored secret value — the reveal the user asks
+//!   for per credential and confirms — and copy still writes core-side to
+//!   the clipboard without the value passing through the webview;
 //! - destructive actions that need an ordinary application confirmation are
 //!   confirmed in the webview before reaching this layer;
 //!
@@ -690,15 +691,19 @@ pub async fn delete_secret(state: State<'_, AppState>, id: String) -> CmdResult<
         .map_err(|e| e.to_string())
 }
 
-/// Audited, core-side Keychain read returning only the short prefix.
+/// Audited, core-side vault read returning the whole value for the window to
+/// show. The webview only asks after the user has picked the credential and
+/// confirmed the reveal, and it drops the value again as soon as the reveal
+/// ends (unreveal, tab change, window blur).
 #[tauri::command]
-pub async fn reveal_secret_prefix(state: State<'_, AppState>, id: String) -> CmdResult<String> {
+pub async fn reveal_secret(state: State<'_, AppState>, id: String) -> CmdResult<String> {
     let id = parse_id(&id)?;
     state
         .brokers
         .backend()
-        .reveal_secret_prefix(id)
+        .reveal_secret(id)
         .await
+        .map(|value| value.to_string())
         .map_err(|e| e.to_string())
 }
 
@@ -2153,7 +2158,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         add_secret,
         edit_secret,
         delete_secret,
-        reveal_secret_prefix,
+        reveal_secret,
         copy_secret,
         add_connection,
         edit_connection,

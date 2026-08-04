@@ -1412,7 +1412,7 @@ pub trait ManagementBackend: Send + Sync {
         new_value: Option<SecretValue>,
     ) -> ManageResult<()>;
     async fn delete_secret(&self, id: Uuid) -> ManageResult<()>;
-    async fn reveal_secret_prefix(&self, id: Uuid) -> ManageResult<String>;
+    async fn reveal_secret(&self, id: Uuid) -> ManageResult<SecretValue>;
     async fn secret_value_for_copy(&self, id: Uuid) -> ManageResult<SecretValue>;
     async fn note_secret_copied(&self, id: Uuid) -> ManageResult<()>;
 
@@ -1687,8 +1687,8 @@ impl ManagementBackend for LocalBackend {
             .await
     }
 
-    async fn reveal_secret_prefix(&self, id: Uuid) -> ManageResult<String> {
-        Ok(self.broker.ui_reveal_secret_prefix(&id).await?)
+    async fn reveal_secret(&self, id: Uuid) -> ManageResult<SecretValue> {
+        Ok(self.broker.ui_reveal_secret_value(&id).await?)
     }
 
     async fn secret_value_for_copy(&self, id: Uuid) -> ManageResult<SecretValue> {
