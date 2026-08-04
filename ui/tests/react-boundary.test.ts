@@ -339,6 +339,25 @@ test('selected master rows have no left accent border', async () => {
   assert.doesNotMatch(selected, /border-left|inset\s+\d+px\s+0/);
 });
 
+test('the tray detail drawer stays inside the content below its tabs', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+  const pane = styles.match(/\.dropdown-content-container\{([^}]*)\}/)?.[1];
+
+  assert.match(
+    app,
+    /<div className="dropdown-content-container">[\s\S]*?<div className="content dd-content"><TabContent \/><\/div>/,
+  );
+  assert.ok(pane, 'the tray content container is present');
+  assert.match(pane, /contain: paint/);
+  assert.match(pane, /border-top: 1px solid var\(--line\)/);
+  assert.match(styles, /\.dropdown-content-container \.conn-detail-col \{ top: 0; bottom: 0; \}/);
+  assert.match(
+    styles,
+    /\.dropdown-content-container \.catalog\.detail-open \.conn-detail-backdrop \{[\s\S]*?background: rgba\(15,17,30,\.19\)/,
+  );
+});
+
 test('the connection menu escapes the clipping detail pane through a portal', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
@@ -524,6 +543,20 @@ test('connection-string credentials are masked with asterisks', async () => {
   assert.ok(masker, 'connection-string masker is present');
   assert.match(masker, /\$1\*{6}/);
   assert.doesNotMatch(masker, /•/);
+});
+
+test('secret copy controls keep stable pixel-aligned positions', async () => {
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+  const copyIcon = styles.match(/\.ghost-copy svg\{([^}]*)\}/)?.[1];
+
+  assert.match(styles, /\.val-slot code\{ transform: translateY\(-2px\)/);
+  assert.match(styles, /\.sec-table \.ghost-copy\{ top: -1\.5px; \}/);
+  assert.match(styles, /\.dropdown-surface \.sec-table \.ghost-copy\{ top: 2px; \}/);
+  assert.ok(copyIcon, 'copy icon styles are present');
+  assert.match(copyIcon, /display: block/);
+  assert.match(copyIcon, /flex: 0 0 12px/);
+  assert.match(copyIcon, /transform: none/);
+  assert.match(copyIcon, /transition: none/);
 });
 
 test('endpoint credentials use the native hygienic copy command', async () => {

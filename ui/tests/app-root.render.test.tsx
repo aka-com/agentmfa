@@ -205,6 +205,9 @@ test('the 1Password sheet links a field through all three steps', { timeout: 8_0
   await new Promise((resolve) => nativeSetTimeout(resolve, 100));
   assert.equal(document.querySelector('.onepassword-sheet'), null);
   assert.ok(document.body.textContent?.includes(alias.value));
+  const credentialCount = document.querySelector<HTMLElement>('.secrets-statusbar .sb-count');
+  assert.equal(credentialCount?.textContent?.trim(), '8 credentials');
+  assert.equal(credentialCount?.textContent?.includes('1Password'), false);
   testingLibrary.fireEvent.click(
     document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="connections"]')!,
   );

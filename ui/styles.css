@@ -392,7 +392,7 @@
   }
   .load-failure > div{ display: flex; flex-direction: column; min-width: 0; }
   .load-failure span{ color: var(--ink-2); overflow-wrap: anywhere; }
-  .dropdown-surface > .load-failure{ margin: 8px 10px 0; }
+  .dropdown-content-container > .load-failure{ margin: 8px 10px 0; }
   /* ---- settings popover (gear, sidebar bottom) ------------------------- */
 /* The sidebar footer pairs the appearance toggle with the settings gear. */
 .dw-settings{ position: relative; display: flex; align-items: center; gap: 2px; }
@@ -437,6 +437,15 @@
   font-size: 0.65625rem; font-weight: 700; line-height: 1;
 }
   .seg.in-form{ margin: 0; }
+  /* Everything below the tray's tab switcher is one bounded pane. Besides
+     drawing the tab/content divider, paint containment makes this the fixed-
+     position containing block for narrow tool-detail drawers, so their panel
+     and scrim cannot cover the tray header or tab bar. */
+.dropdown-content-container{
+  position: relative; flex: 1; min-height: 0; contain: paint;
+  display: flex; flex-direction: column; overflow: hidden;
+  border-top: 1px solid var(--line);
+}
   /* ---- content ---------------------------------------------------------- */
 .content{
   /* Always lay out the scrollbar track (overflow-y: scroll, not auto) so the
@@ -865,20 +874,25 @@
   /* The value slot is the positioning context: the masked value is the base
    layer, and the copy button / "Copied" status overlay it centered. */
 .val-slot{ position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: 92px; }
-  .val-slot code{ transform: translateY(-3px); transition: opacity .14s ease; }
+  .val-slot code{ transform: translateY(-2px); transition: opacity .14s ease; }
   /* Dim the placeholder behind the centered overlay on hover or after a copy. */
 .val-wrap:hover .val-slot code, .val-slot.is-copied code{ opacity: .22; }
   .val-overlay{ position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
   .ghost-copy{
   pointer-events: auto;
-  display: inline-flex; align-items: center; gap: 4px;
+  position: relative; display: inline-flex; align-items: center; gap: 4px;
   opacity: 0; transition: opacity .14s ease;
   border: 1px solid var(--line-strong); background: var(--btn-bg);
   color: var(--ink-3); border-radius: 6px; padding: 2px 7px;
   font-size: 0.75rem; line-height: 1; cursor: pointer;
   box-shadow: var(--shadow-xs);
 }
-  .ghost-copy svg{ width: 12px; height: 12px; }
+  /* Block layout and an explicit flex basis keep WebKit from snapping the
+     icon from its inline baseline after the button's opacity fade finishes. */
+  .ghost-copy svg{
+    display: block; flex: 0 0 12px; width: 12px; height: 12px;
+    transform: none; transition: none;
+  }
   .val-wrap:hover .ghost-copy, .ghost-copy:focus-visible{ opacity: 1; }
   .copied-badge{
   display: inline-flex; align-items: center; gap: 4px;
@@ -888,9 +902,9 @@
   @keyframes copied-pop{ from { opacity: 0; transform: none; } to { opacity: 1; transform: translateY(-2px); } }
   .icon-btn{ border: none; background: transparent; cursor: pointer; color: var(--muted-2); padding: 4px; border-radius: 5px; line-height: 0; }
   .icon-btn:hover{ background: var(--hover-2); color: var(--ink-2); }
-  /* The copy button is centered over the masked value, whose slot sits ~3.5px
-   below the row's icons; lift it so it lines up with the edit/delete icons. */
-.sec-table .ghost-copy{ transform: translateY(-3.5px); }
+  /* Keep positioning out of `transform`: opacity compositing a transformed
+     button made its icon snap when the reveal transition completed. */
+.sec-table .ghost-copy{ top: -1.5px; }
   /* A revealed value gets its own full-width line under the row it belongs
      to, starting at the credential name's left edge — the columns are far too
      narrow for a token, and wrapping one inside the value column would read
@@ -905,7 +919,7 @@
   /* One click takes the whole value, as on the issued-endpoint field. */
   overflow-wrap: anywhere; -webkit-user-select: all; user-select: all;
 }
-  .dropdown-surface .sec-table .ghost-copy{ transform: none; }
+  .dropdown-surface .sec-table .ghost-copy{ top: 2px; }
   .rowdel{ text-align: right; white-space: nowrap; }
   .used-by-cell{ font-size: 0.8125rem; }
   .used-by-links{ display: flex; align-items: flex-start; flex-direction: column; gap: 2px; }
@@ -1712,6 +1726,12 @@
     display: block; position: fixed; inset: 0; z-index: 6;
     border: 0; padding: 0; background: rgba(15,17,30,.38); cursor: default;
   }
+  /* The tray content pane establishes the fixed containing block above.
+     Keep its drawer inside that pane and use half the general scrim strength. */
+  .dropdown-content-container .conn-detail-col { top: 0; bottom: 0; }
+  .dropdown-content-container .catalog.detail-open .conn-detail-backdrop {
+    inset: 0; background: rgba(15,17,30,.19);
+  }
   /* In the main window the slide-over and its scrim stop at the title bar:
      the app chrome stays visible above the overlay, which covers only the
      content below it. (The tray dropdown has no title bar — there the pair
@@ -1785,6 +1805,23 @@
   background: var(--card-bg); box-shadow: var(--shadow-sm);
 }
 .secrets-card .sec-table { margin: 0; }
+.dropdown-surface .secrets-card .sec-table { table-layout: fixed; }
+.dropdown-surface .secrets-card .sec-table th:nth-child(1) { width: 50%; }
+.dropdown-surface .secrets-card .sec-table th:nth-child(2) { width: 22%; }
+.dropdown-surface .secrets-card .sec-table th:nth-child(3) { width: 14%; }
+.dropdown-surface .secrets-card .sec-table th:nth-child(4) { width: 14%; }
+.dropdown-surface .secrets-card .sec-table td:first-child,
+.dropdown-surface .secrets-card .used-by-cell,
+.dropdown-surface .secrets-card .val { overflow: hidden; }
+.dropdown-surface .secrets-card .s-name,
+.dropdown-surface .secrets-card .s-source-label {
+  display: block; min-width: 0; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dropdown-surface .secrets-card .s-source-label { flex: 1; }
+.dropdown-surface .secrets-card .used-by-link { max-width: 100%; }
+.dropdown-surface .secrets-card .val-wrap { display: flex; max-width: 100%; }
+.dropdown-surface .secrets-card .val-slot { min-width: 0; width: 100%; overflow: hidden; }
 .secrets-card .sec-table th:first-child,
 .secrets-card .sec-table td:first-child { padding-left: 14px; }
 .secrets-card .sec-table th:last-child,
@@ -1810,7 +1847,7 @@
 .secrets-statusbar {
   position: relative; flex: 0 0 auto;
   display: flex; align-items: center; gap: 10px;
-  height: 34px; padding: 0 14px;
+  height: 34px; padding: 0 14px 1px;
   border-top: 1px solid var(--line);
   background: var(--wash); color: var(--muted); font-size: 0.75rem;
 }

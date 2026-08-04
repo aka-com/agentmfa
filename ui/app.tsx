@@ -1130,9 +1130,11 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
           row is the target, so the menu opens wherever it is pressed. */}
       <tr className={revealed === undefined ? undefined : 'is-revealed'}
         data-secret-row={s.id}>
-        <td><div className="s-name">{s.name}</div>
+        <td><div className="s-name" title={s.name}>{s.name}</div>
           {s.source?.kind === 'one_password'
-            ? <div className="s-source"><Icon markup={ICONS.onepassword} />{s.source.integration_label}</div>
+            ? <div className="s-source"><Icon markup={ICONS.onepassword} />
+                <span className="s-source-label">{s.source.integration_label}</span>
+              </div>
             : null}</td>
         <td className="used-by-cell">{usedBy}</td>
         <td className="val"><span className="val-wrap">
@@ -2899,14 +2901,12 @@ function VaultRow({ integration }: { integration: OnePasswordIntegration }): Rea
 function SecretsStatusBar(): ReactNode {
   const available = supportsOnePassword(state.broker);
   const integrations = state.onepasswordIntegrations;
-  const linked = state.secrets.filter((secret) => secret.source?.kind === 'one_password').length;
   const total = state.secrets.length;
   const open = state.vaultsPanelOpen && integrations.length > 0;
   return (
     <footer className="secrets-statusbar">
       <span className="sb-count">
         {total} {total === 1 ? 'credential' : 'credentials'}
-        {linked ? ` · ${linked} linked from 1Password` : ''}
       </span>
       <span className="sb-spacer"></span>
       {integrations.length
@@ -3751,10 +3751,12 @@ function DropdownWindow(): ReactNode {
             </button>
           ))}
         </div>
-        {state.tab === 'start' ? null : <GlobalSections />}
-        <LoadFailureBand />
-        <div className="content dd-content"><TabContent /></div>
-        {state.tab === 'secrets' ? <SecretsStatusBar /> : null}
+        <div className="dropdown-content-container">
+          {state.tab === 'start' ? null : <GlobalSections />}
+          <LoadFailureBand />
+          <div className="content dd-content"><TabContent /></div>
+          {state.tab === 'secrets' ? <SecretsStatusBar /> : null}
+        </div>
       </div>
       <><AddToolPalette /><Sheets /><ConfirmSheet /></>
     </>
