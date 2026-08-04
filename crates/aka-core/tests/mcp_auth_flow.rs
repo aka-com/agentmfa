@@ -724,6 +724,7 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
     // A curated subset also governs the management-plane status helper.
     broker
         .ui_set_allowed_tools(&connection.id, Some(vec!["search".into()]))
+        .await
         .unwrap();
     let restricted = broker
         .ui_mcp_check(
@@ -919,6 +920,7 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
     broker
         .store
         .set_connection_oauth(&connection.id, raw, Some(chrono::Utc::now()))
+        .await
         .expect("age the token");
     let report = broker
         .ui_mcp_check(&connection.id, McpCheckOptions::default())
@@ -943,6 +945,7 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
     broker
         .store
         .set_connection_oauth(&connection.id, raw, Some(chrono::Utc::now()))
+        .await
         .expect("age the token");
     let report = broker
         .ui_mcp_check(&connection.id, McpCheckOptions::default())

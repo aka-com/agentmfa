@@ -51,7 +51,7 @@ impl BrokerEvents for TestEvents {
         *self.last_prompt.lock().unwrap() = Some(pending.clone());
         if let (Some(decision), Some(broker)) = (self.approval, self.broker.lock().unwrap().clone())
         {
-            broker.ui_respond_approval(&pending.id, decision).unwrap();
+            futures::executor::block_on(broker.ui_respond_approval(&pending.id, decision)).unwrap();
         }
         aka_core::events::ApprovalHandling::Taken
     }
@@ -101,44 +101,51 @@ async fn harness_answering(
 }
 
 fn add_pg_connection(broker: &Broker, upstream_port: u16) {
-    broker
-        .store
-        .add_secret("PG_PASSWORD", Zeroizing::new(REAL_PG_PASSWORD.into()))
-        .unwrap();
-    let secret = broker.store.secret_by_name("PG_PASSWORD").unwrap();
-    broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "prod-db".into(),
-            config: ConnectionConfig::Pg {
-                host: "127.0.0.1".into(),
-                port: upstream_port,
-                dbname: "app_production".into(),
-                user: "app".into(),
-                sslmode: PgSslMode::Disable,
-                trusted_ca_bundle_path: None,
-            },
-            secrets: vec![secret.id],
-        })
-        .unwrap();
+    futures::executor::block_on(async {
+        broker
+            .store
+            .add_secret("PG_PASSWORD", Zeroizing::new(REAL_PG_PASSWORD.into()))
+            .await
+            .unwrap();
+        let secret = broker.store.secret_by_name("PG_PASSWORD").unwrap();
+        broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: "prod-db".into(),
+                config: ConnectionConfig::Pg {
+                    host: "127.0.0.1".into(),
+                    port: upstream_port,
+                    dbname: "app_production".into(),
+                    user: "app".into(),
+                    sslmode: PgSslMode::Disable,
+                    trusted_ca_bundle_path: None,
+                },
+                secrets: vec![secret.id],
+            })
+            .await
+            .unwrap();
+    });
 }
 
 fn add_passwordless_pg_connection(broker: &Broker, upstream_port: u16) {
-    broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "prod-db".into(),
-            config: ConnectionConfig::Pg {
-                host: "127.0.0.1".into(),
-                port: upstream_port,
-                dbname: "app_production".into(),
-                user: "app".into(),
-                sslmode: PgSslMode::Disable,
-                trusted_ca_bundle_path: None,
-            },
-            secrets: vec![],
-        })
-        .unwrap();
+    futures::executor::block_on(async {
+        broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: "prod-db".into(),
+                config: ConnectionConfig::Pg {
+                    host: "127.0.0.1".into(),
+                    port: upstream_port,
+                    dbname: "app_production".into(),
+                    user: "app".into(),
+                    sslmode: PgSslMode::Disable,
+                    trusted_ca_bundle_path: None,
+                },
+                secrets: vec![],
+            })
+            .await
+            .unwrap();
+    });
 }
 
 async fn uds_request(
@@ -873,7 +880,11 @@ async fn revoking_an_endpoint_closes_sessions_and_refuses_new_ones() {
     assert_eq!(h.broker.sessions().len(), 1);
 
     // Revoking the endpoint tears down its listener and closes live sessions.
-    assert!(h.broker.ui_revoke_endpoint(&info.endpoint_id).unwrap());
+    assert!(h
+        .broker
+        .ui_revoke_endpoint(&info.endpoint_id)
+        .await
+        .unwrap());
     let _ = tokio::time::timeout(Duration::from_secs(3), conn_task)
         .await
         .expect("revoke must drop the live session");
@@ -909,7 +920,7 @@ async fn disabling_access_refuses_the_endpoint_until_reenabled() {
     // … is refused at the connect-time re-check while disabled (the
     // endpoint itself stays issued) …
     let conn = h.broker.store.connection_by_name("prod-db").unwrap();
-    h.broker.ui_set_tool_access(&conn.id, false).unwrap();
+    h.broker.ui_set_tool_access(&conn.id, false).await.unwrap();
     assert_eq!(h.broker.endpoints().len(), 1);
     let _ = tokio::time::timeout(Duration::from_secs(3), connection)
         .await
@@ -921,7 +932,7 @@ async fn disabling_access_refuses_the_endpoint_until_reenabled() {
         .is_err());
 
     // … and serves again once re-enabled, with the same pasted DSN.
-    h.broker.ui_set_tool_access(&conn.id, true).unwrap();
+    h.broker.ui_set_tool_access(&conn.id, true).await.unwrap();
     assert!(tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
         .await
         .is_ok());
@@ -941,6 +952,7 @@ async fn a_confirmed_connection_asks_before_the_session_opens() {
     let conn = h.broker.store.connection_by_name("prod-db").unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .await
         .unwrap();
 
     let token = h.pair().await;
@@ -982,6 +994,7 @@ async fn the_session_prompt_says_it_grants_full_sql_access() {
     let conn = h.broker.store.connection_by_name("prod-db").unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .await
         .unwrap();
 
     let token = h.pair().await;
@@ -1034,6 +1047,7 @@ async fn a_refused_session_never_reaches_the_database() {
     let conn = h.broker.store.connection_by_name("prod-db").unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .await
         .unwrap();
 
     let token = h.pair().await;
@@ -1087,6 +1101,7 @@ async fn an_unanswered_pg_prompt_times_out_without_dialing_upstream() {
     let conn = h.broker.store.connection_by_name("prod-db").unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .await
         .unwrap();
 
     let token = h.pair().await;
@@ -1121,6 +1136,7 @@ async fn a_confirmed_endpoint_asks_on_every_new_session() {
     let conn = h.broker.store.connection_by_name("prod-db").unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .await
         .unwrap();
 
     let error = match tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls).await {
@@ -1458,6 +1474,7 @@ async fn draft_test_signs_in_with_a_typed_credential_and_defers_stored_ones() {
     h.broker
         .store
         .add_secret("STORED_PG", Zeroizing::new(REAL_PG_PASSWORD.into()))
+        .await
         .unwrap();
     let stored = h.broker.store.secret_by_name("STORED_PG").unwrap();
     let report = h

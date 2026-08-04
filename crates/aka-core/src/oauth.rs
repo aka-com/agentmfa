@@ -18,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::store::Store;
+use crate::repository::CatalogRepository;
 use crate::types::{Connection, ConnectionConfig, OAuthSpec, SecretValue};
 
 /// How long the loopback listener waits for the browser to come back.
@@ -591,7 +591,7 @@ pub(crate) fn oauth_token_secret_id(connection: &Connection) -> Result<uuid::Uui
 /// executions are pre-authorized by their wiring, UI-initiated tests keep
 /// their usual confirmation behavior.
 pub async fn fresh_bearer(
-    store: &Arc<Store>,
+    store: &Arc<dyn CatalogRepository>,
     http: &reqwest::Client,
     connection: &Connection,
 ) -> Result<SecretValue, RefreshFailure> {
@@ -637,7 +637,10 @@ pub async fn fresh_bearer(
                     refresh_token: None,
                     ..tokens.clone()
                 };
-                if let Err(e) = store.replace_secret_value(&secret_id, retired.to_secret_value()) {
+                if let Err(e) = store
+                    .replace_secret_value(&secret_id, retired.to_secret_value())
+                    .await
+                {
                     tracing::warn!(
                         "could not retire the rejected refresh token for {}: {e}",
                         connection.name
@@ -656,6 +659,7 @@ pub async fn fresh_bearer(
     let access = refreshed.access_token.clone();
     store
         .replace_secret_value(&secret_id, refreshed.to_secret_value())
+        .await
         .map_err(|e| {
             RefreshFailure::Transient(format!("could not persist the refreshed token: {e}"))
         })?;

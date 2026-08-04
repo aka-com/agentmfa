@@ -4381,7 +4381,7 @@ struct ServeArgs {
 /// Give a never-managed headless broker one bounded, owner-only credential.
 /// This is bootstrap, not an unauthenticated API: possession of the file is
 /// what lets the host operator make the first authenticated online rotation.
-fn ensure_first_start_management_token(broker: &Broker) -> Result<Option<PathBuf>, String> {
+async fn ensure_first_start_management_token(broker: &Broker) -> Result<Option<PathBuf>, String> {
     if broker.identity.manage_token_issued() {
         return Ok(None);
     }
@@ -4390,10 +4390,11 @@ fn ensure_first_start_management_token(broker: &Broker) -> Result<Option<PathBuf
         broker
             .identity
             .issue_manage_token_with_ttl(Some(ttl))
+            .await
             .map_err(|error| format!("could not issue first-start management token: {error}"))?,
     );
     if let Err(error) = broker.paths.write_manage_bootstrap_token(&token) {
-        let rollback = broker.identity.revoke_manage_token();
+        let rollback = broker.identity.revoke_manage_token().await;
         return Err(match rollback {
             Ok(_) => format!("could not write first-start management token: {error}"),
             Err(rollback) => format!(
@@ -4465,10 +4466,11 @@ fn cmd_serve(args: ServeArgs) {
         Ok(broker) => broker,
         Err(e) => fail("could not start the broker", &e),
     };
-    let first_start_manage_token = match ensure_first_start_management_token(&broker) {
-        Ok(path) => path,
-        Err(error) => die(error),
-    };
+    let first_start_manage_token =
+        match runtime.block_on(ensure_first_start_management_token(&broker)) {
+            Ok(path) => path,
+            Err(error) => die(error),
+        };
     let options = daemon::ServeOptions {
         listen,
         public_url: public_url.clone(),
@@ -4895,7 +4897,8 @@ mod tests {
             ))
             .unwrap();
 
-        let path = ensure_first_start_management_token(&broker)
+        let path = runtime
+            .block_on(ensure_first_start_management_token(&broker))
             .unwrap()
             .expect("a new broker needs a bootstrap credential");
         let token = std::fs::read_to_string(&path).unwrap();
@@ -4906,7 +4909,8 @@ mod tests {
         );
         assert!(broker.identity.manage_token_expires_at().is_some());
         assert!(
-            ensure_first_start_management_token(&broker)
+            runtime
+                .block_on(ensure_first_start_management_token(&broker))
                 .unwrap()
                 .is_none(),
             "restart must not overwrite the only available bootstrap token"

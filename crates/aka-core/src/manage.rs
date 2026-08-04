@@ -1720,6 +1720,30 @@ impl LocalBackend {
         })?
         .map_err(ManageError::from)
     }
+
+    /// Async counterpart for durable mutations. The future is created and
+    /// polled on the blocking worker so local confirmation callbacks can keep
+    /// their synchronous UI contract; a hosted backend bypasses this adapter
+    /// and awaits its repository normally.
+    async fn blocking_async<T, F, Fut>(&self, call: F) -> ManageResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<Broker>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = crate::Result<T>> + Send + 'static,
+    {
+        let broker = self.broker.clone();
+        let context = crate::audit::current_decision_context();
+        tokio::task::spawn_blocking(move || {
+            crate::audit::with_blocking_decision_context(context, || {
+                futures::executor::block_on(call(broker))
+            })
+        })
+        .await
+        .map_err(|join| ManageError::Internal {
+            message: format!("management call stopped: {join}"),
+        })?
+        .map_err(ManageError::from)
+    }
 }
 
 #[async_trait]
@@ -1739,12 +1763,14 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn add_credential(&self, body: SecretAddBody) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_add_credential(body.into_spec()).map(|_| ()))
-            .await
+        self.blocking_async(move |broker| async move {
+            broker.ui_add_credential(body.into_spec()).await.map(|_| ())
+        })
+        .await
     }
 
     async fn edit_secret(&self, id: Uuid, body: SecretEditBody) -> ManageResult<()> {
-        self.blocking(move |broker| {
+        self.blocking_async(move |broker| async move {
             let value = body
                 .new_value
                 .filter(|value| !value.is_empty())
@@ -1758,14 +1784,17 @@ impl ManagementBackend for LocalBackend {
                     body.new_username,
                     body.new_totp,
                 )
+                .await
                 .map(|_| ())
         })
         .await
     }
 
     async fn delete_secret(&self, id: Uuid) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_delete_secret(&id).map(|_| ()))
-            .await
+        self.blocking_async(
+            move |broker| async move { broker.ui_delete_secret(&id).await.map(|_| ()) },
+        )
+        .await
     }
 
     async fn reveal_secret(&self, id: Uuid) -> ManageResult<SecretValue> {
@@ -1816,9 +1845,10 @@ impl ManagementBackend for LocalBackend {
             .await
             .map_err(ManageError::from)?;
         let result = self
-            .blocking(move |broker| {
+            .blocking_async(move |broker| async move {
                 broker
                     .ui_add_onepassword_integration(id, &label, auth, token)
+                    .await
                     .map(|integration| integration.dto())
             })
             .await;
@@ -1838,17 +1868,23 @@ impl ManagementBackend for LocalBackend {
             .validate_onepassword_replacement_token(&id, token.as_str())
             .await
             .map_err(ManageError::from)?;
-        self.blocking(move |broker| {
+        self.blocking_async(move |broker| async move {
             broker
                 .ui_replace_onepassword_token(&id, token)
+                .await
                 .map(|integration| integration.dto())
         })
         .await
     }
 
     async fn delete_onepassword_integration(&self, id: Uuid) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_delete_onepassword_integration(&id).map(|_| ()))
-            .await
+        self.blocking_async(move |broker| async move {
+            broker
+                .ui_delete_onepassword_integration(&id)
+                .await
+                .map(|_| ())
+        })
+        .await
     }
 
     async fn onepassword_health(&self, id: Uuid) -> ManageResult<OnePasswordHealthDto> {
@@ -1884,8 +1920,8 @@ impl ManagementBackend for LocalBackend {
         name: String,
         reference: crate::onepassword::OnePasswordSecretRef,
     ) -> ManageResult<SecretDto> {
-        self.blocking(move |broker| {
-            let meta = broker.ui_add_onepassword_secret(&name, reference)?;
+        self.blocking_async(move |broker| async move {
+            let meta = broker.ui_add_onepassword_secret(&name, reference).await?;
             Ok(secret_dto(&broker, &meta))
         })
         .await
@@ -1906,7 +1942,9 @@ impl ManagementBackend for LocalBackend {
             .validate_ssh_connection_credential(&spec, None)
             .await?;
         let id = self
-            .blocking(move |broker| broker.ui_add_connection(spec).map(|conn| conn.id))
+            .blocking_async(move |broker| async move {
+                broker.ui_add_connection(spec).await.map(|conn| conn.id)
+            })
             .await?;
         self.broker.auto_issue_api_endpoint(&id).await;
         Ok(())
@@ -1922,9 +1960,10 @@ impl ManagementBackend for LocalBackend {
             .validate_ssh_connection_credential(&spec, Some(&value))
             .await?;
         let id = self
-            .blocking(move |broker| {
+            .blocking_async(move |broker| async move {
                 broker
                     .ui_add_connection_with_secret(&secret_name, value, spec)
+                    .await
                     .map(|conn| conn.id)
             })
             .await?;
@@ -1947,9 +1986,10 @@ impl ManagementBackend for LocalBackend {
                 .validate_ssh_connection_credential(&spec, None)
                 .await?;
         }
-        self.blocking(move |broker| {
+        self.blocking_async(move |broker| async move {
             broker
                 .ui_update_connection_if_current(&id, &expected_updated_at, spec)
+                .await
                 .map(|_| ())
         })
         .await
@@ -1961,9 +2001,10 @@ impl ManagementBackend for LocalBackend {
         expected_updated_at: String,
         name: String,
     ) -> ManageResult<()> {
-        self.blocking(move |broker| {
+        self.blocking_async(move |broker| async move {
             broker
                 .ui_rename_connection_if_current(&id, &expected_updated_at, name)
+                .await
                 .map(|_| ())
         })
         .await
@@ -1985,22 +2026,27 @@ impl ManagementBackend for LocalBackend {
                 .validate_ssh_connection_credential(&spec, None)
                 .await?;
         }
-        self.blocking(move |broker| {
+        self.blocking_async(move |broker| async move {
             broker
                 .ui_update_connection_if_current(&id, &expected_updated_at, spec)
+                .await
                 .map(|_| ())
         })
         .await
     }
 
     async fn delete_connection(&self, id: Uuid) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_delete_connection(&id).map(|_| ()))
-            .await
+        self.blocking_async(move |broker| async move {
+            broker.ui_delete_connection(&id).await.map(|_| ())
+        })
+        .await
     }
 
     async fn reorder_connections(&self, ordered_ids: Vec<Uuid>) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_reorder_connections(&ordered_ids))
-            .await
+        self.blocking_async(move |broker| async move {
+            broker.ui_reorder_connections(&ordered_ids).await
+        })
+        .await
     }
 
     async fn test_connection(&self, id: Uuid) -> ManageResult<ConnectionTestReport> {
@@ -2068,8 +2114,10 @@ impl ManagementBackend for LocalBackend {
         } else {
             crate::types::ConfirmMode::Off
         };
-        self.blocking(move |broker| broker.ui_set_confirm_mode(&connection_id, confirm))
-            .await
+        self.blocking_async(move |broker| async move {
+            broker.ui_set_confirm_mode(&connection_id, confirm).await
+        })
+        .await
     }
 
     async fn set_expose_response_credentials(
@@ -2077,8 +2125,10 @@ impl ManagementBackend for LocalBackend {
         connection_id: Uuid,
         expose: bool,
     ) -> ManageResult<bool> {
-        self.blocking(move |broker| {
-            broker.ui_set_expose_response_credentials(&connection_id, expose)
+        self.blocking_async(move |broker| async move {
+            broker
+                .ui_set_expose_response_credentials(&connection_id, expose)
+                .await
         })
         .await
     }
@@ -2108,8 +2158,12 @@ impl ManagementBackend for LocalBackend {
     ) -> ManageResult<bool> {
         // "Approve all" turns the switch off, which runs the native
         // confirmation — never on the async runtime.
-        self.blocking(move |broker| broker.ui_respond_approval(&id, approval_decision(decision)))
-            .await
+        self.blocking_async(move |broker| async move {
+            broker
+                .ui_respond_approval(&id, approval_decision(decision))
+                .await
+        })
+        .await
     }
 
     async fn elicitations(&self) -> ManageResult<Vec<ElicitationDto>> {
@@ -2136,7 +2190,9 @@ impl ManagementBackend for LocalBackend {
 
     async fn set_tool_access(&self, connection_id: Uuid, enabled: bool) -> ManageResult<bool> {
         let changed = self
-            .blocking(move |broker| broker.ui_set_tool_access(&connection_id, enabled))
+            .blocking_async(move |broker| async move {
+                broker.ui_set_tool_access(&connection_id, enabled).await
+            })
             .await?;
         if enabled {
             self.broker.auto_issue_api_endpoint(&connection_id).await;
@@ -2149,8 +2205,10 @@ impl ManagementBackend for LocalBackend {
         connection_id: Uuid,
         tools: Option<Vec<String>>,
     ) -> ManageResult<bool> {
-        self.blocking(move |broker| broker.ui_set_allowed_tools(&connection_id, tools))
-            .await
+        self.blocking_async(move |broker| async move {
+            broker.ui_set_allowed_tools(&connection_id, tools).await
+        })
+        .await
     }
 
     async fn set_audit_statements(
@@ -2158,8 +2216,10 @@ impl ManagementBackend for LocalBackend {
         connection_id: Uuid,
         audit_statements: Option<bool>,
     ) -> ManageResult<bool> {
-        self.blocking(move |broker| {
-            broker.ui_set_audit_statements(&connection_id, audit_statements)
+        self.blocking_async(move |broker| async move {
+            broker
+                .ui_set_audit_statements(&connection_id, audit_statements)
+                .await
         })
         .await
     }
@@ -2220,8 +2280,10 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn revoke_endpoint(&self, endpoint_id: Uuid) -> ManageResult<bool> {
-        self.blocking(move |broker| broker.ui_revoke_endpoint(&endpoint_id))
-            .await
+        self.blocking_async(
+            move |broker| async move { broker.ui_revoke_endpoint(&endpoint_id).await },
+        )
+        .await
     }
 
     async fn identity(&self) -> ManageResult<IdentityDto> {
@@ -2238,7 +2300,8 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn rotate_key(&self) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_rotate_key()).await
+        self.blocking_async(move |broker| async move { broker.ui_rotate_key().await })
+            .await
     }
 
     async fn sessions(&self) -> ManageResult<Vec<SessionDto>> {
@@ -2288,13 +2351,17 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn set_confirm_ssh_host_keys(&self, on: bool) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_set_confirm_ssh_host_keys(on))
-            .await
+        self.blocking_async(
+            move |broker| async move { broker.ui_set_confirm_ssh_host_keys(on).await },
+        )
+        .await
     }
 
     async fn set_menu_bar_hides_dock(&self, on: bool) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_set_menu_bar_hides_dock(on))
-            .await
+        self.blocking_async(
+            move |broker| async move { broker.ui_set_menu_bar_hides_dock(on).await },
+        )
+        .await
     }
 
     async fn agent_setup(&self) -> ManageResult<String> {

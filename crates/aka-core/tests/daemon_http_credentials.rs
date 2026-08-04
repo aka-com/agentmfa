@@ -340,53 +340,60 @@ async fn https_upstream() -> (tempfile::TempDir, u16, String) {
 
 /// A header-injected API connection with a real secret behind it.
 fn api_connection(h: &Harness, name: &str, port: u16) {
-    h.broker
-        .store
-        .add_secret("GITHUB_API_KEY", Zeroizing::new(API_KEY.into()))
-        .unwrap();
-    h.broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: name.into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
-            },
-            secrets: vec![],
-        })
-        .unwrap();
+    futures::executor::block_on(async {
+        h.broker
+            .store
+            .add_secret("GITHUB_API_KEY", Zeroizing::new(API_KEY.into()))
+            .await
+            .unwrap();
+        h.broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: name.into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(port),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
+            })
+            .await
+            .unwrap();
+    });
 }
 
 fn api_tls_connection(h: &Harness, name: &str, port: u16, ca: Option<String>) {
-    h.broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: name.into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "https".into(),
-                port: Some(port),
-                trusted_ca_bundle_path: ca,
-                template: String::new(),
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
-            },
-            secrets: vec![],
-        })
-        .unwrap();
+    futures::executor::block_on(async {
+        h.broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: name.into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "https".into(),
+                    port: Some(port),
+                    trusted_ca_bundle_path: ca,
+                    template: String::new(),
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
+            })
+            .await
+            .unwrap();
+    });
 }
 
 /* ------------------------------- API: SigV4 -------------------------------- */
@@ -400,43 +407,48 @@ const SIGV4_SERVICE: &str = "execute-api";
 /// trailing newline on purpose: pasted AWS keys often carry one, and an
 /// untrimmed key corrupts every signature with no legible error.
 fn sigv4_connection(h: &Harness, name: &str, port: u16) {
-    h.broker
-        .store
-        .add_secret("AWS_ACCESS_KEY_ID", Zeroizing::new(AWS_ACCESS_KEY.into()))
-        .unwrap();
-    h.broker
-        .store
-        .add_secret(
-            "AWS_SECRET_ACCESS_KEY",
-            Zeroizing::new(format!("{AWS_SECRET_KEY}\n")),
-        )
-        .unwrap();
-    h.broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: name.into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(port),
-                trusted_ca_bundle_path: None,
-                template: String::new(),
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: Some(SignerSpec::AwsSigv4 {
-                    region: SIGV4_REGION.into(),
-                    service: SIGV4_SERVICE.into(),
-                    access_key_ref: "AWS_ACCESS_KEY_ID".into(),
-                    secret_key_ref: "AWS_SECRET_ACCESS_KEY".into(),
-                    session_token_ref: None,
-                }),
-                client_cert_path: None,
-                client_key_path: None,
-            },
-            secrets: vec![],
-        })
-        .unwrap();
+    futures::executor::block_on(async {
+        h.broker
+            .store
+            .add_secret("AWS_ACCESS_KEY_ID", Zeroizing::new(AWS_ACCESS_KEY.into()))
+            .await
+            .unwrap();
+        h.broker
+            .store
+            .add_secret(
+                "AWS_SECRET_ACCESS_KEY",
+                Zeroizing::new(format!("{AWS_SECRET_KEY}\n")),
+            )
+            .await
+            .unwrap();
+        h.broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: name.into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(port),
+                    trusted_ca_bundle_path: None,
+                    template: String::new(),
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: Some(SignerSpec::AwsSigv4 {
+                        region: SIGV4_REGION.into(),
+                        service: SIGV4_SERVICE.into(),
+                        access_key_ref: "AWS_ACCESS_KEY_ID".into(),
+                        secret_key_ref: "AWS_SECRET_ACCESS_KEY".into(),
+                        session_token_ref: None,
+                    }),
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
+            })
+            .await
+            .unwrap();
+    });
 }
 
 /// Recompute the SigV4 signature from what the upstream actually received —
@@ -634,6 +646,7 @@ async fn gcp_service_account_tokens_are_minted_injected_and_scrubbed() {
     h.broker
         .store
         .add_secret("GCP_SA_KEY", Zeroizing::new(key_json))
+        .await
         .unwrap();
     h.broker
         .store
@@ -657,6 +670,7 @@ async fn gcp_service_account_tokens_are_minted_injected_and_scrubbed() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
 
     let (status, body) = h
@@ -851,6 +865,7 @@ async fn a_www_authenticate_challenge_can_be_explicitly_contained() {
     assert!(h
         .broker
         .ui_set_expose_response_credentials(&connection.id, false)
+        .await
         .unwrap());
     let (_, body) = h
         .call("github", json!({ "method": "GET", "path": "/challenge" }))
@@ -956,6 +971,7 @@ async fn authorization_is_reserved_even_for_a_query_form_connection() {
     h.broker
         .store
         .add_secret("STREAM_TOKEN", Zeroizing::new("tok_abcdef123456".into()))
+        .await
         .unwrap();
     h.broker
         .store
@@ -976,6 +992,7 @@ async fn authorization_is_reserved_even_for_a_query_form_connection() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
 
     let (status, body) = h
@@ -1237,6 +1254,7 @@ async fn a_render_failure_flips_health_on_a_non_oauth_connection() {
     h.broker
         .store
         .replace_secret_value(&secret.id, Zeroizing::new("bad\nvalue".into()))
+        .await
         .unwrap();
 
     let (status, body) = h
@@ -1307,50 +1325,54 @@ async fn token_endpoint(answer: TokenAnswer) -> TokenEndpoint {
 /// A BYO-OAuth connection whose stored token set is already expired, so the
 /// next call must refresh.
 fn oauth_connection(h: &Harness, upstream_port: u16, token_port: u16, refresh: Option<&str>) {
-    let expired = chrono::Utc::now() - chrono::Duration::hours(1);
-    let mut tokens = json!({
-        "access_token": "stale_access_token",
-        "expires_at": expired.to_rfc3339(),
+    futures::executor::block_on(async {
+        let expired = chrono::Utc::now() - chrono::Duration::hours(1);
+        let mut tokens = json!({
+            "access_token": "stale_access_token",
+            "expires_at": expired.to_rfc3339(),
+        });
+        if let Some(refresh) = refresh {
+            tokens["refresh_token"] = json!(refresh);
+        }
+        h.broker
+            .store
+            .add_secret("OAUTH_TOKENS", Zeroizing::new(tokens.to_string()))
+            .await
+            .unwrap();
+        let secret = h.broker.store.secret_by_name("OAUTH_TOKENS").unwrap();
+        h.broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: "slack".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(upstream_port),
+                    trusted_ca_bundle_path: None,
+                    // The token secret is bound through the template ref, which is
+                    // the shape `ui_oauth_connect` generates; the OAuth branch of
+                    // `render_connection_injection` then mints a fresh bearer from
+                    // the stored token set rather than rendering this.
+                    template: "Authorization: Bearer {{OAUTH_TOKENS}}".into(),
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: Some(OAuthSpec {
+                        auth_url: "http://127.0.0.1/authorize".into(),
+                        token_url: format!("http://127.0.0.1:{token_port}/token"),
+                        client_id: "client-abc".into(),
+                        scopes: vec!["chat:write".into()],
+                        extra_auth_params: Vec::new(),
+                        token_secret_id: None,
+                    }),
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![secret.id],
+            })
+            .await
+            .unwrap();
     });
-    if let Some(refresh) = refresh {
-        tokens["refresh_token"] = json!(refresh);
-    }
-    h.broker
-        .store
-        .add_secret("OAUTH_TOKENS", Zeroizing::new(tokens.to_string()))
-        .unwrap();
-    let secret = h.broker.store.secret_by_name("OAUTH_TOKENS").unwrap();
-    h.broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "slack".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(upstream_port),
-                trusted_ca_bundle_path: None,
-                // The token secret is bound through the template ref, which is
-                // the shape `ui_oauth_connect` generates; the OAuth branch of
-                // `render_connection_injection` then mints a fresh bearer from
-                // the stored token set rather than rendering this.
-                template: "Authorization: Bearer {{OAUTH_TOKENS}}".into(),
-                mcp_path: None,
-                test_path: None,
-                oauth: Some(OAuthSpec {
-                    auth_url: "http://127.0.0.1/authorize".into(),
-                    token_url: format!("http://127.0.0.1:{token_port}/token"),
-                    client_id: "client-abc".into(),
-                    scopes: vec!["chat:write".into()],
-                    extra_auth_params: Vec::new(),
-                    token_secret_id: None,
-                }),
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
-            },
-            secrets: vec![secret.id],
-        })
-        .unwrap();
 }
 
 /// The happy path, which nothing exercised before: an expired access token is
@@ -1545,6 +1567,7 @@ async fn endpoint_retarget_during_upload_is_refused_without_confirmation() {
                 secrets: vec![],
             },
         )
+        .await
         .unwrap();
 
     stream.write_all(b"0\r\n\r\n").await.unwrap();
@@ -1697,6 +1720,7 @@ async fn the_endpoint_secret_is_recoverable_from_the_vault_after_a_reload() {
     broker
         .store
         .add_secret("GITHUB_API_KEY", Zeroizing::new(API_KEY.into()))
+        .await
         .unwrap();
     broker
         .store
@@ -1717,6 +1741,7 @@ async fn the_endpoint_secret_is_recoverable_from_the_vault_after_a_reload() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let id = broker.store.connection_by_name("github").unwrap().id;
     let issued = broker.ui_issue_endpoint(&id).await.unwrap();

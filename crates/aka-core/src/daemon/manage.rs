@@ -349,6 +349,7 @@ async fn rotate_management_token(
         .broker
         .identity
         .rotate_manage_token_with_ttl(authed.token(), Some(ttl))
+        .await
     {
         Ok(token) => {
             if let Err(error) = state.broker.paths.remove_manage_bootstrap_token() {
@@ -384,6 +385,7 @@ async fn revoke_management_token(State(state): State<AppState>, authed: ManageAu
         .broker
         .identity
         .revoke_manage_token_with_token(authed.token())
+        .await
     {
         Ok(()) => {
             if let Err(error) = state.broker.paths.remove_manage_bootstrap_token() {
@@ -523,7 +525,7 @@ async fn events(
         rx: tokio::sync::broadcast::Receiver<SeqEvent>,
         backlog: std::collections::VecDeque<SeqEvent>,
         epoch: String,
-        identity: std::sync::Arc<crate::identity::IdentityStore>,
+        identity: std::sync::Arc<dyn crate::repository::IdentityRepository>,
         token: Zeroizing<String>,
         // Present only when the authenticated client explicitly promised a
         // user-facing request inbox. Its Drop releases capability as soon as

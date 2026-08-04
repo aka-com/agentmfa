@@ -37,6 +37,7 @@ pub mod password;
 pub mod paths;
 pub mod policy;
 pub mod ratelimit;
+pub mod repository;
 pub mod request_history;
 pub mod sessions;
 pub(crate) mod sigv4;

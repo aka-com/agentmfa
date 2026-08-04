@@ -194,7 +194,7 @@ impl ApprovalRequest {
     /// Attach display-only saved credential names from the sealed binding.
     /// OAuth grants are intentionally not public Secrets, but still need a
     /// stable label so the prompt says which credential class will ride.
-    pub fn credentials_from(mut self, store: &crate::store::Store) -> Self {
+    pub fn credentials_from(mut self, store: &dyn crate::repository::CatalogReader) -> Self {
         self.credential_names = if self.connection.oauth.is_some() {
             vec![oauth_credential_name(&self.connection)]
         } else {

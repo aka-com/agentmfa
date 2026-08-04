@@ -50,7 +50,7 @@ async fn harness(config: BrokerConfig) -> Harness {
 }
 
 /// Add a pg connection pointed at `port` with the given TLS settings.
-fn add_connection(
+async fn add_connection(
     broker: &Broker,
     host: &str,
     port: u16,
@@ -60,6 +60,7 @@ fn add_connection(
     broker
         .store
         .add_secret("PG_PASSWORD", Zeroizing::new(PG_PASSWORD.into()))
+        .await
         .unwrap();
     let secret = broker.store.secret_by_name("PG_PASSWORD").unwrap();
     broker
@@ -76,6 +77,7 @@ fn add_connection(
             },
             secrets: vec![secret.id],
         })
+        .await
         .unwrap()
 }
 
@@ -428,7 +430,7 @@ async fn require_accepts_a_certificate_it_cannot_verify() {
     let (chain, key) = self_signed_leaf("db.internal");
     let port = fake_tls_pg(chain, key, SslAnswer::Accept).await;
     let h = harness(BrokerConfig::default()).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Require, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Require, None).await;
 
     let report = test_pg(&h, &conn).await.unwrap();
     assert!(report.contains("SELECT 1 succeeded"), "{report}");
@@ -439,7 +441,7 @@ async fn require_accepts_a_certificate_it_cannot_verify() {
 async fn repeated_password_challenges_hit_the_auth_iteration_bound() {
     let port = fake_repeating_password_challenge().await;
     let h = harness(BrokerConfig::default()).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Disable, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Disable, None).await;
 
     let error = test_pg(&h, &conn)
         .await
@@ -452,7 +454,7 @@ async fn repeated_password_challenges_hit_the_auth_iteration_bound() {
 async fn startup_metadata_hits_the_accumulation_bound() {
     let port = fake_startup_metadata_flood().await;
     let h = harness(BrokerConfig::default()).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Disable, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Disable, None).await;
 
     let error = test_pg(&h, &conn)
         .await
@@ -468,7 +470,7 @@ async fn verify_full_refuses_an_unverifiable_certificate() {
     let (chain, key) = self_signed_leaf("db.internal");
     let port = fake_tls_pg(chain, key, SslAnswer::Accept).await;
     let h = harness(BrokerConfig::default()).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::VerifyFull, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::VerifyFull, None).await;
 
     let error = test_pg(&h, &conn).await.expect_err("must refuse");
     assert_eq!(error.kind, TestErrorKind::CertUnverified, "{error:?}");
@@ -495,7 +497,8 @@ async fn verify_full_accepts_a_leaf_from_the_configured_ca_bundle() {
         port,
         PgSslMode::VerifyFull,
         Some(bundle),
-    );
+    )
+    .await;
     let report = test_pg(&h, &conn).await;
     assert!(report.is_ok(), "the pinned CA must be trusted: {report:?}");
 }
@@ -517,7 +520,8 @@ async fn verify_full_refuses_a_bundle_signed_leaf_for_another_host() {
         port,
         PgSslMode::VerifyFull,
         Some(bundle),
-    );
+    )
+    .await;
     let error = test_pg(&h, &conn).await.expect_err("name must not match");
     assert_eq!(error.kind, TestErrorKind::CertUnverified, "{error:?}");
 }
@@ -541,7 +545,8 @@ async fn verify_ca_accepts_a_bundle_signed_leaf_whose_name_does_not_match() {
         port,
         PgSslMode::VerifyCa,
         Some(bundle),
-    );
+    )
+    .await;
     let report = test_pg(&h, &conn).await;
     assert!(report.is_ok(), "verify-ca ignores the name: {report:?}");
 }
@@ -565,7 +570,8 @@ async fn a_configured_bundle_refuses_a_leaf_signed_by_another_ca() {
         port,
         PgSslMode::VerifyCa,
         Some(bundle),
-    );
+    )
+    .await;
     let error = test_pg(&h, &conn).await.expect_err("must refuse");
     assert_eq!(error.kind, TestErrorKind::CertUnverified, "{error:?}");
 }
@@ -579,7 +585,7 @@ async fn verify_ca_without_a_bundle_uses_the_public_roots() {
     let port = fake_tls_pg(chain, key, SslAnswer::Accept).await;
 
     let h = harness(BrokerConfig::default()).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::VerifyCa, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::VerifyCa, None).await;
     let error = test_pg(&h, &conn).await.expect_err("must refuse");
     assert_eq!(error.kind, TestErrorKind::CertUnverified, "{error:?}");
 }
@@ -591,7 +597,7 @@ async fn require_refuses_a_server_that_declines_tls() {
     let (chain, key) = self_signed_leaf("db.internal");
     let port = fake_tls_pg(chain, key, SslAnswer::Refuse).await;
     let h = harness(BrokerConfig::default()).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Require, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Require, None).await;
 
     let error = test_pg(&h, &conn).await.expect_err("must refuse");
     assert_eq!(error.kind, TestErrorKind::TlsDeclined, "{error:?}");
@@ -604,7 +610,7 @@ async fn prefer_falls_back_to_plaintext() {
     let (chain, key) = self_signed_leaf("db.internal");
     let port = fake_tls_pg(chain, key, SslAnswer::Refuse).await;
     let h = harness(BrokerConfig::default()).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None).await;
 
     let report = test_pg(&h, &conn).await;
     assert!(report.is_ok(), "prefer continues in clear text: {report:?}");
@@ -617,7 +623,7 @@ async fn testing_a_tls_downgrade_records_warning_health() {
     let (chain, key) = self_signed_leaf("db.internal");
     let port = fake_tls_pg(chain, key, SslAnswer::Refuse).await;
     let h = harness(BrokerConfig::default()).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None).await;
 
     let report = h.broker.ui_test_connection(&conn.id).await.unwrap();
     assert!(report.ok, "{report:?}");
@@ -640,7 +646,7 @@ async fn a_downgraded_session_writes_an_audit_entry() {
     let (chain, key) = self_signed_leaf("db.internal");
     let port = fake_tls_pg(chain, key, SslAnswer::Refuse).await;
     let h = harness(BrokerConfig::default()).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None).await;
 
     // Open a real brokered session through the ticket proxy.
     let (proxy_port, _task) = pg::start_proxy(h.broker.clone()).await.unwrap();
@@ -694,7 +700,7 @@ async fn an_unresponsive_host_hits_the_upstream_deadline_on_the_data_path() {
         ..Default::default()
     };
     let h = harness(config).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Disable, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Disable, None).await;
 
     let (proxy_port, _task) = pg::start_proxy(h.broker.clone()).await.unwrap();
     let ticket = h.broker.data_plane.issue("test-agent", &conn);
@@ -774,7 +780,7 @@ async fn a_newer_protocol_minor_is_negotiated_down_to_three_zero() {
     let h = harness(BrokerConfig::default()).await;
     // `prefer`, so the upstream leg still begins with the SSLRequest the fake
     // answers; the downstream negotiation under test is independent of it.
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None).await;
     let (proxy_port, _task) = pg::start_proxy(h.broker.clone()).await.unwrap();
     let ticket = h.broker.data_plane.issue("test-agent", &conn);
 
@@ -835,7 +841,7 @@ async fn an_unsupported_major_protocol_is_refused_with_a_sqlstate() {
 /// Open a plaintext-upstream connection plus a running proxy, and hand back a
 /// client that has already presented its ticket and read ReadyForQuery.
 async fn live_session(h: &Harness, port: u16) -> (aka_core::types::Connection, TcpStream) {
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None).await;
     let (proxy_port, task) = pg::start_proxy(h.broker.clone()).await.unwrap();
     // The accept loop must outlive this helper.
     std::mem::forget(task);
@@ -967,7 +973,7 @@ async fn access_revoked_during_establishment_refuses_the_session() {
     )
     .await;
     let h = harness(BrokerConfig::default()).await;
-    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None);
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Prefer, None).await;
     let (proxy_port, _task) = pg::start_proxy(h.broker.clone()).await.unwrap();
     let ticket = h.broker.data_plane.issue("test-agent", &conn);
 
@@ -977,7 +983,7 @@ async fn access_revoked_during_establishment_refuses_the_session() {
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     // Withdraw access mid-dial. No session exists to sweep yet.
-    assert!(h.broker.ui_set_tool_access(&conn.id, false).unwrap());
+    assert!(h.broker.ui_set_tool_access(&conn.id, false).await.unwrap());
 
     // Let the dial finish. The proxy registers the session, sees the new policy
     // and retires it before ReadyForQuery goes out.

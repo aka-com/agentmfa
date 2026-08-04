@@ -35,7 +35,7 @@ use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::broker::Broker;
 use crate::health::HealthRegistry;
 use crate::mcp_auth::{is_loopback_host, parse_token_payload, McpOAuthGrant};
-use crate::store::Store;
+use crate::repository::CatalogRepository;
 use crate::types::{Connection, HealthStatus};
 
 /// Renew when the access token is within this window of expiry.
@@ -51,7 +51,7 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(20);
 /// build one (the broker, an HTTP execution) without dragging the whole
 /// broker along.
 pub(crate) struct RefreshContext<'a> {
-    pub store: &'a Store,
+    pub store: &'a dyn CatalogRepository,
     pub http: &'a reqwest::Client,
     pub audit: &'a AuditLog,
     /// When present, a rejected renewal records needs-reconnect health.
@@ -293,6 +293,7 @@ async fn try_refresh(
 
     ctx.store
         .replace_secret_value(&secret_id, Zeroizing::new(tokens.access_token.to_string()))
+        .await
         .map_err(|error| {
             RefreshError::Transient(format!("could not store the renewed token: {error}"))
         })?;
@@ -311,6 +312,7 @@ async fn try_refresh(
         .map(|seconds| Utc::now() + chrono::Duration::seconds(seconds));
     ctx.store
         .set_connection_oauth(&connection.id, renewed.to_secret_value(), expires_at)
+        .await
         .map_err(|error| {
             RefreshError::Transient(format!("could not store the renewed grant: {error}"))
         })?;
@@ -354,9 +356,10 @@ async fn retire_refresh_token(ctx: &RefreshContext<'_>, connection: &Connection)
     };
     let expires_at = connection.oauth.as_ref().and_then(|oauth| oauth.expires_at);
     let retired = grant.with_refresh_token(None);
-    if let Err(error) =
-        ctx.store
-            .set_connection_oauth(&connection.id, retired.to_secret_value(), expires_at)
+    if let Err(error) = ctx
+        .store
+        .set_connection_oauth(&connection.id, retired.to_secret_value(), expires_at)
+        .await
     {
         tracing::warn!(
             "could not retire the rejected refresh token for {}: {error}",
@@ -558,6 +561,7 @@ mod tests {
         broker
             .store
             .add_secret("MCP_TOKEN", Zeroizing::new("old-access".into()))
+            .await
             .unwrap();
         let secret = broker.store.secret_by_name("MCP_TOKEN").unwrap();
         let connection = broker
@@ -579,6 +583,7 @@ mod tests {
                 },
                 secrets: vec![secret.id],
             })
+            .await
             .unwrap();
         let grant = McpOAuthGrant {
             refresh_token: Some("refresh-live".into()),
@@ -594,6 +599,7 @@ mod tests {
                 grant.to_secret_value(),
                 Some(Utc::now() - chrono::Duration::minutes(1)),
             )
+            .await
             .unwrap();
         let connection = broker.store.connection_by_id(&connection.id).unwrap();
         (broker, dir, connection)
@@ -759,6 +765,7 @@ mod tests {
         broker
             .store
             .add_secret("OAUTH_TOKENS", Zeroizing::new(tokens.to_string()))
+            .await
             .unwrap();
         let secret = broker.store.secret_by_name("OAUTH_TOKENS").unwrap();
         broker
@@ -787,6 +794,7 @@ mod tests {
                 },
                 secrets: vec![secret.id],
             })
+            .await
             .unwrap();
 
         // The sweeper's first pass is immediate.

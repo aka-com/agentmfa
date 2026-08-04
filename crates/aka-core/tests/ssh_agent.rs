@@ -110,7 +110,7 @@ impl BrokerEvents for TestEvents {
         *self.last_prompt.lock().unwrap() = Some(pending.clone());
         if let (Some(decision), Some(broker)) = (self.approval, self.broker.lock().unwrap().clone())
         {
-            broker.ui_respond_approval(&pending.id, decision).unwrap();
+            futures::executor::block_on(broker.ui_respond_approval(&pending.id, decision)).unwrap();
         }
         aka_core::events::ApprovalHandling::Taken
     }
@@ -168,25 +168,29 @@ fn add_ssh_connection_with_fingerprint(
     host_key_fingerprint: String,
 ) {
     let pem = key.to_openssh(LineEnding::LF).unwrap();
-    broker
-        .store
-        .add_secret("DEPLOY_SSH_KEY", Zeroizing::new(pem.to_string()))
-        .unwrap();
-    let secret = broker.store.secret_by_name("DEPLOY_SSH_KEY").unwrap();
-    broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "prod-ssh".into(),
-            config: ConnectionConfig::Ssh {
-                destination: Some("prod".into()),
-                host: "prod.example.com".into(),
-                port: 22,
-                user: user.into(),
-                host_key_fingerprint,
-            },
-            secrets: vec![secret.id],
-        })
-        .unwrap();
+    futures::executor::block_on(async {
+        broker
+            .store
+            .add_secret("DEPLOY_SSH_KEY", Zeroizing::new(pem.to_string()))
+            .await
+            .unwrap();
+        let secret = broker.store.secret_by_name("DEPLOY_SSH_KEY").unwrap();
+        broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: "prod-ssh".into(),
+                config: ConnectionConfig::Ssh {
+                    destination: Some("prod".into()),
+                    host: "prod.example.com".into(),
+                    port: 22,
+                    user: user.into(),
+                    host_key_fingerprint,
+                },
+                secrets: vec![secret.id],
+            })
+            .await
+            .unwrap();
+    });
 }
 
 /// Register `prod-ssh` pinned to a fresh random host key; returns that key.
@@ -206,23 +210,26 @@ fn add_ssh_connection(broker: &Broker, key: &PrivateKey, user: &str) -> PrivateK
 
 fn add_passwordless_ssh_connection(broker: &Broker) -> PrivateKey {
     let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "prod-ssh".into(),
-            config: ConnectionConfig::Ssh {
-                destination: Some("prod".into()),
-                host: "prod.example.com".into(),
-                port: 22,
-                user: "deploy".into(),
-                host_key_fingerprint: host_key
-                    .public_key()
-                    .fingerprint(HashAlg::Sha256)
-                    .to_string(),
-            },
-            secrets: vec![],
-        })
-        .unwrap();
+    futures::executor::block_on(async {
+        broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: "prod-ssh".into(),
+                config: ConnectionConfig::Ssh {
+                    destination: Some("prod".into()),
+                    host: "prod.example.com".into(),
+                    port: 22,
+                    user: "deploy".into(),
+                    host_key_fingerprint: host_key
+                        .public_key()
+                        .fingerprint(HashAlg::Sha256)
+                        .to_string(),
+                },
+                secrets: vec![],
+            })
+            .await
+            .unwrap();
+    });
     host_key
 }
 
@@ -545,6 +552,7 @@ async fn unparseable_key_fails_open() {
     h.broker
         .store
         .add_secret("DEPLOY_SSH_KEY", Zeroizing::new("not a private key".into()))
+        .await
         .unwrap();
     let secret = h.broker.store.secret_by_name("DEPLOY_SSH_KEY").unwrap();
     let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
@@ -564,6 +572,7 @@ async fn unparseable_key_fails_open() {
             },
             secrets: vec![secret.id],
         })
+        .await
         .unwrap();
     let token = h.pair().await;
 
@@ -630,7 +639,7 @@ async fn tofu_confirmation_carries_a_structured_host_key_decision() {
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     add_ssh_connection_with_fingerprint(&h.broker, &key, "deploy", String::new());
     confirm_logins(&h.broker);
-    h.broker.ui_set_confirm_ssh_host_keys(true).unwrap();
+    h.broker.ui_set_confirm_ssh_host_keys(true).await.unwrap();
     let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     let observed = host_key
         .public_key()
@@ -874,7 +883,7 @@ async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
     // connections at the access re-check (the listener shuts them down
     // before serving the agent protocol).
     let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
-    h.broker.ui_set_tool_access(&conn.id, false).unwrap();
+    h.broker.ui_set_tool_access(&conn.id, false).await.unwrap();
     assert_eq!(h.broker.endpoints().len(), 1);
     let mut byte = [0u8; 1];
     let read = tokio::time::timeout(Duration::from_secs(2), s.read(&mut byte))
@@ -926,12 +935,15 @@ async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
     );
 
     // Re-enabling restores service without re-issuing.
-    h.broker.ui_set_tool_access(&conn.id, true).unwrap();
+    h.broker.ui_set_tool_access(&conn.id, true).await.unwrap();
     let mut s = bound_stream(&info.dsn, &host_key).await;
     assert_lists_identity(&mut s, &key).await;
 
     // Revoking the endpoint stops the listener and removes the socket.
-    h.broker.ui_revoke_endpoint(&info.endpoint_id).unwrap();
+    h.broker
+        .ui_revoke_endpoint(&info.endpoint_id)
+        .await
+        .unwrap();
     assert!(h.broker.endpoints().is_empty());
     tokio::time::timeout(Duration::from_secs(5), async {
         while !h.broker.sessions().is_empty() {
@@ -951,9 +963,10 @@ async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
 /// Turn the switch on for `prod-ssh`.
 fn confirm_logins(broker: &Broker) {
     let conn = broker.store.connection_by_name("prod-ssh").unwrap();
-    broker
-        .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
-        .unwrap();
+    futures::executor::block_on(
+        broker.ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On),
+    )
+    .unwrap();
 }
 
 /// The gate is in SIGN_REQUEST, so it fires per authentication — and only for
@@ -1189,7 +1202,7 @@ async fn disabling_access_refuses_a_live_per_open_socket() {
     drop(before);
 
     let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
-    assert!(h.broker.ui_set_tool_access(&conn.id, false).unwrap());
+    assert!(h.broker.ui_set_tool_access(&conn.id, false).await.unwrap());
 
     // The socket file is still there — the listener's window has not lapsed —
     // but a fresh connection is refused before the protocol is served.
@@ -1234,7 +1247,7 @@ async fn the_access_table_is_rechecked_when_a_socket_connection_arrives() {
     drop(before);
 
     let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
-    assert!(h.broker.access.set_enabled(conn.id, false).unwrap());
+    assert!(h.broker.access.set_enabled(conn.id, false).await.unwrap());
 
     let mut after = UnixStream::connect(&auth_sock).await.unwrap();
     let mut probe = [0u8; 1];
@@ -1303,6 +1316,7 @@ async fn retargeting_refuses_a_live_per_open_socket() {
                 secrets: conn.secrets.clone(),
             },
         )
+        .await
         .unwrap();
 
     let mut after = UnixStream::connect(&auth_sock).await.unwrap();
@@ -1369,7 +1383,7 @@ async fn withdrawing_a_connection_closes_a_live_agent_connection() {
     assert_eq!(h.broker.sessions().len(), 1);
 
     let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
-    assert!(h.broker.ui_set_tool_access(&conn.id, false).unwrap());
+    assert!(h.broker.ui_set_tool_access(&conn.id, false).await.unwrap());
 
     let mut probe = [0u8; 1];
     let read = tokio::time::timeout(Duration::from_secs(5), s.read(&mut probe))

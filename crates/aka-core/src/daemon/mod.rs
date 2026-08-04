@@ -830,7 +830,7 @@ async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBod
     // per-agent pairing was never gated either, so any local process could
     // always mint itself a token. The name is recorded as an activity label
     // only; agents that can read the token file directly never need this.
-    broker.identity.touch();
+    broker.identity.touch().await;
     broker.audit.append(
         AuditEntry::new(AuditKind::Paired, format!("Agent connected: {name}"))
             .agent(name.clone())
@@ -1261,7 +1261,7 @@ async fn post_http(
     // without a request ready there, turning confirmation on while this call
     // was being admitted let it execute silently.
     let approval = approval_for_call(
-        &broker.store,
+        broker.store.as_ref(),
         &conn,
         &client,
         &method,
@@ -1913,7 +1913,7 @@ fn is_mcp_envelope_body(body: &[u8]) -> bool {
 /// ordinary traffic to a credentialed destination, and is asked about as
 /// such rather than waved through for looking like plumbing.
 fn approval_for_call(
-    store: &crate::store::Store,
+    store: &dyn crate::repository::CatalogReader,
     conn: &crate::types::Connection,
     client: &str,
     method: &http::Method,

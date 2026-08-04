@@ -23,7 +23,7 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use crate::capability::http::{render_connection_injection, RenderedInjection};
-use crate::store::Store;
+use crate::repository::CatalogRepository;
 use crate::types::{Connection, ConnectionConfig};
 
 /// Protocol revisions this client can actually speak, newest first.
@@ -426,7 +426,7 @@ pub fn mcp_endpoint(connection: &Connection) -> Result<Url, String> {
 /// credential from the connection's template (the same late-fetch path the
 /// agent plane uses) and drives the handshake.
 pub async fn check_connection(
-    store: &Arc<Store>,
+    store: &Arc<dyn CatalogRepository>,
     client: &reqwest::Client,
     connection: &Connection,
     options: &McpCheckOptions,
@@ -500,7 +500,7 @@ fn tool_info(value: &Value) -> Option<McpToolInfo> {
 /// descriptions), for the per-wiring tool picker. Same handshake and
 /// credential path as the status check, minus whoami and resources.
 pub async fn list_tools(
-    store: &Arc<Store>,
+    store: &Arc<dyn CatalogRepository>,
     client: &reqwest::Client,
     connection: &Connection,
 ) -> Result<McpToolListing, String> {

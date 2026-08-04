@@ -19,6 +19,9 @@ use crate::identity::IdentityStore;
 use crate::paths::{BrokerInstanceLock, BrokerLockAttempt, BrokerLockRole, Paths};
 use crate::policy::AccessTable;
 use crate::ratelimit::{KeyedLimiter, WindowLimiter};
+use crate::repository::{
+    CatalogRepository, EndpointRepository, IdentityRepository, PolicyRepository,
+};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
 use crate::types::{
@@ -110,28 +113,61 @@ struct PendingManageOAuth {
     created_at: Instant,
 }
 
+/// Durable configuration and identity state for one logical broker instance.
+///
+/// The local constructors build these from the existing sealed JSON stores.
+/// A hosted process can instead supply tenant-scoped implementations (for
+/// example, Postgres repositories keyed by workspace) without changing the
+/// broker's request, management, or capability layers.
+///
+/// Audit and health persistence remain process-local in this preparatory seam;
+/// their repository contracts are available for the later hosted switchover.
+#[derive(Clone)]
+pub struct BrokerRepositories {
+    pub catalog: Arc<dyn CatalogRepository>,
+    pub policy: Arc<dyn PolicyRepository>,
+    pub endpoints: Arc<dyn EndpointRepository>,
+    pub identity: Arc<dyn IdentityRepository>,
+}
+
+impl BrokerRepositories {
+    pub fn new(
+        catalog: Arc<dyn CatalogRepository>,
+        policy: Arc<dyn PolicyRepository>,
+        endpoints: Arc<dyn EndpointRepository>,
+        identity: Arc<dyn IdentityRepository>,
+    ) -> Self {
+        Self {
+            catalog,
+            policy,
+            endpoints,
+            identity,
+        }
+    }
+}
+
 pub struct Broker {
     pub config: BrokerConfig,
     pub paths: Paths,
-    pub store: Arc<Store>,
+    pub store: Arc<dyn CatalogRepository>,
     /// The vault, retained beyond the store so endpoint secrets can live in it
     /// rather than in plaintext on disk. They are not `Secret` records: they
     /// have no index entry and never appear in the Secrets tab.
     vault: Arc<dyn crate::vault::SecretVault>,
     /// Per-connection agent access: the whole authorization model.
-    pub access: Arc<AccessTable>,
+    pub access: Arc<dyn PolicyRepository>,
     /// Per-connection direct endpoints (stable DSN/URL issuance). Bounds and
     /// teardown ride alongside the access table.
-    pub endpoints: Arc<crate::endpoints::EndpointRegistry>,
+    pub endpoints: Arc<dyn EndpointRepository>,
     /// Live endpoint listeners, keyed on endpoint id. Runtime only:
     /// re-established from `endpoints` at daemon start, stopped on teardown.
     endpoint_listeners: Mutex<HashMap<Uuid, crate::endpoints::EndpointListenerHandle>>,
     /// Serializes configuration mutations that read-then-write shared state
     /// (connection edits, access changes) so concurrent UI actions cannot
     /// interleave.
-    pub(crate) config_gate: Mutex<()>,
+    pub(crate) config_gate: tokio::sync::Mutex<()>,
     /// The shared local identity ("this computer's key").
-    pub identity: Arc<IdentityStore>,
+    pub identity: Arc<dyn IdentityRepository>,
     pub executions: Executions,
     /// Runtime that owns broker background work. UI entry points can be
     /// called from threads without an entered Tokio context (notably
@@ -237,7 +273,42 @@ impl Broker {
         config: BrokerConfig,
         events: Arc<dyn BrokerEvents>,
     ) -> Result<Arc<Self>> {
-        Self::new_inner(paths, vault, config, events, true, BrokerLockRole::Serve).await
+        Self::new_inner(
+            paths,
+            vault,
+            config,
+            events,
+            true,
+            BrokerLockRole::Serve,
+            None,
+        )
+        .await
+    }
+
+    /// Construct the broker around externally supplied durable repositories.
+    ///
+    /// This is the hosted-service seam: repository implementations own tenant
+    /// isolation and transactions, while the broker continues to own protocol
+    /// handling, authorization, sessions, and runtime-only state. The path and
+    /// vault arguments remain for local runtime artifacts and endpoint-secret
+    /// custody during this preparatory phase.
+    pub async fn new_with_repositories(
+        paths: Paths,
+        vault: Arc<dyn crate::vault::SecretVault>,
+        config: BrokerConfig,
+        events: Arc<dyn BrokerEvents>,
+        repositories: BrokerRepositories,
+    ) -> Result<Arc<Self>> {
+        Self::new_inner(
+            paths,
+            vault,
+            config,
+            events,
+            true,
+            BrokerLockRole::Serve,
+            Some(repositories),
+        )
+        .await
     }
 
     /// Construct the broker state for a short-lived offline management
@@ -250,7 +321,16 @@ impl Broker {
         config: BrokerConfig,
         events: Arc<dyn BrokerEvents>,
     ) -> Result<Arc<Self>> {
-        Self::new_inner(paths, vault, config, events, false, BrokerLockRole::Cli).await
+        Self::new_inner(
+            paths,
+            vault,
+            config,
+            events,
+            false,
+            BrokerLockRole::Cli,
+            None,
+        )
+        .await
     }
 
     async fn new_inner(
@@ -260,6 +340,7 @@ impl Broker {
         events: Arc<dyn BrokerEvents>,
         start_background_tasks: bool,
         lock_role: BrokerLockRole,
+        repositories: Option<BrokerRepositories>,
     ) -> Result<Arc<Self>> {
         paths.ensure()?;
         // A CLI holder blocks a starting broker just as it blocks another
@@ -295,37 +376,54 @@ impl Broker {
             let events = events.clone();
             audit.subscribe(move |entry| events.audit_appended(entry));
         }
-        let store = Arc::new(Store::open_with_events(
-            paths.clone(),
-            vault.clone(),
-            events.clone(),
-            integrity.clone(),
-        )?);
-        let identity = Arc::new(IdentityStore::open(
-            paths.identity_file(),
-            paths.token_file(),
-            Some(&paths.agents_file()),
-            config.token_ttl,
-            integrity.clone(),
-        )?);
-        let endpoints = Arc::new(crate::endpoints::EndpointRegistry::open(
-            paths.endpoints_file(),
-            config.max_endpoints,
-            integrity.clone(),
-        )?);
-        // The per-agent wirings collapse needs the connection list so
-        // never-wired connections migrate as disabled (the old default)
-        // rather than inheriting the new enabled-by-default.
-        let known_connections: Vec<Uuid> =
-            store.list_connections().into_iter().map(|c| c.id).collect();
-        let access = Arc::new(AccessTable::open_with_legacy_policy_and_generation(
-            paths.access_file(),
-            Some(&paths.wirings_file()),
-            Some(&paths.rules_file()),
-            &known_connections,
-            integrity.clone(),
-            Some(store.clone()),
-        )?);
+        let BrokerRepositories {
+            catalog: store,
+            policy: access,
+            endpoints,
+            identity,
+        } = match repositories {
+            Some(repositories) => repositories,
+            None => {
+                let local_store = Arc::new(Store::open_with_events(
+                    paths.clone(),
+                    vault.clone(),
+                    events.clone(),
+                    integrity.clone(),
+                )?);
+                let identity: Arc<dyn IdentityRepository> = Arc::new(IdentityStore::open(
+                    paths.identity_file(),
+                    paths.token_file(),
+                    Some(&paths.agents_file()),
+                    config.token_ttl,
+                    integrity.clone(),
+                )?);
+                let endpoints: Arc<dyn EndpointRepository> =
+                    Arc::new(crate::endpoints::EndpointRegistry::open(
+                        paths.endpoints_file(),
+                        config.max_endpoints,
+                        integrity.clone(),
+                    )?);
+                // The per-agent wirings collapse needs the connection list so
+                // never-wired connections migrate as disabled (the old default)
+                // rather than inheriting the new enabled-by-default.
+                let known_connections: Vec<Uuid> = local_store
+                    .list_connections()
+                    .into_iter()
+                    .map(|c| c.id)
+                    .collect();
+                let access: Arc<dyn PolicyRepository> =
+                    Arc::new(AccessTable::open_with_legacy_policy_and_generation(
+                        paths.access_file(),
+                        Some(&paths.wirings_file()),
+                        Some(&paths.rules_file()),
+                        &known_connections,
+                        integrity.clone(),
+                        Some(local_store.clone()),
+                    )?);
+                let store: Arc<dyn CatalogRepository> = local_store;
+                BrokerRepositories::new(store, access, endpoints, identity)
+            }
+        };
         let executions = Executions::new(
             config.outcome_retention,
             config.outcome_retention_max_entries,
@@ -399,7 +497,7 @@ impl Broker {
             endpoints,
             endpoint_listeners: Mutex::new(HashMap::new()),
             endpoint_uploads,
-            config_gate: Mutex::new(()),
+            config_gate: tokio::sync::Mutex::new(()),
             identity,
             executions,
             task_runtime,
@@ -635,8 +733,8 @@ impl Broker {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    pub fn ui_add_secret(&self, name: &str, value: SecretValue) -> Result<SecretMeta> {
-        let meta = self.store.add_secret(name, value)?;
+    pub async fn ui_add_secret(&self, name: &str, value: SecretValue) -> Result<SecretMeta> {
+        let meta = self.store.add_secret(name, value).await?;
         self.audit.append(AuditEntry::new(
             AuditKind::SecretAdded,
             format!("Secret added: {name}"),
@@ -648,7 +746,10 @@ impl Broker {
     /// Store a typed credential. This is the validation layer: the site is
     /// normalized and the TOTP seed parsed/canonicalized here, so the store
     /// transaction only ever sees well-formed material.
-    pub fn ui_add_credential(&self, spec: crate::manage::CredentialAddSpec) -> Result<SecretMeta> {
+    pub async fn ui_add_credential(
+        &self,
+        spec: crate::manage::CredentialAddSpec,
+    ) -> Result<SecretMeta> {
         let crate::manage::CredentialAddSpec {
             kind,
             name,
@@ -669,16 +770,19 @@ impl Broker {
                 (Some(site), totp)
             }
         };
-        let meta = self.store.add_credential(crate::store::NewCredential {
-            kind,
-            name,
-            site,
-            username: username
-                .map(|username| username.trim().to_string())
-                .filter(|username| !username.is_empty()),
-            value,
-            totp,
-        })?;
+        let meta = self
+            .store
+            .add_credential(crate::store::NewCredential {
+                kind,
+                name,
+                site,
+                username: username
+                    .map(|username| username.trim().to_string())
+                    .filter(|username| !username.is_empty()),
+                value,
+                totp,
+            })
+            .await?;
         self.audit.append(match meta.kind {
             crate::types::SecretKind::Secret => AuditEntry::new(
                 AuditKind::SecretAdded,
@@ -715,20 +819,21 @@ impl Broker {
 
     /// The Edit-secret sheet: rename and/or replace the value; blank value
     /// keeps the current one.
-    pub fn ui_edit_secret(
+    pub async fn ui_edit_secret(
         &self,
         id: &Uuid,
         new_name: Option<&str>,
         new_value: Option<SecretValue>,
     ) -> Result<SecretMeta> {
         self.ui_edit_credential(id, new_name, new_value, None, None, None)
+            .await
     }
 
     /// The full edit surface. Beyond rename + value replacement, passwords
     /// may update their sign-in profile (`new_site` replaces; `new_username`
     /// replaces, empty clearing it) and their TOTP factor (`new_totp` sets a
     /// parsed-and-canonicalized seed, empty removes it).
-    pub fn ui_edit_credential(
+    pub async fn ui_edit_credential(
         &self,
         id: &Uuid,
         new_name: Option<&str>,
@@ -737,7 +842,7 @@ impl Broker {
         new_username: Option<String>,
         new_totp: Option<String>,
     ) -> Result<SecretMeta> {
-        let _gate = self.config_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().await;
         let mut meta = self.store.secret_by_id(id)?;
         if new_value.is_some() && !matches!(meta.source, crate::types::SecretSource::Local) {
             return Err(CoreError::ExternalSecretReadOnly);
@@ -768,7 +873,7 @@ impl Broker {
         if let Some(new_name) = new_name {
             if new_name != meta.name {
                 let old = meta.name.clone();
-                let (updated, rewritten) = self.store.rename_secret(id, new_name)?;
+                let (updated, rewritten) = self.store.rename_secret(id, new_name).await?;
                 meta = updated;
                 changes.push(if rewritten > 0 {
                     format!(
@@ -784,7 +889,7 @@ impl Broker {
         let value_replaced = new_value.is_some();
         let mut closed_sessions = 0;
         if let Some(value) = new_value {
-            meta = self.store.replace_secret_value(id, value)?;
+            meta = self.store.replace_secret_value(id, value).await?;
             changes.push("value replaced".into());
             // Rotating a credential has to reach the traffic already using it.
             // A live session authenticated with the old value keeps working
@@ -803,19 +908,22 @@ impl Broker {
             }
         }
         if profile_edit {
-            meta = self.store.set_password_profile(
-                id,
-                new_site,
-                new_username.map(|username| {
-                    let username = username.trim().to_string();
-                    (!username.is_empty()).then_some(username)
-                }),
-            )?;
+            meta = self
+                .store
+                .set_password_profile(
+                    id,
+                    new_site,
+                    new_username.map(|username| {
+                        let username = username.trim().to_string();
+                        (!username.is_empty()).then_some(username)
+                    }),
+                )
+                .await?;
             changes.push("sign-in profile updated".into());
         }
         if let Some(totp) = totp_edit {
             let removing = totp.is_none();
-            meta = self.store.set_totp_factor(id, totp)?;
+            meta = self.store.set_totp_factor(id, totp).await?;
             changes.push(if removing {
                 "2FA secret removed".into()
             } else {
@@ -845,7 +953,7 @@ impl Broker {
         Ok(meta)
     }
 
-    pub fn ui_delete_secret(&self, id: &Uuid) -> Result<SecretMeta> {
+    pub async fn ui_delete_secret(&self, id: &Uuid) -> Result<SecretMeta> {
         // Refuse in-use deletion first, so the user is never asked to
         // confirm an action that cannot proceed.
         let users = self.store.connections_using(id);
@@ -854,7 +962,7 @@ impl Broker {
         }
         // The in-app confirm is the gate: an unused secret grants nothing,
         // so deleting it is destructive to the user's own material only.
-        let meta = self.store.delete_secret(id)?;
+        let meta = self.store.delete_secret(id).await?;
         let detail = if matches!(meta.source, crate::types::SecretSource::Local) {
             "Removed from Keychain"
         } else {
@@ -871,7 +979,7 @@ impl Broker {
         Ok(meta)
     }
 
-    pub fn ui_add_onepassword_integration(
+    pub async fn ui_add_onepassword_integration(
         &self,
         id: Uuid,
         label: &str,
@@ -880,7 +988,8 @@ impl Broker {
     ) -> Result<crate::onepassword::OnePasswordIntegration> {
         let integration = self
             .store
-            .add_onepassword_integration_with_id(id, label, auth, token)?;
+            .add_onepassword_integration_with_id(id, label, auth, token)
+            .await?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::OnePasswordIntegrationAdded,
@@ -895,12 +1004,12 @@ impl Broker {
         Ok(integration)
     }
 
-    pub fn ui_replace_onepassword_token(
+    pub async fn ui_replace_onepassword_token(
         &self,
         id: &Uuid,
         token: SecretValue,
     ) -> Result<crate::onepassword::OnePasswordIntegration> {
-        let integration = self.store.replace_onepassword_token(id, token)?;
+        let integration = self.store.replace_onepassword_token(id, token).await?;
         self.audit.append(AuditEntry::new(
             AuditKind::OnePasswordIntegrationUpdated,
             format!(
@@ -912,11 +1021,11 @@ impl Broker {
         Ok(integration)
     }
 
-    pub fn ui_delete_onepassword_integration(
+    pub async fn ui_delete_onepassword_integration(
         &self,
         id: &Uuid,
     ) -> Result<crate::onepassword::OnePasswordIntegration> {
-        let integration = self.store.delete_onepassword_integration(id)?;
+        let integration = self.store.delete_onepassword_integration(id).await?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::OnePasswordIntegrationDeleted,
@@ -928,12 +1037,12 @@ impl Broker {
         Ok(integration)
     }
 
-    pub fn ui_add_onepassword_secret(
+    pub async fn ui_add_onepassword_secret(
         &self,
         name: &str,
         reference: crate::onepassword::OnePasswordSecretRef,
     ) -> Result<SecretMeta> {
-        let meta = self.store.add_onepassword_secret(name, reference)?;
+        let meta = self.store.add_onepassword_secret(name, reference).await?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::OnePasswordSecretLinked,
@@ -1019,9 +1128,9 @@ impl Broker {
 
     /// Add a connection after validating its pinned destination and secret
     /// bindings. Submitting the form is the user's authorization.
-    pub fn ui_add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
+    pub async fn ui_add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
         self.store.preflight_add_connection(&spec)?;
-        let conn = self.store.add_connection(spec)?;
+        let conn = self.store.add_connection(spec).await?;
         let entry = AuditEntry::new(
             AuditKind::ConnectionAdded,
             format!("Tool added: {}", conn.name),
@@ -1068,7 +1177,7 @@ impl Broker {
     /// without exposing an intermediate, partially configured state. The
     /// credential arrives with the form (or was just minted by an OAuth
     /// sign-in the user drove), so the form submission authorizes both writes.
-    pub fn ui_add_connection_with_secret(
+    pub async fn ui_add_connection_with_secret(
         &self,
         secret_name: &str,
         value: SecretValue,
@@ -1078,7 +1187,8 @@ impl Broker {
             .preflight_add_connection_with_secret(secret_name, &spec)?;
         let (secret, conn) = self
             .store
-            .add_connection_with_secret(secret_name, value, spec)?;
+            .add_connection_with_secret(secret_name, value, spec)
+            .await?;
         self.audit.append(AuditEntry::new(
             AuditKind::SecretAdded,
             format!("Secret added: {}", secret.name),
@@ -1102,26 +1212,31 @@ impl Broker {
     /// authorized under. When the pinned target changes, its direct endpoints
     /// are revoked as well: a pasted address granted for one destination must
     /// not silently cover another.
-    pub fn ui_update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<Connection> {
-        self.ui_update_connection_inner(id, None, spec)
+    pub async fn ui_update_connection(
+        &self,
+        id: &Uuid,
+        spec: ConnectionSpec,
+    ) -> Result<Connection> {
+        self.ui_update_connection_inner(id, None, spec).await
     }
 
     /// Optimistic-concurrency variant used by every management client. The
     /// expected version is the `updated_at` token returned with the DTO the
     /// caller edited.
-    pub fn ui_update_connection_if_current(
+    pub async fn ui_update_connection_if_current(
         &self,
         id: &Uuid,
         expected_updated_at: &str,
         spec: ConnectionSpec,
     ) -> Result<Connection> {
         self.ui_update_connection_inner(id, Some(expected_updated_at), spec)
+            .await
     }
 
     /// Rename only, merging against the broker's authoritative connection
     /// instead of accepting a client reconstruction of its capability config.
     /// The optimistic token still makes a stale rename fail closed.
-    pub fn ui_rename_connection_if_current(
+    pub async fn ui_rename_connection_if_current(
         &self,
         id: &Uuid,
         expected_updated_at: &str,
@@ -1137,9 +1252,10 @@ impl Broker {
                 secrets: current.secrets,
             },
         )
+        .await
     }
 
-    fn ui_update_connection_inner(
+    async fn ui_update_connection_inner(
         &self,
         id: &Uuid,
         expected_updated_at: Option<&str>,
@@ -1152,24 +1268,28 @@ impl Broker {
         let explicit_secrets_changed =
             old.kind() != ConnectionKind::Api && old.secrets != spec.secrets;
         let capability_changed = old.config != spec.config || explicit_secrets_changed;
-        let _gate = self.config_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().await;
         if self.store.connection_by_id(id)?.updated_at != old.updated_at {
             return Err(CoreError::ConnectionChanged);
         }
         let (conn, target_changed) = if capability_changed {
             match expected_updated_at {
-                Some(expected) => self
-                    .store
-                    .update_connection_if_current(id, expected, spec)?,
-                None => self.store.update_connection(id, spec)?,
+                Some(expected) => {
+                    self.store
+                        .update_connection_if_current(id, expected, spec)
+                        .await?
+                }
+                None => self.store.update_connection(id, spec).await?,
             }
         } else {
             (
                 match expected_updated_at {
-                    Some(expected) => self
-                        .store
-                        .rename_connection_if_current(id, expected, spec.name)?,
-                    None => self.store.rename_connection(id, spec.name)?,
+                    Some(expected) => {
+                        self.store
+                            .rename_connection_if_current(id, expected, spec.name)
+                            .await?
+                    }
+                    None => self.store.rename_connection(id, spec.name).await?,
                 },
                 false,
             )
@@ -1194,7 +1314,7 @@ impl Broker {
             // so they die with the retarget. The enabled/disabled flag and
             // any curated MCP tool subset name the *tool* and survive: stale
             // tool names simply stop matching, which only narrows access.
-            let endpoints = self.endpoints.remove_for_connection(id)?;
+            let endpoints = self.endpoints.remove_for_connection(id).await?;
             self.teardown_endpoints(&endpoints, "connection_changed");
             endpoints_revoked = !endpoints.is_empty();
             if endpoints_revoked {
@@ -1251,19 +1371,19 @@ impl Broker {
     /// Delete a connection; wirings die with it. Deletion only narrows
     /// access (its listed secrets stay in the Keychain), so the in-app
     /// confirmation is the gate — no native prompt.
-    pub fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
+    pub async fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let conn = self.store.connection_by_id(id)?;
-        let _gate = self.config_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().await;
         if self.store.connection_by_id(id)?.updated_at != conn.updated_at {
             return Err(CoreError::ApprovalConnectionChanged);
         }
-        let conn = self.store.delete_connection(id)?;
+        let conn = self.store.delete_connection(id).await?;
         self.health.forget(id);
         self.forget_mcp_tools_cache(id);
         self.approvals.revoke(id);
         self.elicitations.revoke(id);
-        let dropped = self.access.remove_for_connection(id)?;
-        let endpoints = self.endpoints.remove_for_connection(id)?;
+        let dropped = self.access.remove_for_connection(id).await?;
+        let endpoints = self.endpoints.remove_for_connection(id).await?;
         self.teardown_endpoints(&endpoints, "connection_deleted");
         // The connection is gone, so nothing it authorized may keep running:
         // invalidate its tickets and close its live sessions, ticket-served
@@ -1292,9 +1412,9 @@ impl Broker {
     /// only — it touches no capability, secret, or access state — so there is
     /// no native confirmation and no audit entry, but every observer refreshes
     /// so all windows (and a remote manager) converge on the new order.
-    pub fn ui_reorder_connections(&self, ordered_ids: &[Uuid]) -> Result<()> {
-        let _gate = self.config_gate.lock().unwrap();
-        self.store.reorder_connections(ordered_ids)?;
+    pub async fn ui_reorder_connections(&self, ordered_ids: &[Uuid]) -> Result<()> {
+        let _gate = self.config_gate.lock().await;
+        self.store.reorder_connections(ordered_ids).await?;
         self.events.connections_changed();
         Ok(())
     }
@@ -1338,7 +1458,8 @@ impl Broker {
                 // The reachability test performs no key exchange, so the
                 // draft's key — stored or typed — is simply not consulted.
                 ConnectionKind::Ssh => {
-                    crate::capability::ssh::test_reachability(&self.store, &connection).await
+                    crate::capability::ssh::test_reachability(self.store.as_ref(), &connection)
+                        .await
                 }
                 _ => Err(crate::capability::TestError::from(
                     "Draft tests cover Postgres and SSH connections",
@@ -1616,11 +1737,10 @@ impl Broker {
             ManageOAuthPlan::Connect {
                 secret_name, spec, ..
             } => {
-                let (_, conn) = self.store.add_connection_with_secret(
-                    &secret_name,
-                    tokens.to_secret_value(),
-                    *spec,
-                )?;
+                let (_, conn) = self
+                    .store
+                    .add_connection_with_secret(&secret_name, tokens.to_secret_value(), *spec)
+                    .await?;
                 self.health.record(
                     &conn.id,
                     crate::types::HealthStatus::Ok,
@@ -1647,7 +1767,8 @@ impl Broker {
             } => {
                 let conn = self.store.connection_by_id(&connection_id)?;
                 self.store
-                    .replace_secret_value(&secret_id, tokens.to_secret_value())?;
+                    .replace_secret_value(&secret_id, tokens.to_secret_value())
+                    .await?;
                 self.health.record(
                     &conn.id,
                     crate::types::HealthStatus::Ok,
@@ -1708,9 +1829,10 @@ impl Broker {
         let tokens = crate::oauth::finish(pending, &oauth_spec, client_secret, &self.http_client)
             .await
             .map_err(CoreError::OAuth)?;
-        let (_, conn) =
-            self.store
-                .add_connection_with_secret(secret_name, tokens.to_secret_value(), spec)?;
+        let (_, conn) = self
+            .store
+            .add_connection_with_secret(secret_name, tokens.to_secret_value(), spec)
+            .await?;
         self.health.record(
             &conn.id,
             crate::types::HealthStatus::Ok,
@@ -1774,7 +1896,8 @@ impl Broker {
             .await
             .map_err(CoreError::OAuth)?;
         self.store
-            .replace_secret_value(&secret_id, tokens.to_secret_value())?;
+            .replace_secret_value(&secret_id, tokens.to_secret_value())
+            .await?;
         self.health.record(
             &conn.id,
             crate::types::HealthStatus::Ok,
@@ -1876,7 +1999,8 @@ impl Broker {
         }
         if report.ok && report.account.is_some() && report.account != connection.account {
             self.store
-                .set_connection_account(id, report.account.clone())?;
+                .set_connection_account(id, report.account.clone())
+                .await?;
             self.events.connections_changed();
         }
         // The check's verdict is the connection's new last-known health, and
@@ -2002,7 +2126,7 @@ impl Broker {
         // the old socket signing (rotation revoked nothing) while every
         // read-back advertises a path nothing listens on.
         let (issued, listener_already_live) = {
-            let _gate = self.config_gate.lock().unwrap();
+            let _gate = self.config_gate.lock().await;
             if !self.access.allows(connection_id) {
                 return Err(CoreError::EndpointRequiresWiring);
             }
@@ -2020,7 +2144,9 @@ impl Broker {
                     .contains_key(&endpoint.id)
             }) && connection.kind() != ConnectionKind::Ssh;
             (
-                self.endpoints.issue(*connection_id, connection.kind())?,
+                self.endpoints
+                    .issue(*connection_id, connection.kind())
+                    .await?,
                 listener_already_live,
             )
         };
@@ -2033,7 +2159,7 @@ impl Broker {
                 .bind_endpoint_listener(&issued.endpoint, &connection)
                 .await
             {
-                let _ = self.endpoints.revoke(&issued.endpoint.id);
+                let _ = self.endpoints.revoke(&issued.endpoint.id).await;
                 return Err(CoreError::Io(error));
             }
         }
@@ -2227,7 +2353,7 @@ impl Broker {
         }
 
         let renewed = {
-            let _gate = self.config_gate.lock().unwrap();
+            let _gate = self.config_gate.lock().await;
             if !self.access.allows(connection_id) {
                 return Err(CoreError::EndpointRequiresWiring);
             }
@@ -2245,7 +2371,7 @@ impl Broker {
                 }
                 return Err(CoreError::EndpointNotFound);
             }
-            self.endpoints.renew(&endpoint.id)?
+            self.endpoints.renew(&endpoint.id).await?
         };
         let info = self.endpoint_info(&connection, &renewed).await?;
         self.audit.append(
@@ -2295,7 +2421,7 @@ impl Broker {
         }
 
         let updated = {
-            let _gate = self.config_gate.lock().unwrap();
+            let _gate = self.config_gate.lock().await;
             if !self.access.allows(connection_id) {
                 return Err(CoreError::EndpointRequiresWiring);
             }
@@ -2313,7 +2439,7 @@ impl Broker {
                 }
                 return Err(CoreError::EndpointNotFound);
             }
-            self.endpoints.set_expiry(&endpoint.id, expire)?
+            self.endpoints.set_expiry(&endpoint.id, expire).await?
         };
         let info = self.endpoint_info(&connection, &updated).await?;
         self.audit.append(
@@ -2433,9 +2559,10 @@ impl Broker {
             return Ok(false);
         }
         let changed = {
-            let _gate = self.config_gate.lock().unwrap();
+            let _gate = self.config_gate.lock().await;
             self.endpoints
-                .set_require_auth(&endpoint.id, require_auth)?
+                .set_require_auth(&endpoint.id, require_auth)
+                .await?
         };
         if !changed {
             return Ok(false);
@@ -2473,9 +2600,9 @@ impl Broker {
 
     /// Revoke one direct endpoint: drop the record, stop its listener, and
     /// close any live sessions it was serving.
-    pub fn ui_revoke_endpoint(&self, endpoint_id: &Uuid) -> Result<bool> {
-        let _gate = self.config_gate.lock().unwrap();
-        let Some(endpoint) = self.endpoints.revoke(endpoint_id)? else {
+    pub async fn ui_revoke_endpoint(&self, endpoint_id: &Uuid) -> Result<bool> {
+        let _gate = self.config_gate.lock().await;
+        let Some(endpoint) = self.endpoints.revoke(endpoint_id).await? else {
             return Ok(false);
         };
         let _ = self.vault.delete(&endpoint.id);
@@ -2528,7 +2655,7 @@ impl Broker {
                             "revoking endpoint {} after listener rebind failed: {error}",
                             endpoint.id
                         );
-                        if let Ok(Some(removed)) = self.endpoints.revoke(&endpoint.id) {
+                        if let Ok(Some(removed)) = self.endpoints.revoke(&endpoint.id).await {
                             self.teardown_endpoints(
                                 std::slice::from_ref(&removed),
                                 "endpoint_revoked",
@@ -2554,7 +2681,7 @@ impl Broker {
                         "dropping stale endpoint {} (connection missing or kind changed)",
                         endpoint.id
                     );
-                    if let Ok(Some(removed)) = self.endpoints.revoke(&endpoint.id) {
+                    if let Ok(Some(removed)) = self.endpoints.revoke(&endpoint.id).await {
                         self.teardown_endpoints(
                             std::slice::from_ref(&removed),
                             "connection_changed",
@@ -2600,7 +2727,7 @@ impl Broker {
                 // Pin the TCP port so a pasted DSN survives a restart, exactly
                 // as the HTTP endpoint's base URL does.
                 if endpoint.port != Some(port) {
-                    let _ = self.endpoints.set_port(&endpoint.id, port);
+                    let _ = self.endpoints.set_port(&endpoint.id, port).await;
                 }
                 handle
             }
@@ -2613,7 +2740,7 @@ impl Broker {
                 // Pin the assigned loopback port so a pasted base URL survives
                 // a restart (rebind reuses it).
                 if endpoint.port != Some(port) {
-                    let _ = self.endpoints.set_port(&endpoint.id, port);
+                    let _ = self.endpoints.set_port(&endpoint.id, port).await;
                 }
                 handle
             }
@@ -2658,10 +2785,10 @@ impl Broker {
     /// refusing the next open would otherwise leave an authenticated upstream
     /// connection alive for an hour after the user revoked it. The issued
     /// endpoint itself remains available for later re-enabling.
-    pub fn ui_set_tool_access(&self, connection_id: &Uuid, enabled: bool) -> Result<bool> {
+    pub async fn ui_set_tool_access(&self, connection_id: &Uuid, enabled: bool) -> Result<bool> {
         let connection = self.store.connection_by_id(connection_id)?;
-        let _gate = self.config_gate.lock().unwrap();
-        let changed = self.access.set_enabled(*connection_id, enabled)?;
+        let _gate = self.config_gate.lock().await;
+        let changed = self.access.set_enabled(*connection_id, enabled).await?;
         if changed {
             let closed_sessions = if enabled {
                 0
@@ -2701,15 +2828,20 @@ impl Broker {
     /// Ask the user to confirm this connection's traffic — or stop asking.
     ///
     /// The explicit switch is the user's authorization in either direction.
-    pub fn ui_set_confirm_mode(&self, connection_id: &Uuid, confirm: ConfirmMode) -> Result<bool> {
+    pub async fn ui_set_confirm_mode(
+        &self,
+        connection_id: &Uuid,
+        confirm: ConfirmMode,
+    ) -> Result<bool> {
         self.ui_set_confirm_mode_with_resolution(
             connection_id,
             confirm,
             crate::request_history::RequestResolution::ConfirmationDisabled,
         )
+        .await
     }
 
-    fn ui_set_confirm_mode_with_resolution(
+    async fn ui_set_confirm_mode_with_resolution(
         &self,
         connection_id: &Uuid,
         confirm: ConfirmMode,
@@ -2717,7 +2849,7 @@ impl Broker {
     ) -> Result<bool> {
         let connection = self.store.connection_by_id(connection_id)?;
         let old_mode = self.access.confirm_mode(connection_id);
-        let _gate = self.config_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().await;
         let current = self.store.connection_by_id(connection_id)?;
         if current.updated_at != connection.updated_at {
             return Err(CoreError::ApprovalConnectionChanged);
@@ -2731,7 +2863,10 @@ impl Broker {
         if current_mode != old_mode {
             return Err(CoreError::ApprovalConnectionChanged);
         }
-        let changed = self.access.set_confirm_mode(*connection_id, confirm)?;
+        let changed = self
+            .access
+            .set_confirm_mode(*connection_id, confirm)
+            .await?;
         if changed {
             if !confirm.is_on() {
                 // The user just said this traffic needs no asking: release
@@ -2775,7 +2910,7 @@ impl Broker {
 
     /// Answer a prompt. "Approve all" persists the switch going off first,
     /// then releases every call parked on the connection.
-    pub fn ui_respond_approval(
+    pub async fn ui_respond_approval(
         &self,
         id: &Uuid,
         decision: crate::approvals::ApprovalDecision,
@@ -2802,11 +2937,14 @@ impl Broker {
             // connection, this prompt included — so there is nothing left
             // to answer afterwards. A no-op change (the switch was already
             // off, raced by another window) still has to release it.
-            if !self.ui_set_confirm_mode_with_resolution(
-                &pending.connection_id,
-                ConfirmMode::Off,
-                crate::request_history::RequestResolution::ApprovedAll,
-            )? {
+            if !self
+                .ui_set_confirm_mode_with_resolution(
+                    &pending.connection_id,
+                    ConfirmMode::Off,
+                    crate::request_history::RequestResolution::ApprovedAll,
+                )
+                .await?
+            {
                 self.approvals.release_as(
                     &pending.connection_id,
                     crate::request_history::RequestResolution::ApprovedAll,
@@ -2854,16 +2992,17 @@ impl Broker {
     /// own traffic rather than granting an agent anything, and turning it
     /// *off* narrows what a durable log retains — which is the direction the
     /// gates exist to protect, not to obstruct.
-    pub fn ui_set_audit_statements(
+    pub async fn ui_set_audit_statements(
         &self,
         connection_id: &Uuid,
         audit_statements: Option<bool>,
     ) -> Result<bool> {
-        let _gate = self.config_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().await;
         let connection = self.store.connection_by_id(connection_id)?;
         let changed = self
             .access
-            .set_audit_statements(*connection_id, audit_statements)?;
+            .set_audit_statements(*connection_id, audit_statements)
+            .await?;
         if changed {
             let effective = self
                 .access
@@ -2895,7 +3034,7 @@ impl Broker {
 
     /// Choose whether a plain HTTP connection returns upstream headers that
     /// can mint or negotiate credentials. Returning them is the default.
-    pub fn ui_set_expose_response_credentials(
+    pub async fn ui_set_expose_response_credentials(
         &self,
         connection_id: &Uuid,
         expose: bool,
@@ -2908,7 +3047,7 @@ impl Broker {
         }
         let old = self.access.expose_response_credentials(connection_id);
 
-        let _gate = self.config_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().await;
         let current = self.store.connection_by_id(connection_id)?;
         if current.updated_at != connection.updated_at
             || self.access.expose_response_credentials(connection_id) != old
@@ -2917,7 +3056,8 @@ impl Broker {
         }
         let changed = self
             .access
-            .set_expose_response_credentials(*connection_id, expose)?;
+            .set_expose_response_credentials(*connection_id, expose)
+            .await?;
         if changed {
             let audit = AuditEntry::new(
                 AuditKind::SettingsChanged,
@@ -2940,12 +3080,12 @@ impl Broker {
     /// `None` restores the default (all tools); `Some` is enforced by the
     /// broker on every `tools/call` and mirrored by the MCP host's tool
     /// listing.
-    pub fn ui_set_allowed_tools(
+    pub async fn ui_set_allowed_tools(
         &self,
         connection_id: &Uuid,
         tools: Option<Vec<String>>,
     ) -> Result<bool> {
-        let _gate = self.config_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().await;
         let connection = self.store.connection_by_id(connection_id)?;
         let detail = match &tools {
             None => "all tools".to_string(),
@@ -2955,7 +3095,7 @@ impl Broker {
                 if list.len() == 1 { "" } else { "s" }
             ),
         };
-        let changed = self.access.set_allowed_tools(*connection_id, tools)?;
+        let changed = self.access.set_allowed_tools(*connection_id, tools).await?;
         if changed {
             // A pending prompt or open window was admitted under the old
             // tool subset. Narrowing must take effect before any parked call
@@ -3053,18 +3193,18 @@ impl Broker {
     /// the "disconnect everything" action — agents that read the token file
     /// reconnect on their own; pasted endpoint addresses must be reissued.
     /// The shell presents the destructive confirmation before calling this.
-    pub fn ui_rotate_key(&self) -> Result<()> {
-        let _gate = self.config_gate.lock().unwrap();
+    pub async fn ui_rotate_key(&self) -> Result<()> {
+        let _gate = self.config_gate.lock().await;
         // Revoke standing capabilities before rotating the shared identity.
         // If a persistence error interrupts the operation, failing with fewer
         // live capabilities is safer than leaving an endpoint usable after a
         // successful identity rotation.
-        let endpoints = self.endpoints.revoke_all()?;
+        let endpoints = self.endpoints.revoke_all().await?;
         for endpoint in &endpoints {
             let _ = self.vault.delete(&endpoint.id);
         }
         self.teardown_endpoints(&endpoints, "key_rotated");
-        self.identity.rotate()?;
+        self.identity.rotate().await?;
         let sessions_closed = self.data_plane.close_all("key_rotated");
         // An approval window is permission for traffic from the generation
         // being disconnected; it must not outlive it.
@@ -3151,12 +3291,12 @@ impl Broker {
     /// Ask before trusting a first-seen SSH host key, or stop asking.
     ///
     /// The explicit switch is the user's authorization in either direction.
-    pub fn ui_set_confirm_ssh_host_keys(&self, on: bool) -> Result<()> {
+    pub async fn ui_set_confirm_ssh_host_keys(&self, on: bool) -> Result<()> {
         let old = self.store.settings().confirm_ssh_host_keys;
         if old == on {
             return Ok(());
         }
-        self.store.set_confirm_ssh_host_keys(on)?;
+        self.store.set_confirm_ssh_host_keys(on).await?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::SettingsChanged,
@@ -3169,12 +3309,12 @@ impl Broker {
         Ok(())
     }
 
-    pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
+    pub async fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         let old = self.store.settings().menu_bar_hides_dock;
         if old == on {
             return Ok(());
         }
-        self.store.set_menu_bar_hides_dock(on)?;
+        self.store.set_menu_bar_hides_dock(on).await?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::SettingsChanged,

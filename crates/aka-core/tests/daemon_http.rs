@@ -386,36 +386,40 @@ async fn truncated_upstream() -> u16 {
 }
 
 fn api_connection(harness: &Harness, name: &str, port: u16) {
-    harness
-        .broker
-        .store
-        .add_secret(
-            "GITHUB_API_KEY",
-            Zeroizing::new("ghp_test_secret_value".into()),
-        )
-        .unwrap();
-    harness
-        .broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: name.into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(port),
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+    futures::executor::block_on(async {
+        harness
+            .broker
+            .store
+            .add_secret(
+                "GITHUB_API_KEY",
+                Zeroizing::new("ghp_test_secret_value".into()),
+            )
+            .await
+            .unwrap();
+        harness
+            .broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: name.into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(port),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
-            },
-            secrets: vec![],
-        })
-        .unwrap();
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
+            })
+            .await
+            .unwrap();
+    });
 }
 
 /* -------------------------------- tests ---------------------------------- */
@@ -564,7 +568,7 @@ async fn pairing_flow_and_token_auth() {
         .contains("reached the broker"));
 
     // Rotation invalidates the old key immediately, with the recovery hint.
-    h.broker.ui_rotate_key().unwrap();
+    h.broker.ui_rotate_key().await.unwrap();
     let (status, body) = uds_request(
         &h.socket,
         "GET",
@@ -716,6 +720,7 @@ async fn wrong_connection_type_names_the_right_endpoint() {
     h.broker
         .store
         .add_secret("DATABASE_PASSWORD", Zeroizing::new("pg-pw".into()))
+        .await
         .unwrap();
     let pw = h.broker.store.secret_by_name("DATABASE_PASSWORD").unwrap();
     h.broker
@@ -732,6 +737,7 @@ async fn wrong_connection_type_names_the_right_endpoint() {
             },
             secrets: vec![pw.id],
         })
+        .await
         .unwrap();
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
@@ -764,6 +770,7 @@ async fn connections_listing_shows_targets_only() {
     h.broker
         .store
         .add_secret("DATABASE_PASSWORD", Zeroizing::new("pg-pw".into()))
+        .await
         .unwrap();
     let pw = h.broker.store.secret_by_name("DATABASE_PASSWORD").unwrap();
     h.broker
@@ -780,6 +787,7 @@ async fn connections_listing_shows_targets_only() {
             },
             secrets: vec![pw.id],
         })
+        .await
         .unwrap();
 
     let token = h.pair("claude-code").await;
@@ -810,7 +818,7 @@ async fn connections_listing_shows_targets_only() {
     // Disabling a tool flips its `wired` flag for every agent at once —
     // access is per connection, not per caller.
     let pg = h.broker.store.connection_by_name("prod-db").unwrap();
-    h.broker.ui_set_tool_access(&pg.id, false).unwrap();
+    h.broker.ui_set_tool_access(&pg.id, false).await.unwrap();
     let (status, list) = uds_request(
         &h.socket,
         "GET",
@@ -1018,6 +1026,7 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
     h.broker
         .store
         .add_secret("STREAM_TOKEN", Zeroizing::new(TOKEN.into()))
+        .await
         .unwrap();
     // A port with (essentially certainly) nothing listening: bind, then drop.
     let dead_port = {
@@ -1044,6 +1053,7 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
@@ -1251,6 +1261,7 @@ async fn mutating_request_id_is_independent_per_connection() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
@@ -1386,7 +1397,7 @@ async fn connections_are_enabled_by_default_and_disable_refuses() {
     assert_eq!(status, 200);
 
     // Disabling the tool refuses every agent…
-    assert!(h.broker.ui_set_tool_access(&conn.id, false).unwrap());
+    assert!(h.broker.ui_set_tool_access(&conn.id, false).await.unwrap());
     let (status, body) = uds_request(
         &h.socket,
         "POST",
@@ -1403,7 +1414,7 @@ async fn connections_are_enabled_by_default_and_disable_refuses() {
     );
 
     // …and re-enabling flips the same call back to allowed.
-    assert!(h.broker.ui_set_tool_access(&conn.id, true).unwrap());
+    assert!(h.broker.ui_set_tool_access(&conn.id, true).await.unwrap());
     let (status, _) = uds_request(
         &h.socket,
         "POST",
@@ -1590,6 +1601,7 @@ async fn recognized_mcp_envelope_legs_do_not_spend_the_tool_call_budget() {
     h.broker
         .store
         .add_secret("MCP_KEY", Zeroizing::new("mcp_test_secret_value".into()))
+        .await
         .unwrap();
     h.broker
         .store
@@ -1610,6 +1622,7 @@ async fn recognized_mcp_envelope_legs_do_not_spend_the_tool_call_budget() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
@@ -1684,7 +1697,7 @@ async fn rotated_key_gets_a_distinct_reason() {
     let mut h = harness(BrokerConfig::default()).await;
     let token1 = h.pair("claude-code").await;
     // The user rotates the key in the app.
-    h.broker.ui_rotate_key().unwrap();
+    h.broker.ui_rotate_key().await.unwrap();
     // The old key's next call is told what happened and what to do, not
     // just "invalid_token": re-read the token file the broker rewrote.
     let auth1 = format!("Bearer {token1}");
@@ -1841,6 +1854,7 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
     h.broker
         .store
         .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .await
         .unwrap();
     h.broker
         .store
@@ -1861,6 +1875,7 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let conn = h.broker.store.connection_by_name("docs").unwrap();
     let token = h.pair("claude-code").await;
@@ -1869,6 +1884,7 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
     // Allow only "search"; "delete" is not in the subset.
     h.broker
         .ui_set_allowed_tools(&conn.id, Some(vec!["search".into()]))
+        .await
         .unwrap();
 
     let call = |name: &str| {
@@ -1943,7 +1959,7 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
     assert_eq!(status, 200, "listing is not a tools/call and passes");
 
     // Clearing the subset (None) allows everything again.
-    h.broker.ui_set_allowed_tools(&conn.id, None).unwrap();
+    h.broker.ui_set_allowed_tools(&conn.id, None).await.unwrap();
     let (status, _) = uds_request(
         &h.socket,
         "POST",
@@ -1982,6 +1998,7 @@ async fn an_oversized_mcp_tool_result_becomes_a_bounded_explicit_tool_error() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
@@ -2086,6 +2103,7 @@ async fn elicitations_require_an_exact_upstream_correlation_capability() {
     h.broker
         .store
         .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .await
         .unwrap();
     h.broker
         .store
@@ -2106,6 +2124,7 @@ async fn elicitations_require_an_exact_upstream_correlation_capability() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
@@ -2370,6 +2389,7 @@ async fn http_direct_endpoint_fails_closed_before_reaching_upstream() {
     let conn = h.broker.store.connection_by_name("github").unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .await
         .unwrap();
     let (info, port) = issue_http_endpoint(&h).await;
 
@@ -2405,9 +2425,11 @@ async fn http_direct_endpoint_only_exempts_identifiable_mcp_transport_legs() {
                 secrets: vec![],
             },
         )
+        .await
         .unwrap();
     h.broker
         .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .await
         .unwrap();
     let (info, port) = issue_http_endpoint(&h).await;
     let auth = format!("Bearer {}", info.secret);
@@ -2521,9 +2543,11 @@ async fn curated_mcp_tools_cannot_bypass_the_subset_through_a_direct_endpoint() 
                 secrets: vec![],
             },
         )
+        .await
         .unwrap();
     h.broker
         .ui_set_allowed_tools(&conn.id, Some(vec!["search".into()]))
+        .await
         .unwrap();
     let info = h.broker.ui_issue_endpoint(&conn.id).await.unwrap();
     let port: u16 = info.dsn.rsplit(':').next().unwrap().parse().unwrap();
@@ -2582,6 +2606,7 @@ async fn http_direct_endpoint_returns_cookies_until_explicitly_contained() {
     assert!(h
         .broker
         .ui_set_expose_response_credentials(&connection.id, false)
+        .await
         .unwrap());
     let (status, headers, _) =
         loopback_request(port, "GET", "/cookies", &[("authorization", &auth)], None).await;
@@ -2611,7 +2636,10 @@ async fn disabling_access_during_http_upload_prevents_dispatch() {
     // for the remainder of the body.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let connection = h.broker.store.connection_by_name("github").unwrap();
-    h.broker.ui_set_tool_access(&connection.id, false).unwrap();
+    h.broker
+        .ui_set_tool_access(&connection.id, false)
+        .await
+        .unwrap();
     let _ = stream.write_all(b"xxx").await;
 
     let mut response = Vec::new();
@@ -2704,6 +2732,7 @@ async fn http_direct_endpoint_rejects_client_supplied_custom_credential_header()
     h.broker
         .store
         .add_secret("API_KEY", Zeroizing::new("real-key".into()))
+        .await
         .unwrap();
     h.broker
         .store
@@ -2724,6 +2753,7 @@ async fn http_direct_endpoint_rejects_client_supplied_custom_credential_header()
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     h.pair("claude-code").await;
     let (info, port) = issue_http_endpoint(&h).await;
@@ -2790,7 +2820,11 @@ async fn http_endpoint_survives_rebind_and_revoke_frees_the_port() {
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
 
     // Revoking stops the listener and frees the loopback port.
-    assert!(h.broker.ui_revoke_endpoint(&info.endpoint_id).unwrap());
+    assert!(h
+        .broker
+        .ui_revoke_endpoint(&info.endpoint_id)
+        .await
+        .unwrap());
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         while tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
@@ -2887,6 +2921,7 @@ async fn streamed_response_credentials_follow_the_connection_policy() {
     let connection = h.broker.store.connection_by_name("github").unwrap();
     h.broker
         .ui_set_expose_response_credentials(&connection.id, false)
+        .await
         .unwrap();
     let (_, _, body) = uds_request_raw(
         &h.socket,
@@ -3064,7 +3099,7 @@ async fn a_refused_stream_carries_one_error_frame_and_no_head() {
     let up = upstream().await;
     api_connection(&h, "github", up.port);
     let conn = h.broker.store.connection_by_name("github").unwrap();
-    h.broker.ui_set_tool_access(&conn.id, false).unwrap();
+    h.broker.ui_set_tool_access(&conn.id, false).await.unwrap();
     let token = h.pair("agent").await;
 
     let (status, content_type, body) = uds_request_raw(
@@ -3137,6 +3172,7 @@ async fn a_streamed_answer_still_carries_what_the_broker_attached_after_it() {
     h.broker
         .store
         .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .await
         .unwrap();
     h.broker
         .store
@@ -3157,6 +3193,7 @@ async fn a_streamed_answer_still_carries_what_the_broker_attached_after_it() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");

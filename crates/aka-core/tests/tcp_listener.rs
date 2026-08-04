@@ -41,7 +41,7 @@ async fn harness(public_url: Option<&str>) -> Harness {
     )
     .await
     .unwrap();
-    let manage_token = broker.identity.issue_manage_token().unwrap();
+    let manage_token = broker.identity.issue_manage_token().await.unwrap();
     let handle = daemon::serve_with(
         broker.clone(),
         ServeOptions {
@@ -389,6 +389,7 @@ async fn data_plane_opens_advertise_the_configured_host() {
     // at open time).
     broker
         .ui_add_secret("PGPW", zeroize::Zeroizing::new("pw".into()))
+        .await
         .unwrap();
     let pg_secret = broker
         .store
@@ -410,6 +411,7 @@ async fn data_plane_opens_advertise_the_configured_host() {
             },
             secrets: vec![pg_secret],
         })
+        .await
         .unwrap();
     let (status, body) = uds_json(
         &socket,

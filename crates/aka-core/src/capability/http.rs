@@ -27,7 +27,7 @@ use crate::capability::{BodySpool, SpoolError, SpooledBody, TestError, TestError
 use crate::config::BrokerConfig;
 use crate::endpoints::EndpointListenerHandle;
 use crate::executions::ExecOutcome;
-use crate::store::Store;
+use crate::repository::{CatalogReader, CatalogRepository, PolicyRepository};
 use crate::template::Template;
 use crate::types::{Connection, ConnectionConfig, ConnectionKind, DirectEndpoint};
 use crate::wire::ErrorReason;
@@ -845,8 +845,8 @@ fn redacting_stream(
 /// connection is snapshotted so a concurrent edit can't repoint what the
 /// user approved.
 pub struct HttpExecution {
-    pub store: Arc<Store>,
-    pub access: Arc<crate::policy::AccessTable>,
+    pub store: Arc<dyn CatalogRepository>,
+    pub access: Arc<dyn PolicyRepository>,
     pub audit: Arc<AuditLog>,
     pub client: reqwest::Client,
     pub config: BrokerConfig,
@@ -1874,7 +1874,7 @@ fn probe_path(config: &ConnectionConfig) -> &str {
 /// UI-initiated test: GET the connection's probe path with the credential
 /// injected and the connection's TLS trust.
 pub async fn test_upstream(
-    store: &Arc<Store>,
+    store: &Arc<dyn CatalogRepository>,
     client: &reqwest::Client,
     timeout: std::time::Duration,
     connection: &Connection,
@@ -2008,7 +2008,10 @@ impl std::fmt::Display for CredentialFailure {
 /// with surrounding whitespace, and a trailing newline from a pasted secret
 /// would corrupt every signature without any legible error from AWS — so
 /// the value is trimmed here, once.
-async fn signer_secret(store: &Arc<Store>, name: &str) -> Result<Zeroizing<String>, String> {
+async fn signer_secret(
+    store: &Arc<dyn CatalogRepository>,
+    name: &str,
+) -> Result<Zeroizing<String>, String> {
     store
         .secret_value_by_name(name)
         .await
@@ -2017,7 +2020,7 @@ async fn signer_secret(store: &Arc<Store>, name: &str) -> Result<Zeroizing<Strin
 }
 
 pub(crate) async fn render_connection_injection(
-    store: &Arc<Store>,
+    store: &Arc<dyn CatalogRepository>,
     client: &reqwest::Client,
     connection: &Connection,
 ) -> Result<RenderedInjection, CredentialFailure> {
@@ -2101,11 +2104,13 @@ pub(crate) async fn render_connection_injection(
     }
     // A template that will not render is conclusive about the connection, which
     // is the `From<String>` default.
-    render_injection(store, template).await.map_err(Into::into)
+    render_injection(store.as_ref(), template)
+        .await
+        .map_err(Into::into)
 }
 
 pub(crate) async fn render_injection(
-    store: &Store,
+    store: &dyn CatalogReader,
     template_src: &str,
 ) -> Result<RenderedInjection, String> {
     // An empty template is a credential-less connection: nothing to render,
@@ -3015,7 +3020,7 @@ async fn proxy_handler(
                     "endpoint",
                     format!("{method} {}", crate::approvals::capped_text(&path)),
                 )
-                .credentials_from(&broker.store)
+                .credentials_from(broker.store.as_ref())
                 .http_operation(&method, &path),
             )
             .await;

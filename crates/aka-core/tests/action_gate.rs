@@ -44,30 +44,34 @@ async fn broker_with(events: Arc<dyn BrokerEvents>) -> (Arc<Broker>, tempfile::T
 }
 
 fn add_github(broker: &Broker) -> Connection {
-    broker
-        .store
-        .add_secret("GITHUB_API_KEY", Zeroizing::new("ghp_x".into()))
-        .unwrap();
-    broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "github".into(),
-            config: ConnectionConfig::Api {
-                host: "api.github.com".into(),
-                scheme: "https".into(),
-                port: None,
-                trusted_ca_bundle_path: None,
-                template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
-                mcp_path: None,
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
-            },
-            secrets: vec![],
-        })
-        .unwrap()
+    futures::executor::block_on(async {
+        broker
+            .store
+            .add_secret("GITHUB_API_KEY", Zeroizing::new("ghp_x".into()))
+            .await
+            .unwrap();
+        broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: "github".into(),
+                config: ConnectionConfig::Api {
+                    host: "api.github.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                    mcp_path: None,
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
+            })
+            .await
+            .unwrap()
+    })
 }
 
 #[tokio::test]
@@ -82,6 +86,7 @@ async fn explicit_management_actions_do_not_consult_native_authentication() {
     );
     broker
         .ui_edit_secret(&secret.id, None, Some(Zeroizing::new("ghp_rotated".into())))
+        .await
         .unwrap();
 
     broker
@@ -105,23 +110,28 @@ async fn explicit_management_actions_do_not_consult_native_authentication() {
                 secrets: vec![],
             },
         )
+        .await
         .unwrap();
-    assert!(broker.ui_set_tool_access(&conn.id, false).unwrap());
-    assert!(broker.ui_set_tool_access(&conn.id, true).unwrap());
+    assert!(broker.ui_set_tool_access(&conn.id, false).await.unwrap());
+    assert!(broker.ui_set_tool_access(&conn.id, true).await.unwrap());
     assert!(broker
         .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .await
         .unwrap());
     assert!(broker
         .ui_set_confirm_mode(&conn.id, ConfirmMode::Off)
+        .await
         .unwrap());
     assert!(broker
         .ui_set_expose_response_credentials(&conn.id, false)
+        .await
         .unwrap());
     assert!(broker
         .ui_set_expose_response_credentials(&conn.id, true)
+        .await
         .unwrap());
     assert!(!broker.ui_agent_key_for_copy().unwrap().is_empty());
-    broker.ui_rotate_key().unwrap();
+    broker.ui_rotate_key().await.unwrap();
     broker.ui_clear_activity().unwrap();
 }
 
@@ -140,9 +150,10 @@ async fn key_rotation_closes_sessions_and_revokes_standing_endpoints() {
     let endpoint = broker
         .endpoints
         .issue(conn.id, ConnectionKind::Api)
+        .await
         .unwrap();
 
-    broker.ui_rotate_key().unwrap();
+    broker.ui_rotate_key().await.unwrap();
 
     assert_eq!(
         tokio::time::timeout(std::time::Duration::from_secs(1), close.reason())
@@ -178,6 +189,7 @@ async fn secret_rotation_closes_bound_sessions_and_approval_windows() {
     let secret = broker
         .store
         .add_secret("PG_PASSWORD", Zeroizing::new("before".into()))
+        .await
         .unwrap();
     let conn = broker
         .store
@@ -193,6 +205,7 @@ async fn secret_rotation_closes_bound_sessions_and_approval_windows() {
             },
             secrets: vec![secret.id],
         })
+        .await
         .unwrap();
 
     let ticket = broker.data_plane.issue("claude-code", &conn);
@@ -221,6 +234,7 @@ async fn secret_rotation_closes_bound_sessions_and_approval_windows() {
     .expect("approval prompt");
     assert!(broker
         .ui_respond_approval(&pending.id, ApprovalDecision::ApproveWindow)
+        .await
         .unwrap());
     assert_eq!(gate.await.unwrap(), Verdict::Allowed);
     assert!(broker
@@ -230,6 +244,7 @@ async fn secret_rotation_closes_bound_sessions_and_approval_windows() {
 
     broker
         .ui_edit_secret(&secret.id, None, Some(Zeroizing::new("after".into())))
+        .await
         .unwrap();
 
     assert_eq!(
@@ -255,6 +270,7 @@ async fn approve_all_remains_a_traffic_decision_and_disables_future_prompts() {
     let conn = add_github(&broker);
     broker
         .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .await
         .unwrap();
 
     let approvals = broker.approvals.clone();
@@ -281,6 +297,7 @@ async fn approve_all_remains_a_traffic_decision_and_disables_future_prompts() {
 
     assert!(broker
         .ui_respond_approval(&pending.id, ApprovalDecision::ApproveAll)
+        .await
         .unwrap());
     assert_eq!(gate.await.unwrap(), Verdict::Allowed);
     assert_eq!(broker.access.confirm_mode(&conn.id), ConfirmMode::Off);

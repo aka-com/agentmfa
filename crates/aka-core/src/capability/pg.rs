@@ -53,8 +53,8 @@ use super::{TestError, TestErrorKind};
 use crate::audit::{AuditEntry, AuditKind};
 use crate::broker::Broker;
 use crate::endpoints::EndpointListenerHandle;
+use crate::repository::CatalogRepository;
 use crate::sessions::{RedeemError, SessionHandle};
-use crate::store::Store;
 use crate::types::{Connection, ConnectionConfig, ConnectionKind, DirectEndpoint, PgSslMode};
 
 /* ---------------------------- wire constants ------------------------------ */
@@ -1258,7 +1258,7 @@ where
     .collect::<Vec<_>>()
     .join(" · ");
     let request = crate::approvals::ApprovalRequest::new(connection, agent, "New Postgres session")
-        .credentials_from(&state.broker.store)
+        .credentials_from(state.broker.store.as_ref())
         .maybe_detail((!detail.is_empty()).then_some(detail))
         .consequence(SESSION_CONSEQUENCE);
     let verdict = tokio::select! {
@@ -2384,7 +2384,7 @@ fn needs_password() -> TestError {
 }
 
 async fn dial_upstream(
-    store: &Arc<Store>,
+    store: &Arc<dyn CatalogRepository>,
     connection: &Connection,
     client_params: &[(String, String)],
 ) -> Result<UpstreamSession, TestError> {
@@ -2646,7 +2646,7 @@ pub struct TestSuccess {
 }
 
 pub async fn test_upstream(
-    store: &Arc<Store>,
+    store: &Arc<dyn CatalogRepository>,
     connection: &Connection,
 ) -> Result<TestSuccess, TestError> {
     let ConnectionConfig::Pg { dbname, user, .. } = &connection.config else {

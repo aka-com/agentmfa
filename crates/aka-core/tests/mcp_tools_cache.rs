@@ -104,10 +104,11 @@ async fn broker() -> (Arc<Broker>, tempfile::TempDir) {
     (broker, dir)
 }
 
-fn add_mcp_connection(broker: &Broker, port: u16) -> aka_core::types::Connection {
+async fn add_mcp_connection(broker: &Broker, port: u16) -> aka_core::types::Connection {
     broker
         .store
         .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .await
         .unwrap();
     broker
         .store
@@ -128,6 +129,7 @@ fn add_mcp_connection(broker: &Broker, port: u16) -> aka_core::types::Connection
             },
             secrets: vec![],
         })
+        .await
         .unwrap()
 }
 
@@ -139,7 +141,7 @@ fn names(tools: &[aka_core::mcp::McpToolInfo]) -> Vec<String> {
 async fn a_lapsed_credential_falls_back_to_the_cached_listing() {
     let (broker, _dir) = broker().await;
     let server = mock_mcp().await;
-    let conn = add_mcp_connection(&broker, server.port);
+    let conn = add_mcp_connection(&broker, server.port).await;
 
     // A healthy server answers live, and the listing is remembered.
     let live = broker.ui_list_mcp_tools(&conn.id).await.unwrap();
@@ -168,7 +170,7 @@ async fn a_lapsed_credential_falls_back_to_the_cached_listing() {
 async fn no_cache_and_a_dead_credential_still_errors() {
     let (broker, _dir) = broker().await;
     let server = mock_mcp().await;
-    let conn = add_mcp_connection(&broker, server.port);
+    let conn = add_mcp_connection(&broker, server.port).await;
 
     // Never listed successfully, and the server refuses: there is nothing to
     // fall back to, so the caller learns the listing failed.
@@ -180,7 +182,7 @@ async fn no_cache_and_a_dead_credential_still_errors() {
 async fn retargeting_drops_the_cached_listing() {
     let (broker, _dir) = broker().await;
     let server = mock_mcp().await;
-    let conn = add_mcp_connection(&broker, server.port);
+    let conn = add_mcp_connection(&broker, server.port).await;
 
     broker.ui_list_mcp_tools(&conn.id).await.unwrap();
 
@@ -208,6 +210,7 @@ async fn retargeting_drops_the_cached_listing() {
                 secrets: vec![],
             },
         )
+        .await
         .unwrap();
 
     assert!(

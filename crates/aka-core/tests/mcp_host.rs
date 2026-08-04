@@ -232,6 +232,7 @@ async fn broker_http_relay_matches_the_shared_mcp_fixture() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let daemon = daemon::serve(broker).await.unwrap();
     let token = pair(&daemon.socket_path, "golden-test").await;
@@ -316,6 +317,7 @@ async fn broker_mcp_relay_returns_when_the_matching_sse_frame_arrives() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let daemon = daemon::serve(broker).await.unwrap();
     let token = pair(&daemon.socket_path, "stream-test").await;
@@ -437,6 +439,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     broker
         .store
         .add_secret("API_KEY", Zeroizing::new("secret-value".into()))
+        .await
         .expect("secret");
     for name in ["prod-db", "deploy-host"] {
         broker
@@ -459,6 +462,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                 },
                 secrets: vec![],
             })
+            .await
             .expect("connection");
     }
 
@@ -481,6 +485,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
             },
             secrets: vec![],
         })
+        .await
         .expect("mcp connection");
 
     // Every agent shares one key; access is a property of the connection.
@@ -496,6 +501,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         .expect("deploy-host");
     broker
         .ui_set_tool_access(&deploy.id, false)
+        .await
         .expect("disable");
 
     let host = start_mcp_host(broker.clone()).await;
@@ -650,6 +656,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     for connection in broker.store.list_connections() {
         broker
             .ui_set_tool_access(&connection.id, false)
+            .await
             .expect("disable");
     }
     let mut bare = McpClient::new(&host.base_url, mcp_path, &first);

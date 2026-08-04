@@ -70,8 +70,9 @@ use super::{TestError, TestErrorKind};
 use crate::audit::{AuditEntry, AuditKind};
 use crate::broker::Broker;
 use crate::endpoints::EndpointListenerHandle;
+use crate::repository::CatalogReader;
 use crate::sessions::SessionHandle;
-use crate::store::{PinOutcome, Store};
+use crate::store::PinOutcome;
 use crate::types::{Connection, ConnectionConfig, ConnectionKind, DirectEndpoint};
 
 /* --------------------------- ssh-agent protocol --------------------------- */
@@ -352,7 +353,10 @@ fn parse_supported_private_key(pem: &[u8]) -> Result<PrivateKey, String> {
 }
 
 impl SshSigner {
-    async fn load_optional(store: &Store, connection: &Connection) -> Result<Option<Self>, String> {
+    async fn load_optional(
+        store: &dyn CatalogReader,
+        connection: &Connection,
+    ) -> Result<Option<Self>, String> {
         if connection.secrets.is_empty() {
             Ok(None)
         } else {
@@ -362,7 +366,7 @@ impl SshSigner {
 
     /// Read and parse the connection's bound private key. Fails the open (not
     /// each later signature) on a missing, encrypted, or unsupported key.
-    pub async fn load(store: &Store, connection: &Connection) -> Result<Self, String> {
+    pub async fn load(store: &dyn CatalogReader, connection: &Connection) -> Result<Self, String> {
         let secret_id = connection
             .secrets
             .first()
@@ -781,7 +785,7 @@ pub const SSH_BROKER_OPTIONS: &[&str] = &[
 /// (validating that it parses) and read the server's version banner.
 /// No key exchange is performed, so login and the host key stay unverified.
 pub async fn test_reachability(
-    store: &Store,
+    store: &dyn CatalogReader,
     connection: &Connection,
 ) -> Result<String, TestError> {
     let ConnectionConfig::Ssh { host, port, .. } = &connection.config else {
@@ -822,8 +826,8 @@ pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<Stri
     else {
         return Err("not an ssh connection".into());
     };
-    let Some(signer) = SshSigner::load_optional(&broker.store, connection).await? else {
-        return test_reachability(&broker.store, connection).await;
+    let Some(signer) = SshSigner::load_optional(broker.store.as_ref(), connection).await? else {
+        return test_reachability(broker.store.as_ref(), connection).await;
     };
     let expected_host_key = if host_key_fingerprint.is_empty() {
         None
@@ -894,7 +898,7 @@ pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<Stri
     // a jump host's inherited stderr — is read for nothing.
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
 
-    let graded = grade_login(broker, connection, &state, output.status, &log);
+    let graded = grade_login(broker, connection, &state, output.status, &log).await;
     audit_login_attempt(broker, connection, &state, &graded);
     graded
 }
@@ -974,7 +978,7 @@ fn test_login_command(
 /// Grade the finished `ssh` run. Split out of `test_login` so the attempt
 /// audits exactly once whichever way it went, without an audit call before
 /// each of the early returns.
-fn grade_login(
+async fn grade_login(
     broker: &Broker,
     connection: &Connection,
     state: &TestAgentState,
@@ -1011,7 +1015,11 @@ fn grade_login(
                         "SSH signed in without reporting the server host key",
                     )
                 })?;
-            let pinned = match broker.store.pin_ssh_host_key(&connection.id, &observed) {
+            let pinned = match broker
+                .store
+                .pin_ssh_host_key(&connection.id, &observed)
+                .await
+            {
                 // Trust-on-first-use, same as the open path: record the pin
                 // and tell the UI, or the newly pinned fingerprint sits in
                 // the store with nothing to show it arrived.
@@ -1299,7 +1307,7 @@ pub async fn open_agent(
                 .map_err(|e| format!("SSH host key fingerprint is invalid: {e}"))?,
         )
     };
-    let signer = SshSigner::load_optional(&broker.store, &connection)
+    let signer = SshSigner::load_optional(broker.store.as_ref(), &connection)
         .await?
         .map(Arc::new);
 
@@ -1704,7 +1712,7 @@ async fn handle_endpoint_conn(
     }
     // Load the key for this connection at each login so rotating a
     // compromised key takes effect without restarting the broker.
-    let signer = match SshSigner::load_optional(&state.broker.store, &connection).await {
+    let signer = match SshSigner::load_optional(state.broker.store.as_ref(), &connection).await {
         Ok(signer) => signer.map(Arc::new),
         Err(e) => {
             // A key that cannot be read is not a signature the client should
@@ -2062,6 +2070,7 @@ async fn tofu_session_bind(
         .broker
         .store
         .pin_ssh_host_key(&state.connection_id, &observed)
+        .await
     {
         Ok(PinOutcome::Pinned(pinned)) => {
             state.broker.audit.append(
@@ -2222,7 +2231,7 @@ async fn confirm_login(state: &Arc<AgentState>, user: &str) -> Option<Vec<u8>> {
         .approvals
         .gate(
             crate::approvals::ApprovalRequest::new(&connection, state.agent.clone(), summary)
-                .credentials_from(&state.broker.store)
+                .credentials_from(state.broker.store.as_ref())
                 .maybe_detail(
                     state
                         .host_key_fingerprint

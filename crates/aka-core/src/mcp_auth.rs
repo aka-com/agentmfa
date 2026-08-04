@@ -948,17 +948,14 @@ async fn run_flow(
     let (connection_id, connection_name) = match plan {
         CompletionPlan::New { secret_name, spec } => {
             let spec = *spec;
-            let blocking_broker = broker.clone();
             let value = Zeroizing::new(tokens.access_token.to_string());
             let name_for_error = spec.name.clone();
-            let connection = tokio::task::spawn_blocking(move || {
-                blocking_broker.ui_add_connection_with_secret(&secret_name, value, spec)
-            })
-            .await
-            .map_err(|e| FlowFailure::plain(format!("save task failed: {e}")))?
-            .map_err(|error| {
-                FlowFailure::plain(format!("could not save “{name_for_error}”: {error}"))
-            })?;
+            let connection = broker
+                .ui_add_connection_with_secret(&secret_name, value, spec)
+                .await
+                .map_err(|error| {
+                    FlowFailure::plain(format!("could not save “{name_for_error}”: {error}"))
+                })?;
             // This creation happened outside a UI command round-trip, so
             // push the refresh to every window.
             broker.events.connections_changed();
@@ -975,6 +972,7 @@ async fn run_flow(
             broker
                 .store
                 .replace_secret_value(&secret_id, Zeroizing::new(tokens.access_token.to_string()))
+                .await
                 .map_err(|e| FlowFailure::plain(format!("could not store the new token: {e}")))?;
             broker.publish_agent_surface_change();
             broker.events.connections_changed();
@@ -999,10 +997,10 @@ async fn run_flow(
         .expires_in
         .and_then(|seconds| i64::try_from(seconds).ok())
         .map(|seconds| Utc::now() + chrono::Duration::seconds(seconds));
-    if let Err(error) =
-        broker
-            .store
-            .set_connection_oauth(&connection_id, grant.to_secret_value(), expires_at)
+    if let Err(error) = broker
+        .store
+        .set_connection_oauth(&connection_id, grant.to_secret_value(), expires_at)
+        .await
     {
         tracing::warn!("could not store the OAuth refresh grant for {connection_name}: {error}");
     }
@@ -1030,7 +1028,8 @@ async fn run_flow(
         if report.account.is_some() {
             let _ = broker
                 .store
-                .set_connection_account(&connection_id, report.account.clone());
+                .set_connection_account(&connection_id, report.account.clone())
+                .await;
             broker.events.connections_changed();
         }
         (report.account, None)

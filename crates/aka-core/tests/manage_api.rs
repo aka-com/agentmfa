@@ -42,7 +42,7 @@ async fn harness() -> Harness {
     )
     .await
     .unwrap();
-    let manage_token = broker.identity.issue_manage_token().unwrap();
+    let manage_token = broker.identity.issue_manage_token().await.unwrap();
     let handle = daemon::serve(broker.clone()).await.unwrap();
     let socket = handle.socket_path.clone();
     Harness {
@@ -458,6 +458,7 @@ async fn an_expired_manage_token_is_rejected_over_http() {
         .broker
         .identity
         .issue_manage_token_with_ttl(Some(std::time::Duration::ZERO))
+        .await
         .unwrap();
     let (status, body) = uds_request(
         &h.socket,
@@ -798,7 +799,7 @@ async fn request_history_round_trips_pending_and_terminal_lifecycles() {
             .approvals
             .gate(
                 ApprovalRequest::new(&connection, "codex", "GET /user")
-                    .credentials_from(&broker.store)
+                    .credentials_from(broker.store.as_ref())
                     .http_operation(&http::Method::GET, "/user"),
             )
             .await
@@ -1230,7 +1231,7 @@ async fn revoking_a_manage_token_closes_its_live_event_stream() {
         }
     }
 
-    assert!(h.broker.identity.revoke_manage_token().unwrap());
+    assert!(h.broker.identity.revoke_manage_token().await.unwrap());
     let ended = tokio::time::timeout(std::time::Duration::from_secs(3), body.frame())
         .await
         .expect("revoked stream did not close");

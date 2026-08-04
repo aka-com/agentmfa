@@ -238,6 +238,7 @@ async fn rust_host_projects_and_invokes_native_broker_tools() {
     broker
         .store
         .add_secret("API_KEY", Zeroizing::new("secret-value".into()))
+        .await
         .unwrap();
     broker
         .store
@@ -258,6 +259,7 @@ async fn rust_host_projects_and_invokes_native_broker_tools() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let connection = broker.store.list_connections().pop().unwrap();
     let token = broker.identity.token();
@@ -318,7 +320,10 @@ async fn rust_host_projects_and_invokes_native_broker_tools() {
         .starts_with("text/event-stream"));
     let mut event_bytes = events.bytes_stream();
 
-    broker.ui_set_tool_access(&connection.id, false).unwrap();
+    broker
+        .ui_set_tool_access(&connection.id, false)
+        .await
+        .unwrap();
     let listed = rpc(
         &client,
         &host.mcp_url(),
@@ -435,6 +440,7 @@ async fn rust_host_discovers_a_provisioned_upstream_without_reconnecting() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
 
     let event = tokio::time::timeout(std::time::Duration::from_secs(2), event_bytes.next())
@@ -556,6 +562,7 @@ async fn rust_host_cancels_active_calls_and_notifies_the_upstream() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let token = broker.identity.token();
     let host = mcp_host::serve(broker).await.unwrap();
@@ -665,7 +672,7 @@ async fn rust_host_keeps_catalog_overflow_searchable_and_callable() {
     )
     .await
     .unwrap();
-    add_mcp_connection(&broker, "catalog", upstream_port);
+    add_mcp_connection(&broker, "catalog", upstream_port).await;
     let token = broker.identity.token();
     let host = mcp_host::serve(broker).await.unwrap();
     let client = reqwest::Client::new();
@@ -837,8 +844,9 @@ async fn rust_host_serves_tool_calls_before_the_first_listing() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
-    add_mcp_connection(&broker, "notes", upstream_port);
+    add_mcp_connection(&broker, "notes", upstream_port).await;
     let token = broker.identity.token();
     let host = mcp_host::serve(broker).await.unwrap();
     let client = reqwest::Client::new();
@@ -950,7 +958,7 @@ async fn rust_host_completes_a_multi_round_input_flow() {
     )
     .await
     .unwrap();
-    add_mcp_connection(&broker, "input", upstream_port);
+    add_mcp_connection(&broker, "input", upstream_port).await;
     let token = broker.identity.token();
     let host = mcp_host::serve(broker).await.unwrap();
     let client = reqwest::Client::new();
@@ -1083,6 +1091,7 @@ async fn rust_host_projects_upstream_resources_prompts_and_completion() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     let token = broker.identity.token();
     let host = mcp_host::serve(broker).await.unwrap();
@@ -1285,9 +1294,11 @@ async fn a_curated_connection_refuses_every_non_tool_capability() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     broker
         .ui_set_allowed_tools(&connection.id, Some(vec!["search".into()]))
+        .await
         .unwrap();
     let token = broker.identity.token();
     let host = mcp_host::serve(broker).await.unwrap();
@@ -1462,7 +1473,7 @@ fn tool_payload(response: &Value) -> Value {
     serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
 }
 
-fn add_mcp_connection(broker: &Broker, name: &str, port: u16) {
+async fn add_mcp_connection(broker: &Broker, name: &str, port: u16) {
     broker
         .store
         .add_connection(ConnectionSpec {
@@ -1482,5 +1493,6 @@ fn add_mcp_connection(broker: &Broker, name: &str, port: u16) {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
 }

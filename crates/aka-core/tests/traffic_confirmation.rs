@@ -76,8 +76,7 @@ impl BrokerEvents for ScriptedUser {
         if let Some(broker) = broker {
             // A real shell answers from its UI thread; answering inline is
             // the same call, just sooner.
-            broker
-                .ui_respond_approval(&pending.id, decision)
+            futures::executor::block_on(broker.ui_respond_approval(&pending.id, decision))
                 .expect("responding should not fail");
         }
         ApprovalHandling::Taken
@@ -157,8 +156,7 @@ impl Harness {
 
     fn confirm(&self, name: &str) {
         let conn = self.broker.store.connection_by_name(name).unwrap();
-        self.broker
-            .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        futures::executor::block_on(self.broker.ui_set_confirm_mode(&conn.id, ConfirmMode::On))
             .unwrap();
     }
 }
@@ -271,32 +269,36 @@ async fn upstream() -> Upstream {
 
 fn api_connection(harness: &Harness, name: &str, port: u16, mcp_path: Option<&str>) {
     let secret = format!("{}_KEY", name.to_uppercase().replace('-', "_"));
-    harness
-        .broker
-        .store
-        .add_secret(&secret, Zeroizing::new("token-value".into()))
-        .unwrap();
-    harness
-        .broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: name.into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(port),
-                trusted_ca_bundle_path: None,
-                template: format!("Authorization: Bearer {{{{{secret}}}}}"),
-                mcp_path: mcp_path.map(str::to_string),
-                test_path: None,
-                oauth: None,
-                signer: None,
-                client_cert_path: None,
-                client_key_path: None,
-            },
-            secrets: vec![],
-        })
-        .unwrap();
+    futures::executor::block_on(async {
+        harness
+            .broker
+            .store
+            .add_secret(&secret, Zeroizing::new("token-value".into()))
+            .await
+            .unwrap();
+        harness
+            .broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: name.into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(port),
+                    trusted_ca_bundle_path: None,
+                    template: format!("Authorization: Bearer {{{{{secret}}}}}"),
+                    mcp_path: mcp_path.map(str::to_string),
+                    test_path: None,
+                    oauth: None,
+                    signer: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                secrets: vec![],
+            })
+            .await
+            .unwrap();
+    });
 }
 
 fn reason(body: &Value) -> &str {
@@ -472,6 +474,7 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
     broker
         .store
         .add_secret("GITHUB_KEY", Zeroizing::new("token-value".into()))
+        .await
         .unwrap();
     let conn = broker
         .store
@@ -492,9 +495,11 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
             },
             secrets: vec![],
         })
+        .await
         .unwrap();
     broker
         .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .await
         .unwrap();
 
     let token = broker.identity.token();
@@ -564,6 +569,7 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
     assert_eq!(pending.len(), 1);
     assert!(broker
         .ui_respond_approval(&pending[0].id, ApprovalDecision::ApproveWindow)
+        .await
         .unwrap());
     let (status, body) = call.await.unwrap();
     assert_eq!(status, 200, "{body}");
@@ -921,6 +927,7 @@ async fn turning_the_switch_off_releases_traffic_already_parked() {
     // that raised the question would be a strange way to honour that.
     h.broker
         .ui_set_confirm_mode(&conn.id, ConfirmMode::Off)
+        .await
         .unwrap();
     let (status, body) = call.await.unwrap();
     assert_eq!(status, 200, "{body}");
@@ -957,7 +964,7 @@ async fn disabling_the_tool_refuses_traffic_parked_on_it() {
     .expect("the call should park on a prompt");
 
     // Access going away is the opposite case: the authority itself is gone.
-    h.broker.ui_set_tool_access(&conn.id, false).unwrap();
+    h.broker.ui_set_tool_access(&conn.id, false).await.unwrap();
     let (status, body) = call.await.unwrap();
     assert_eq!(status, 403, "{body}");
     assert_eq!(reason(&body), "denied_by_policy");
@@ -1007,10 +1014,12 @@ async fn a_stale_prompt_cannot_open_a_window_after_the_connection_changes() {
                 secrets: conn.secrets.clone(),
             },
         )
+        .await
         .unwrap();
     assert!(h
         .broker
         .ui_respond_approval(&prompt.id, ApprovalDecision::ApproveWindow)
+        .await
         .unwrap());
 
     let (status, body) = call.await.unwrap();
@@ -1065,6 +1074,7 @@ async fn concurrent_calls_ride_one_prompt() {
 
     h.broker
         .ui_respond_approval(&pending[0].id, ApprovalDecision::ApproveWindow)
+        .await
         .unwrap();
     for call in calls {
         let (status, _) = call.await.unwrap();
