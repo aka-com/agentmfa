@@ -412,6 +412,54 @@ test('the hero-sentence menus open and move under the arrow keys', async () => {
   });
 });
 
+test('the activity agent filter holds one agent at a time', async () => {
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="activity"]')!,
+  );
+  const trigger = await testingLibrary.waitFor(() => {
+    const button = document.querySelector<HTMLButtonElement>(
+      'button[data-act="act-filter-agent-menu"]',
+    );
+    assert.ok(button, 'the activity filters offer an agent picker');
+    return button;
+  });
+  // The default covers every agent, so the picker starts unpressed.
+  assert.equal(trigger.textContent, 'Agent:All');
+  assert.equal(trigger.classList.contains('on'), false);
+
+  testingLibrary.fireEvent.click(trigger);
+  const options = await testingLibrary.waitFor(() => {
+    const found = [...document.querySelectorAll<HTMLElement>('.act-filter-menu [role="option"]')];
+    assert.ok(found.length > 2, 'the menu lists the default plus the agents seen');
+    return found;
+  });
+  assert.equal(options[0].textContent, 'All agents');
+  assert.equal(options[0].getAttribute('aria-selected'), 'true');
+
+  const agent = options[1].dataset.value!;
+  testingLibrary.fireEvent.click(options[1]);
+  await testingLibrary.waitFor(() => {
+    assert.equal(document.querySelector('.act-filter-menu'), null);
+    assert.equal(trigger.textContent, `Agent:${agent}`);
+    assert.ok(trigger.classList.contains('on'));
+  });
+
+  // Every mounted entry belongs to the chosen agent — one filter, not the
+  // union the chip row allowed.
+  const chips = [...document.querySelectorAll<HTMLElement>('.act-chip.untrusted-identity')];
+  assert.ok(chips.length, 'the filtered list still has entries');
+  for (const chip of chips) assert.equal(chip.textContent, `reported as “${agent}”`);
+
+  testingLibrary.fireEvent.click(trigger);
+  const back = await testingLibrary.findByRole(document.body, 'option', { name: 'All agents' });
+  testingLibrary.fireEvent.click(back);
+  await testingLibrary.waitFor(() => {
+    assert.equal(document.querySelector('.act-filter-menu'), null);
+    assert.equal(trigger.textContent, 'Agent:All');
+    assert.equal(trigger.classList.contains('on'), false);
+  });
+});
+
 test('key rotation requires an ordinary destructive confirmation', async () => {
   testingLibrary.fireEvent.click(
     testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }),

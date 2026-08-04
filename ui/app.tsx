@@ -202,6 +202,7 @@ function clearBrokerOwnedState(): void {
   // an agent filter from broker A would silently empty broker B's activity.
   state.activityQuery = '';
   state.activityAgent = null;
+  state.activityAgentMenuOpen = false;
   state.activityAlertsOnly = false;
   state.requestQuery = '';
   state.requestAgent = null;
@@ -283,6 +284,7 @@ function showRequestInbox(): void {
   state.startMenuOpen = null;
   state.addPalette = null;
   state.catalogActionMenuOpen = null;
+  state.activityAgentMenuOpen = false;
   state.connMenuOpen = null;
   state.connMenuPoint = null;
   state.connDetailOpen = false;
@@ -1986,12 +1988,6 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
           ? <span className="cat-mech"
               title="Added by connecting to the vendor’s MCP server">MCP</span>
           : null}
-        {entry.limitedSupport
-          ? <span className="cat-limited" tabIndex={0}
-              data-tippy-content={`${entry.name} only accepts OAuth sign-ins from pre-approved clients. Use the API connector, or contact your representative at the company for support.`}>
-              Limited support
-            </span>
-          : null}
         {action}
       </div>
       {onePassword ? <OnePasswordCatalogExpansion /> : builtin ? <CredentialsExpansion /> : null}
@@ -3141,6 +3137,45 @@ async function loadOlderActivity(): Promise<void> {
   }
 }
 
+/** The agent filter: one agent at a time, or "All agents" — a pill-shaped
+ * menu rather than a chip per agent, which grew past the filter row as soon
+ * as a few agents had connected. The names are self-reported, so they stay
+ * in the untrusted-identity treatment wherever they appear. */
+function ActivityAgentFilter({ agents }: { agents: string[] }): ReactNode {
+  const open = state.activityAgentMenuOpen;
+  const selected = state.activityAgent;
+  return (
+    <div className={`act-filter-select ${open ? 'open' : ''}`}>
+      <button className={`seg-btn act-filter act-filter-trigger ${selected ? 'on' : ''}`}
+        data-act="act-filter-agent-menu" aria-haspopup="listbox" aria-expanded={open}
+        title="Only show activity from one agent (self-reported label)">
+        <span className="act-filter-key">Agent:</span>
+        {selected
+          ? <span className="untrusted-identity" dir="auto">{selected}</span>
+          : <span>All</span>}
+        <span className="act-filter-chev" aria-hidden="true">
+          <Icon markup={ICONS.chevronDown} />
+        </span>
+      </button>
+      {open
+        ? <div className="act-filter-menu" role="listbox" aria-label="Filter activity by agent">
+            <button className={`menu-item ${selected ? '' : 'on'}`} role="option"
+              aria-selected={!selected} data-act="act-filter-agent" data-value="">
+              All agents
+            </button>
+            {agents.map((agent) => (
+              <button key={agent} className={`menu-item ${selected === agent ? 'on' : ''}`}
+                role="option" aria-selected={selected === agent}
+                data-act="act-filter-agent" data-value={agent}>
+                <span className="untrusted-identity" dir="auto">{agent}</span>
+              </button>
+            ))}
+          </div>
+        : null}
+    </div>
+  );
+}
+
 function ActivityView(): ReactNode {
   const liveSessions = state.sessions.length
     ? <LiveSessions extraClass="activity-live-sessions" />
@@ -3156,7 +3191,8 @@ function ActivityView(): ReactNode {
       </>
     );
   }
-  const agentCounts = countAgents(state.activity.map((entry) => entry.agent));
+  // Agents seen in the loaded window, offered one at a time in the picker.
+  const agents = [...new Set(state.activity.map((entry) => entry.agent).filter(Boolean))] as string[];
   const entries = filteredActivity();
   const hasOlder = state.activityNextBefore !== null;
   return (
@@ -3170,9 +3206,7 @@ function ActivityView(): ReactNode {
         <button className={`seg-btn act-filter ${state.activityAlertsOnly ? 'on' : ''}`}
           data-act="act-filter-alerts" aria-pressed={state.activityAlertsOnly}
           title="Only show warnings and errors">Alerts</button>
-        <AgentFilterChips counts={agentCounts} selected={state.activityAgent}
-          act="act-filter-agent" noun="activity"
-          onSelect={(agent) => { state.activityAgent = agent; render(); }} />
+        {agents.length ? <ActivityAgentFilter agents={agents} /> : null}
       </div>
       {entries.length
         ? <ActivityList entries={entries} />
@@ -5674,7 +5708,9 @@ const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const tabLabel = (tab: Tab): string =>
   tab === 'connections' ? 'Tools'
   : tab === 'start' ? 'Get started'
-  : tab === 'activity' ? 'Activity Log'
+  // The menu-bar dropdown's segmented tabs are narrow; the full "Activity
+  // Log" belongs to the window's sidebar, where there is room for it.
+  : tab === 'activity' ? (mode === 'dropdown' ? 'Activity' : 'Activity Log')
   : cap(tab);
 
 // Flash "Copied" in place of the masked value for a moment after a copy.
@@ -6673,6 +6709,11 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.activityAgentMenuOpen && !target?.closest('.act-filter-select')) {
+    state.activityAgentMenuOpen = false;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.connMenuOpen && !target?.closest('.tile-menu-wrap')) {
     state.connMenuOpen = null;
     state.connMenuPoint = null;
@@ -6701,6 +6742,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.startMenuOpen = null;
       state.addPalette = null;
       state.catalogActionMenuOpen = null;
+      state.activityAgentMenuOpen = false;
       state.connMenuOpen = null;
       state.connMenuPoint = null;
       state.epMenuOpen = null;
@@ -7541,9 +7583,14 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.activityAlertsOnly = !state.activityAlertsOnly;
       render();
       break;
+    case 'act-filter-agent-menu':
+      state.activityAgentMenuOpen = !state.activityAgentMenuOpen;
+      render();
+      break;
     case 'act-filter-agent': {
-      const value = btn.dataset.value || '';
-      state.activityAgent = state.activityAgent === value ? null : value;
+      // An empty value is the "All agents" default at the top of the menu.
+      state.activityAgent = btn.dataset.value || null;
+      state.activityAgentMenuOpen = false;
       render();
       break;
     }
@@ -8293,6 +8340,7 @@ function handleAppKeyDown(e: KeyboardEvent): void {
   if (e.key === 'Escape') {
     if (state.addPalette) { state.addPalette = null; render(); return; }
     if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
+    if (state.activityAgentMenuOpen) { state.activityAgentMenuOpen = false; render(); return; }
     if (state.startMenuOpen) { closeStartMenu(state.startMenuOpen); return; }
     if (state.connMenuOpen) {
       state.connMenuOpen = null;

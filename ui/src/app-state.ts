@@ -288,6 +288,8 @@ export interface AppState {
   wiringTools: WiringToolsState | null;
   activityQuery: string;
   activityAgent: string | null;
+  /** The activity page's agent picker has its menu open. */
+  activityAgentMenuOpen: boolean;
   activityAlertsOnly: boolean;
   requestQuery: string;
   requestAgent: string | null;
@@ -398,6 +400,7 @@ function createInitialState(): AppState {
     wiringTools: null,
     activityQuery: '',
     activityAgent: null,
+    activityAgentMenuOpen: false,
     activityAlertsOnly: false,
     requestQuery: '',
     requestAgent: null,

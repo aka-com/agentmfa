@@ -133,11 +133,6 @@ export interface CatalogEntry {
   keywords?: string[];
   /** From the generated MCP-registry tail, not the curated catalog. */
   registry?: boolean;
-  /**
-   * The vendor only admits pre-whitelisted OAuth clients, so connecting may
-   * be refused for us. Shown as a "Limited support" badge on the row.
-   */
-  limitedSupport?: boolean;
   /** Announced but not yet available: rendered grayed out with no action. */
   disabled?: boolean;
 }
@@ -509,7 +504,6 @@ export const REGISTRY_CATALOG: CatalogEntry[] = REGISTRY_SERVERS.map((server) =>
   connType: 'api',
   mcp: true,
   registry: true,
-  limitedSupport: server.limitedSupport,
   keywords: [...server.keywords, 'mcp', 'registry'],
   mcpTemplate: {
     serverUrl: server.serverUrl,

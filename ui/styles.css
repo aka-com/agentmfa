@@ -746,10 +746,6 @@
   .start-menu-name{ font-weight: 600; font-size: 0.8125rem; }
   .start-menu-tx{ display: flex; flex-direction: column; gap: 1px; min-width: 0; }
   .start-menu-sub{ font-size: 0.71875rem; color: var(--muted); }
-  .start-menu-limited{
-    padding: 1px 4px; border-radius: 4px; background: var(--amber-wash);
-    color: var(--amber-ink); font-size: 0.5625rem; font-weight: 700;
-  }
   .dd-global.start-global{
   width: 100%; max-width: none; max-height: none; overflow: visible;
   margin: 8px 0 0; padding: 0; border-bottom: 0;
@@ -1310,11 +1306,6 @@
 .cat-soon {
   flex: 0 0 auto; padding: 4px 12px; border: 1px dashed var(--line);
   border-radius: 999px; color: var(--muted); font-size: 0.75rem; font-weight: 600;
-}
-.cat-limited {
-  flex: 0 0 auto; padding: 4px 10px; border: 1px solid var(--line);
-  border-radius: 999px; background: var(--wash); color: var(--muted);
-  font-size: 0.71875rem; font-weight: 600; white-space: nowrap; opacity: .8;
 }
 /* The connection mechanism, badged per row now that sections group by
    domain rather than by how a tool connects. */
@@ -2090,13 +2081,13 @@
   background: var(--accent-wash-2); border-color: var(--accent-border);
   color: var(--accent-ink); box-shadow: none;
 }
-/* The qualifier prefix ("agent:") stays muted so the untrusted name reads
+/* The qualifier prefix ("Agent:") stays muted so the untrusted name reads
    as the value of a filter, not as part of the app's own copy. */
 .act-filter-key { color: var(--muted); font-weight: 400; }
 .act-filter.on .act-filter-key { color: inherit; opacity: .8; }
-/* Overflow select for agents past the chip limit, dressed as a sibling
-   chip; it always shows its "+N more…" placeholder because picking an
-   agent promotes that agent to a pressed chip instead. */
+/* Overflow select for agents past the chip limit (request inbox), dressed
+   as a sibling chip; it always shows its "+N more…" placeholder because
+   picking an agent promotes that agent to a pressed chip instead. */
 .act-filter-more {
   flex: 0 0 auto; appearance: none; -webkit-appearance: none;
   font: inherit; font-size: 0.75rem; color: var(--muted);
@@ -2104,6 +2095,25 @@
   padding: 3px 10px; cursor: pointer;
 }
 .act-filter-more:hover { background: var(--btn-hover); }
+/* The activity agent picker wears the filter pill; only its menu is extra. */
+.act-filter-select { position: relative; flex: 0 0 auto; }
+.act-filter-trigger { max-width: 26ch; }
+.act-filter-trigger > span:not(.act-filter-key):not(.act-filter-chev) {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.act-filter-chev { display: inline-flex; margin-right: -2px; opacity: .7; }
+.act-filter-chev svg { width: 12px; height: 12px; }
+.act-filter-select.open .act-filter-chev { transform: rotate(180deg); }
+/* Right-anchored: the picker is the last control in the filter row, so a
+   left-anchored menu would hang off the narrow menu-bar surface. */
+.act-filter-menu {
+  position: absolute; right: 0; top: calc(100% + 5px); z-index: 20;
+  min-width: 180px; max-width: 280px; max-height: 320px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
+  box-shadow: 0 10px 28px rgba(10,15,40,.22);
+}
+.act-filter-menu .menu-item.on { background: var(--accent-wash-2); color: var(--accent-ink); }
 .activity-page-footer {
   display: flex; align-items: center; justify-content: center; gap: 9px; flex-wrap: wrap;
   padding: 14px 8px 4px; color: var(--muted); font-size: 0.75rem; text-align: center;

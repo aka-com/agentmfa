@@ -80,21 +80,16 @@ function clientSeenAt(connectMode: ConnectModeId): string | null {
 function ToolMenu({ option }: { option: StartOption }): ReactNode {
   return (
     <div className="start-menu" role="listbox" aria-label="What to connect">
-      {START_OPTIONS.map((candidate) => {
-        const entry = candidate.catalogId ? catalogEntryById(candidate.catalogId) : undefined;
-        return (
-          <button key={candidate.id} role="option" aria-selected={candidate.id === option.id}
-            className={`start-menu-item ${candidate.id === option.id ? 'on' : ''}`}
-            data-act="start-option" data-id={candidate.id}>
-            <span className="start-menu-ico" aria-hidden="true">
-              <AppIcon icon={ICONS[candidate.icon]} />
-            </span>
-            <span className="start-menu-name">{candidate.label}</span>
-            {entry?.limitedSupport
-              ? <span className="start-menu-limited">Limited</span> : null}
-          </button>
-        );
-      })}
+      {START_OPTIONS.map((candidate) => (
+        <button key={candidate.id} role="option" aria-selected={candidate.id === option.id}
+          className={`start-menu-item ${candidate.id === option.id ? 'on' : ''}`}
+          data-act="start-option" data-id={candidate.id}>
+          <span className="start-menu-ico" aria-hidden="true">
+            <AppIcon icon={ICONS[candidate.icon]} />
+          </span>
+          <span className="start-menu-name">{candidate.label}</span>
+        </button>
+      ))}
     </div>
   );
 }

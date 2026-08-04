@@ -11,6 +11,10 @@
 // hidden configuration — the endpoint is prefilled into the add form where
 // it stays visible and editable, and connecting still runs the ordinary
 // sign-in (or paste-a-token) flow with the broker's own discovery.
+//
+// Vendors that only admit pre-whitelisted OAuth clients (so connecting may
+// be refused for us) say so at the end of their description rather than
+// carrying a separate badge.
 
 /** One hosted MCP server the catalog can offer beyond the curated rows. */
 export interface RegistryServer {
@@ -23,11 +27,6 @@ export interface RegistryServer {
   /** The vendor's published streamable-HTTP MCP endpoint. */
   serverUrl: string;
   keywords: string[];
-  /**
-   * The vendor only admits pre-whitelisted OAuth clients, so connecting may
-   * be refused for us. Surfaced as a "Limited support" badge on the row.
-   */
-  limitedSupport?: boolean;
 }
 
 export const REGISTRY_SERVERS: RegistryServer[] = [
@@ -35,19 +34,17 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
     id: 'mcp-vercel',
     name: 'Vercel MCP',
     icon: 'vercel',
-    description: 'Deployments, projects & domains',
+    description: 'Deployments, projects & domains — limited support',
     serverUrl: 'https://mcp.vercel.com/',
     keywords: ['deploy', 'hosting', 'domains', 'frontend'],
-    limitedSupport: true,
   },
   {
     id: 'mcp-figma',
     name: 'Figma MCP',
     icon: 'figma',
-    description: 'Design files & components',
+    description: 'Design files & components — limited support',
     serverUrl: 'https://mcp.figma.com/mcp',
     keywords: ['design', 'ui', 'prototypes', 'components'],
-    limitedSupport: true,
   },
   {
     id: 'mcp-atlassian',
