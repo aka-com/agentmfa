@@ -30,11 +30,32 @@ use crate::onepassword::{
 use crate::paths::Paths;
 use crate::template::{is_valid_secret_name, Template};
 use crate::types::{
-    Connection, ConnectionConfig, ConnectionKind, SecretMeta, SecretSource, SecretValue, Settings,
-    SignerSpec,
+    Connection, ConnectionConfig, ConnectionKind, SecretKind, SecretMeta, SecretSource,
+    SecretValue, Settings, SignerSpec,
 };
 use crate::vault::{SecretVault, VaultAttrs};
 use crate::Result;
+
+/// What `Store::add_credential` stores. `site` arrives normalized and `totp`
+/// canonicalized — validation belongs to the broker layer so the store's
+/// transaction stays small.
+pub struct NewCredential {
+    pub kind: SecretKind,
+    /// Required for secrets; ignored for passwords, which derive theirs.
+    pub name: Option<String>,
+    pub site: Option<String>,
+    pub username: Option<String>,
+    pub value: SecretValue,
+    pub totp: Option<SecretValue>,
+}
+
+/// The Keychain display attributes for a password's TOTP-seed item.
+fn totp_vault_attrs(name: &str, created_at: chrono::DateTime<Utc>) -> VaultAttrs {
+    VaultAttrs {
+        name: format!("{name} (2FA)"),
+        created_at,
+    }
+}
 
 /// Every persisted connection mutation must advance its optimistic-lock
 /// version, even when the wall clock has not ticked (or moves backwards).
@@ -295,20 +316,67 @@ impl Store {
     }
 
     pub fn add_secret(&self, name: &str, value: SecretValue) -> Result<SecretMeta> {
-        if !is_valid_secret_name(name) {
-            return Err(CoreError::InvalidSecretName(name.to_string()));
-        }
+        self.add_credential(NewCredential {
+            kind: SecretKind::Secret,
+            name: Some(name.to_string()),
+            site: None,
+            username: None,
+            value,
+            totp: None,
+        })
+    }
+
+    /// Store a typed credential. Secrets are named by the caller; passwords
+    /// derive their name from site + username, and may attach a TOTP seed
+    /// (already canonicalized by `totp::TotpSpec` at the validation layer,
+    /// exactly as `site` arrives normalized by `password::normalize_site`).
+    pub fn add_credential(&self, spec: NewCredential) -> Result<SecretMeta> {
+        let NewCredential {
+            kind,
+            name,
+            site,
+            username,
+            value,
+            totp,
+        } = spec;
         let mut state = self.state.lock().unwrap();
+        let (name, site, username) = match kind {
+            SecretKind::Secret => {
+                if totp.is_some() || site.is_some() || username.is_some() {
+                    return Err(CoreError::NotAPassword);
+                }
+                (name.unwrap_or_default(), None, None)
+            }
+            SecretKind::Password => {
+                let site = site
+                    .filter(|site| !site.is_empty())
+                    .ok_or_else(|| CoreError::InvalidSite("enter the website".into()))?;
+                let username = username.filter(|username| !username.is_empty());
+                let derived = crate::password::derive_password_name(
+                    &site,
+                    username.as_deref(),
+                    |candidate| state.secrets.iter().any(|s| s.name == candidate),
+                );
+                (derived, Some(site), username)
+            }
+        };
+        if !is_valid_secret_name(&name) {
+            return Err(CoreError::InvalidSecretName(name));
+        }
         if state.secrets.iter().any(|s| s.name == name) {
-            return Err(CoreError::SecretNameTaken(name.to_string()));
+            return Err(CoreError::SecretNameTaken(name));
         }
         let now = Utc::now();
         let meta = SecretMeta {
             id: Uuid::new_v4(),
-            name: name.to_string(),
+            name: name.clone(),
             created_at: now,
             updated_at: now,
             source: SecretSource::Local,
+            kind,
+            site,
+            username,
+            totp_vault_id: totp.is_some().then(Uuid::new_v4),
         };
         self.vault.set(
             &meta.id,
@@ -319,16 +387,149 @@ impl Store {
             &value,
         )?;
         drop(value); // late fetch, early drop, the plaintext came in exactly once
+        if let (Some(totp_vault_id), Some(seed)) = (&meta.totp_vault_id, totp) {
+            if let Err(error) =
+                self.vault
+                    .set(totp_vault_id, &totp_vault_attrs(&meta.name, now), &seed)
+            {
+                if let Err(rollback) = self.vault.delete(&meta.id) {
+                    tracing::error!("failed to roll back vault item {}: {rollback}", meta.id);
+                }
+                return Err(error);
+            }
+        }
         let mut next = state.clone();
         next.secrets.push(meta.clone());
         if let Err(error) = self.persist(&next) {
             if let Err(rollback) = self.vault.delete(&meta.id) {
                 tracing::error!("failed to roll back vault item {}: {rollback}", meta.id);
             }
+            if let Some(totp_vault_id) = &meta.totp_vault_id {
+                if let Err(rollback) = self.vault.delete(totp_vault_id) {
+                    tracing::error!("failed to roll back vault item {totp_vault_id}: {rollback}");
+                }
+            }
             return Err(error);
         }
         *state = next;
         Ok(meta)
+    }
+
+    /// Update a password's sign-in metadata. `site` replaces when given
+    /// (already normalized); `username` replaces when given, with `Some(None)`
+    /// clearing it. The derived name deliberately stays put — connection
+    /// wiring references it, and identity edits must not rewire tools.
+    pub fn set_password_profile(
+        &self,
+        id: &Uuid,
+        site: Option<String>,
+        username: Option<Option<String>>,
+    ) -> Result<SecretMeta> {
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        let secret = next
+            .secrets
+            .iter_mut()
+            .find(|s| &s.id == id)
+            .ok_or(CoreError::SecretNotFound)?;
+        if secret.kind != SecretKind::Password {
+            return Err(CoreError::NotAPassword);
+        }
+        if let Some(site) = site {
+            if site.is_empty() {
+                return Err(CoreError::InvalidSite("enter the website".into()));
+            }
+            secret.site = Some(site);
+        }
+        if let Some(username) = username {
+            secret.username = username.filter(|username| !username.is_empty());
+        }
+        secret.updated_at = Utc::now();
+        let meta = secret.clone();
+        self.commit(&mut state, next)?;
+        Ok(meta)
+    }
+
+    /// Attach, replace, or (`None`) remove a password's TOTP factor. The
+    /// seed arrives canonicalized; it becomes its own vault item so the
+    /// password value and the factor stay independently rotatable. A
+    /// replacement is staged in a fresh slot before the index changes, then
+    /// the old slot is retired: failures leave the live factor untouched.
+    pub fn set_totp_factor(&self, id: &Uuid, seed: Option<SecretValue>) -> Result<SecretMeta> {
+        let mut state = self.state.lock().unwrap();
+        let current = state
+            .secrets
+            .iter()
+            .find(|s| &s.id == id)
+            .ok_or(CoreError::SecretNotFound)?;
+        if current.kind != SecretKind::Password {
+            return Err(CoreError::NotAPassword);
+        }
+        if !matches!(current.source, SecretSource::Local) {
+            return Err(CoreError::ExternalSecretReadOnly);
+        }
+        let mut next = state.clone();
+        let secret = next.secrets.iter_mut().find(|s| &s.id == id).unwrap();
+        let previous_vault_id = secret.totp_vault_id;
+        let meta = match &seed {
+            Some(_) => {
+                let vault_id = Uuid::new_v4();
+                secret.totp_vault_id = Some(vault_id);
+                secret.updated_at = Utc::now();
+                let meta = secret.clone();
+                if let Err(error) = self.vault.set(
+                    &vault_id,
+                    &totp_vault_attrs(&meta.name, meta.created_at),
+                    seed.as_ref().unwrap(),
+                ) {
+                    return Err(error);
+                }
+                if let Err(error) = self.persist(&next) {
+                    if let Err(rollback) = self.vault.delete(&vault_id) {
+                        tracing::error!("failed to roll back vault item {vault_id}: {rollback}");
+                    }
+                    return Err(error);
+                }
+                *state = next;
+                if let Some(old_vault_id) = previous_vault_id {
+                    // The index no longer references this item. A failed
+                    // cleanup orphans dead material instead of breaking the
+                    // newly committed factor.
+                    if let Err(error) = self.vault.delete(&old_vault_id) {
+                        tracing::error!(
+                            "failed to delete replaced 2FA vault item {old_vault_id}: {error}"
+                        );
+                    }
+                }
+                meta
+            }
+            None => {
+                let vault_id = previous_vault_id.ok_or(CoreError::TotpNotConfigured)?;
+                secret.totp_vault_id = None;
+                secret.updated_at = Utc::now();
+                let meta = secret.clone();
+                self.persist(&next)?;
+                if let Err(error) = self.vault.delete(&vault_id) {
+                    if let Err(rollback) = self.persist(&state) {
+                        tracing::error!("failed to roll back index after vault error: {rollback}");
+                    }
+                    return Err(error);
+                }
+                *state = next;
+                meta
+            }
+        };
+        Ok(meta)
+    }
+
+    /// The current code for a password's TOTP factor, computed core-side.
+    /// The seed is fetched, used, and dropped; only the six-to-eight digit
+    /// code (and its remaining validity) leaves.
+    pub async fn secret_totp_code(&self, id: &Uuid) -> Result<(String, u64)> {
+        let meta = self.secret_by_id(id)?;
+        let vault_id = meta.totp_vault_id.ok_or(CoreError::TotpNotConfigured)?;
+        let seed = self.vault.get(&vault_id).await?;
+        crate::totp::TotpSpec::current_code(&seed)
     }
 
     /// Rename a secret, rewriting every injection template that references
@@ -407,6 +608,16 @@ impl Store {
                 }
                 return Err(error);
             }
+            // The TOTP item's display name is cosmetic; failing to retitle
+            // it must not fail the rename that already committed.
+            if let Some(totp_vault_id) = &meta.totp_vault_id {
+                if let Err(error) = self
+                    .vault
+                    .set_attrs(totp_vault_id, &totp_vault_attrs(new_name, created_at))
+                {
+                    tracing::warn!("failed to retitle TOTP vault item {totp_vault_id}: {error}");
+                }
+            }
         }
         *state = next;
         Ok((meta, rewritten))
@@ -470,11 +681,24 @@ impl Store {
         let meta = next.secrets.remove(pos);
         self.persist(&next)?;
         if matches!(meta.source, SecretSource::Local) {
-            if let Err(error) = self.vault.delete(id) {
-                if let Err(rollback) = self.persist(&state) {
-                    tracing::error!("failed to roll back index after vault error: {rollback}");
+            match self.vault.delete(id) {
+                // The index owns whether a credential exists. If its value
+                // was already lost or removed, deletion repairs that orphan
+                // instead of rolling its unusable metadata back into view.
+                Ok(()) | Err(CoreError::SecretNotFound) => {}
+                Err(error) => {
+                    if let Err(rollback) = self.persist(&state) {
+                        tracing::error!("failed to roll back index after vault error: {rollback}");
+                    }
+                    return Err(error);
                 }
-                return Err(error);
+            }
+            // The record is gone either way; a stuck TOTP item is logged
+            // rather than resurrecting the credential around it.
+            if let Some(totp_vault_id) = &meta.totp_vault_id {
+                if let Err(error) = self.vault.delete(totp_vault_id) {
+                    tracing::error!("failed to delete TOTP vault item {totp_vault_id}: {error}");
+                }
             }
         }
         *state = next;
@@ -778,6 +1002,10 @@ impl Store {
             source: SecretSource::OnePassword {
                 reference: Box::new(reference),
             },
+            kind: SecretKind::Secret,
+            site: None,
+            username: None,
+            totp_vault_id: None,
         };
         let mut next = state.clone();
         next.secrets.push(meta.clone());
@@ -1424,6 +1652,10 @@ fn prepare_connection_with_secret(
         created_at: now,
         updated_at: now,
         source: SecretSource::Local,
+        kind: SecretKind::Secret,
+        site: None,
+        username: None,
+        totp_vault_id: None,
     };
     let mut next = state.clone();
     next.secrets.push(meta.clone());
@@ -1937,6 +2169,164 @@ mod tests {
         spec
     }
 
+    fn password_credential(
+        site: &str,
+        username: Option<&str>,
+        totp: Option<&str>,
+    ) -> NewCredential {
+        NewCredential {
+            kind: SecretKind::Password,
+            name: None,
+            site: Some(site.to_string()),
+            username: username.map(str::to_string),
+            value: val("hunter2"),
+            totp: totp.map(val),
+        }
+    }
+
+    #[tokio::test]
+    async fn passwords_derive_names_and_carry_their_profile() {
+        let (store, vault, _dir) = store().await;
+        let meta = store
+            .add_credential(password_credential(
+                "x.com",
+                Some("raykyri@gmail.com"),
+                None,
+            ))
+            .unwrap();
+        assert_eq!(meta.name, "PASSWORD_X_COM_RAYKYRI");
+        assert_eq!(meta.kind, SecretKind::Password);
+        assert_eq!(meta.site.as_deref(), Some("x.com"));
+        assert_eq!(meta.username.as_deref(), Some("raykyri@gmail.com"));
+        assert!(!meta.has_totp());
+        assert_eq!(&*vault.get(&meta.id).await.unwrap(), "hunter2");
+
+        // A second password for the same site + user dedups by suffix.
+        let second = store
+            .add_credential(password_credential(
+                "x.com",
+                Some("raykyri@gmail.com"),
+                None,
+            ))
+            .unwrap();
+        assert_eq!(second.name, "PASSWORD_X_COM_RAYKYRI_2");
+
+        // Plain secrets refuse password-only material.
+        assert!(matches!(
+            store.add_credential(NewCredential {
+                kind: SecretKind::Secret,
+                name: Some("API_KEY".into()),
+                site: Some("x.com".into()),
+                username: None,
+                value: val("v"),
+                totp: None,
+            }),
+            Err(CoreError::NotAPassword)
+        ));
+        assert!(matches!(
+            store.set_password_profile(
+                &store.add_secret("PLAIN", val("v")).unwrap().id,
+                Some("x.com".into()),
+                None,
+            ),
+            Err(CoreError::NotAPassword)
+        ));
+    }
+
+    #[tokio::test]
+    async fn totp_factors_live_and_die_with_their_own_vault_item() {
+        let (store, vault, _dir) = store().await;
+        let baseline = vault.len();
+        // RFC 6238's SHA-1 test seed in Base32; codes assert against the RFC
+        // by pinning the epoch step in totp.rs tests — here we only care
+        // about storage behavior and that a code comes out at all.
+        let seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        let meta = store
+            .add_credential(password_credential(
+                "github.com",
+                Some("raykyri"),
+                Some(seed),
+            ))
+            .unwrap();
+        assert!(meta.has_totp());
+        assert_eq!(vault.len(), baseline + 2);
+        let (code, remaining) = store.secret_totp_code(&meta.id).await.unwrap();
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+        assert!((1..=30).contains(&remaining));
+
+        // Re-enrollment stages a fresh slot before committing its pointer,
+        // then removes the replaced slot. The vault count stays flat and
+        // the new factor's parameters take effect.
+        let first_totp_vault_id = meta.totp_vault_id.unwrap();
+        let replaced = store
+            .set_totp_factor(
+                &meta.id,
+                Some(val(
+                    "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8",
+                )),
+            )
+            .unwrap();
+        assert_ne!(replaced.totp_vault_id.unwrap(), first_totp_vault_id);
+        assert_eq!(vault.len(), baseline + 2);
+        assert_eq!(store.secret_totp_code(&meta.id).await.unwrap().0.len(), 8);
+
+        // Removing the factor deletes its vault item and only its item.
+        let cleared = store.set_totp_factor(&meta.id, None).unwrap();
+        assert!(!cleared.has_totp());
+        assert_eq!(vault.len(), baseline + 1);
+        assert!(matches!(
+            store.secret_totp_code(&meta.id).await,
+            Err(CoreError::TotpNotConfigured)
+        ));
+        assert!(matches!(
+            store.set_totp_factor(&meta.id, None),
+            Err(CoreError::TotpNotConfigured)
+        ));
+
+        // Setting it again works, and deleting the password sweeps the
+        // factor's vault item with it.
+        let restored = store
+            .set_totp_factor(
+                &meta.id,
+                Some(val(
+                    "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8",
+                )),
+            )
+            .unwrap();
+        assert!(restored.has_totp());
+        assert_eq!(store.secret_totp_code(&meta.id).await.unwrap().0.len(), 8);
+        store.delete_secret(&meta.id).unwrap();
+        assert_eq!(vault.len(), baseline);
+    }
+
+    #[tokio::test]
+    async fn password_profiles_edit_without_touching_the_name() {
+        let (store, _vault, _dir) = store().await;
+        let meta = store
+            .add_credential(password_credential(
+                "x.com",
+                Some("raykyri@gmail.com"),
+                None,
+            ))
+            .unwrap();
+        let updated = store
+            .set_password_profile(&meta.id, Some("twitter.com".into()), Some(None))
+            .unwrap();
+        assert_eq!(updated.site.as_deref(), Some("twitter.com"));
+        assert_eq!(updated.username, None);
+        // The derived name is wiring identity, not display identity.
+        assert_eq!(updated.name, "PASSWORD_X_COM_RAYKYRI");
+        // TOTP factors only attach to local passwords.
+        assert!(matches!(
+            store.set_totp_factor(
+                &store.add_secret("PLAIN2", val("v")).unwrap().id,
+                Some(val("GEZDGNBVGY3TQOJQ")),
+            ),
+            Err(CoreError::NotAPassword)
+        ));
+    }
+
     #[tokio::test]
     async fn onepassword_links_are_metadata_not_local_vault_values() {
         let (store, vault, _dir) = store().await;
@@ -2408,6 +2798,21 @@ mod tests {
         store.delete_connection(&conn.id).unwrap();
         store.delete_secret(&key.id).unwrap();
         assert_eq!(vault.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_orphaned_secret_removes_its_persisted_metadata() {
+        let (store, vault, dir) = store().await;
+        let secret = store.add_secret("ORPHANED", val("gone")).unwrap();
+        vault.delete(&secret.id).unwrap();
+
+        let deleted = store.delete_secret(&secret.id).unwrap();
+        assert_eq!(deleted.id, secret.id);
+        assert!(store.list_secrets().is_empty());
+
+        drop(store);
+        let reopened = Store::open(Paths::under(dir.path()), vault).await.unwrap();
+        assert!(reopened.list_secrets().is_empty());
     }
 
     #[tokio::test]
@@ -3343,6 +3748,14 @@ mod tests {
         let store = Store::open(paths.clone(), vault.clone()).await.unwrap();
         store.add_secret("A_KEY", val("a")).unwrap();
         let spare = store.add_secret("B_KEY", val("b")).unwrap();
+        let password = store
+            .add_credential(password_credential(
+                "x.com",
+                None,
+                Some("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"),
+            ))
+            .unwrap();
+        let original_totp_vault_id = password.totp_vault_id.unwrap();
         let connection = store
             .add_connection(api_spec(
                 "github",
@@ -3357,6 +3770,24 @@ mod tests {
         let vault_items = vault.len();
         assert!(store.add_secret("C_KEY", val("c")).is_err());
         assert!(store.secret_by_name("C_KEY").is_none());
+        assert_eq!(vault.len(), vault_items);
+
+        assert!(store
+            .set_totp_factor(
+                &password.id,
+                Some(val(
+                    "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8",
+                )),
+            )
+            .is_err());
+        assert_eq!(
+            store.secret_by_id(&password.id).unwrap().totp_vault_id,
+            Some(original_totp_vault_id)
+        );
+        assert_eq!(
+            store.secret_totp_code(&password.id).await.unwrap().0.len(),
+            6
+        );
         assert_eq!(vault.len(), vault_items);
 
         assert!(store.rename_secret(&spare.id, "RENAMED_KEY").is_err());

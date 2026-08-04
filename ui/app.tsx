@@ -54,12 +54,14 @@ import {
 } from '/src/form-errors';
 import {
   retargetsIssuedEndpoint,
+  normalizedSitePreview,
   validateConnectionForm,
+  validatePasswordForm,
   validateSecretForm,
 } from '/src/form-validation';
 import {
   LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
-  supportsOnePassword,
+  supportsOnePassword, supportsTypedCredentials,
 } from '/src/broker';
 import { sameBrokerScope } from '/src/broker-scope';
 import {
@@ -98,7 +100,9 @@ import type {
   McpAuthState,
   NotificationSettings,
   RequestRecord,
+  SecretKind,
   SecretSummary,
+  TotpCode,
   OnePasswordIntegration,
   TestErrorKind,
 } from '/src/types';
@@ -124,6 +128,26 @@ import { StartViewPage, startBlankId } from '/src/features/connect-agents-view';
 import { Sheet } from '/src/sheet';
 
 const EDIT_SECRET_MASK = '••••••••••••';
+
+/** A generated password: four dash-separated groups of five characters from
+ * an unambiguous alphabet (≈115 bits). Rejection sampling keeps the draw
+ * uniform. Fills the ordinary password field; saving follows the normal
+ * path, so nothing here touches the vault. */
+function generatedPassword(): string {
+  const alphabet = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  const limit = 256 - (256 % alphabet.length);
+  const chars: string[] = [];
+  while (chars.length < 20) {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    for (const byte of bytes) {
+      if (byte < limit && chars.length < 20) chars.push(alphabet[byte % alphabet.length]);
+    }
+  }
+  return [0, 1, 2, 3]
+    .map((group) => chars.slice(group * 5, group * 5 + 5).join(''))
+    .join('-');
+}
 /** Rows kept mounted past each edge of the activity window. Enough that a
  * flick of the wheel, or a row that turns out taller than its estimate, never
  * exposes a blank strip before the next frame. */
@@ -1095,21 +1119,131 @@ function RequestInbox(): ReactNode {
   );
 }
 
-function SecretsTable({ query = '' }: { query?: string }): ReactNode {
-  const needle = query.trim().toLowerCase();
-  const secrets = state.secrets.filter((secret) => !needle
+/** Whether a credential row matches the Credentials page search. */
+function secretMatches(secret: SecretSummary, needle: string): boolean {
+  return !needle
     || secret.name.toLowerCase().includes(needle)
-    || secret.used_by_names.some((name) => name.toLowerCase().includes(needle)));
+    || (secret.site ?? '').toLowerCase().includes(needle)
+    || (secret.username ?? '').toLowerCase().includes(needle)
+    || secret.used_by_names.some((name) => name.toLowerCase().includes(needle));
+}
+
+/** Password names are durable wiring identifiers, not presentation. Keep
+ * those generated PASSWORD_* names out of user-facing labels and dialogs. */
+function credentialDisplayName(secret: SecretSummary): string {
+  if (secret.kind === 'password') return secret.site?.trim() || 'this password';
+  return secret.name;
+}
+
+function credentialNoun(secret: SecretSummary): 'password' | 'secret' {
+  return secret.kind === 'password' ? 'password' : 'secret';
+}
+
+// StrictMode mounts effects twice in development. Share an in-flight code
+// request so that does not issue (and audit) the same TOTP twice.
+const liveTotpRequests = new Map<string, Promise<TotpCode>>();
+
+function requestLiveTotp(scope: string, id: string): Promise<TotpCode> {
+  const key = `${scope}:${id}`;
+  const pending = liveTotpRequests.get(key);
+  if (pending) return pending;
+  const request = invoke('get_secret_totp', { id }).finally(() => {
+    if (liveTotpRequests.get(key) === request) liveTotpRequests.delete(key);
+  });
+  liveTotpRequests.set(key, request);
+  return request;
+}
+
+/** A usable current code belongs only in the full desktop window. It is
+ * dropped on blur and refreshed at the broker-provided rollover boundary. */
+function LiveTotpCode({ id, site }: { id: string; site: string }): ReactNode {
+  const [live, setLive] = useState<{ code: string; expiresAt: number } | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const scope = `${state.broker.mode}:${state.broker.url ?? ''}`;
+  useEffect(() => {
+    let mounted = true;
+    let focused = true;
+    let requestGeneration = 0;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const load = async () => {
+      if (!focused) return;
+      const generation = ++requestGeneration;
+      try {
+        const next = await requestLiveTotp(scope, id);
+        if (!mounted || !focused || generation !== requestGeneration) return;
+        const receivedAt = Date.now();
+        setNow(receivedAt);
+        setLive({ code: next.code, expiresAt: receivedAt + next.seconds_remaining * 1000 });
+        if (refreshTimer) clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(() => { void load(); }, next.seconds_remaining * 1000 + 150);
+      } catch (error) {
+        if (mounted && focused && generation === requestGeneration) {
+          console.error('get_secret_totp', error);
+          setLive(null);
+        }
+      }
+    };
+    const pause = () => {
+      focused = false;
+      requestGeneration += 1;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = null;
+      setLive(null);
+    };
+    const resume = () => {
+      if (focused) return;
+      focused = true;
+      void load();
+    };
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    window.addEventListener('blur', pause);
+    window.addEventListener('focus', resume);
+    void load();
+    return () => {
+      mounted = false;
+      requestGeneration += 1;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      clearInterval(tick);
+      window.removeEventListener('blur', pause);
+      window.removeEventListener('focus', resume);
+    };
+  }, [id, scope]);
+  if (!live) return <span className="totp-live totp-live-loading" aria-label="Loading 2FA code">
+    <span className="totp-code">––– –––</span>
+  </span>;
+  const seconds = Math.max(0, Math.ceil((live.expiresAt - now) / 1000));
+  const code = live.code.replace(/(\d{3})(?=\d)/g, '$1 ');
+  return <button className="totp-live" data-act="copy-totp" data-id={id}
+    title="Copy the current 2FA code" aria-label={`Copy the current 2FA code for ${site}`}>
+    <span className="totp-code">{code}</span>
+    <span className="totp-countdown" aria-label={`${seconds} seconds remaining`}>{seconds}s</span>
+  </button>;
+}
+
+function SecretsTable({ secrets, passwords = false }: {
+  secrets: SecretSummary[];
+  passwords?: boolean;
+}): ReactNode {
+  const compact = mode === 'dropdown';
+  const columnCount = passwords || !compact ? 4 : 3;
   return (
-    <table className="sec-table">
-      <thead><tr><th>Credential</th><th>Used by</th><th><span className="sr-only">Value</span></th>
-        <th><span className="sr-only">Actions</span></th></tr></thead>
+    <table className={`sec-table ${passwords ? 'is-passwords' : 'is-secrets'}${compact ? ' is-compact' : ''}`}>
+      {passwords
+        ? <thead><tr><th>Site</th><th>Username</th><th><span className="sr-only">Password</span></th>
+            <th><span className="sr-only">Actions</span></th></tr></thead>
+        : compact
+        ? <thead><tr><th>Credential</th><th><span className="sr-only">Value</span></th>
+            <th><span className="sr-only">Actions</span></th></tr></thead>
+        : <thead><tr><th>Credential</th><th>Used by</th><th><span className="sr-only">Value</span></th>
+            <th><span className="sr-only">Actions</span></th></tr></thead>}
       <tbody>{secrets.map((s) => {
     // A reveal is the whole value, asked for by name through the row's
     // right-click menu and confirmed there; it lands on its own line under
     // the row rather than in the masked value slot.
     const revealed = state.reveal[s.id];
     const copied = state.copied === s.id;
+    const displayName = credentialDisplayName(s);
+    const noun = credentialNoun(s);
     // The copy affordance and the post-copy "Copied" status both overlay the
     // masked value, centered — never beside it (the placeholder dims behind).
     const overlay = copied
@@ -1125,26 +1259,55 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
             : <span key={name}>{name}</span>;
         })}</div>
     ) : <span className="used-by-empty">Not in use</span>;
+    const identity = passwords
+      ? <>
+          <td><span className="site-cell">
+            <span className="site-tile" aria-hidden="true">
+              {(s.site ?? '?').charAt(0).toUpperCase()}
+            </span>
+            <span className="site-host">{s.site}</span>
+          </span></td>
+          <td className="username-cell">{s.username
+            ? <span dir="auto">{s.username}</span>
+            : <span className="used-by-empty">No username</span>}</td>
+        </>
+      : <>
+          <td><div className="s-credential-cell">
+            <div className="s-name" title={s.name}>{s.name}</div>
+            {s.source?.kind === 'one_password'
+              ? <span className="s-source-icon" title={`Stored in ${s.source.integration_label}`}
+                  aria-label={`Stored in ${s.source.integration_label}`}>
+                  <Icon markup={ICONS.onepassword} />
+                </span>
+              : null}
+          </div></td>
+          {!compact ? <td className="used-by-cell">{usedBy}</td> : null}
+        </>;
     return <Fragment key={s.id}>
       {/* data-secret-row is what the right-click handler reads; the whole
           row is the target, so the menu opens wherever it is pressed. */}
       <tr className={revealed === undefined ? undefined : 'is-revealed'}
         data-secret-row={s.id}>
-        <td><div className="s-name" title={s.name}>{s.name}</div>
-          {s.source?.kind === 'one_password'
-            ? <div className="s-source"><Icon markup={ICONS.onepassword} />
-                <span className="s-source-label">{s.source.integration_label}</span>
-              </div>
-            : null}</td>
-        <td className="used-by-cell">{usedBy}</td>
+        {identity}
         <td className="val"><span className="val-wrap">
-          <span className={`val-slot ${copied ? 'is-copied' : ''}`}><code>••••••••</code>
+          {compact && s.totp
+            ? <button className="totp-chip" data-act="copy-totp" data-id={s.id}
+                title="Copy the current 2FA code"
+                aria-label={`Copy the current 2FA code for ${displayName}`}>2FA</button>
+            : null}
+          <span className={`val-slot ${copied ? 'is-copied' : ''}`}>
+            <code>{compact ? '••••' : '••••••••'}</code>
             <span className="val-overlay">{overlay}</span></span>
           </span></td>
         <td className="rowdel">
-          <button className="icon-btn" title="Edit secret" aria-label={`Edit secret ${s.name}`}
+          {s.totp && !compact
+            ? <LiveTotpCode id={s.id} site={displayName} />
+            : null}
+          <button className="icon-btn" title={passwords ? 'Edit password' : 'Edit secret'}
+            aria-label={`Edit ${noun} ${displayName}`}
             data-act="edit-secret" data-id={s.id}><Icon markup={ICONS.pencil} /></button>
-          <button className="icon-btn" title="Delete secret" aria-label={`Delete secret ${s.name}`}
+          <button className="icon-btn" title={passwords ? 'Delete password' : 'Delete secret'}
+            aria-label={`Delete ${noun} ${displayName}`}
             data-act="del-secret-ask" data-id={s.id}><Icon markup={ICONS.trash} /></button>
         </td>
       </tr>
@@ -1154,7 +1317,7 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
       {revealed === undefined
         ? null
         : <tr className="sec-reveal-row" data-secret-row={s.id}>
-            <td colSpan={4}>
+            <td colSpan={columnCount}>
               <code className="sec-reveal-value">{revealed}</code>
             </td>
           </tr>}
@@ -2826,25 +2989,54 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
   </>;
 }
 
-// The saved-credentials table is the page: one card, no catalog chrome.
-// Vault state lives in the status bar outside the scroll pane (see
-// SecretsStatusBar), so the table gets every remaining pixel.
+// The credential library always advertises both typed groups. Each group has
+// its own quiet add link outside the card, preselecting that credential kind.
+// Legacy remote brokers retain their single untyped table.
 function SecretsView(): ReactNode {
-  const query = state.secretSearch;
-  const needle = query.trim().toLowerCase();
-  const matching = state.secrets.filter((secret) => !needle
-    || secret.name.toLowerCase().includes(needle)
-    || secret.used_by_names.some((name) => name.toLowerCase().includes(needle)));
-  return (
+  const needle = state.secretSearch.trim().toLowerCase();
+  const typed = supportsTypedCredentials(state.broker);
+  const passwords = state.secrets.filter((secret) => secret.kind === 'password');
+  const secrets = state.secrets.filter((secret) => secret.kind !== 'password');
+  const matchingPasswords = passwords.filter((secret) => secretMatches(secret, needle));
+  const matchingSecrets = secrets.filter((secret) => secretMatches(secret, needle));
+  if (!typed) return <div className="credential-group">
     <div className="secrets-card">
-      {matching.length
-        ? <SecretsTable query={query} />
+      {matchingSecrets.length
+        ? <SecretsTable secrets={matchingSecrets} />
         : <div className="muted-note">
-            {state.secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}
+            {secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}
           </div>}
-      {mode === 'dropdown'
-        ? <button className="cat-more cat-add-secret" data-act="open-add-secret">＋ Add credential</button>
-        : null}
+    </div>
+    {mode === 'dropdown'
+      ? <button className="credential-group-add" data-act="open-add-secret">＋ Add credential</button>
+      : null}
+  </div>;
+  return (
+    <div className="secrets-groups">
+      <div className="credential-group">
+        <div className="secrets-group-h" aria-hidden="true">Passwords</div>
+        <div className="secrets-card">
+          {matchingPasswords.length
+            ? <SecretsTable secrets={matchingPasswords} passwords />
+            : <div className="muted-note">
+                {passwords.length ? 'No passwords match your search.' : 'No passwords yet.'}
+              </div>}
+        </div>
+        <button className="credential-group-add" data-act="open-add-secret"
+          data-kind="password">＋ Add password</button>
+      </div>
+      <div className="credential-group">
+        <div className="secrets-group-h" aria-hidden="true">Secrets</div>
+        <div className="secrets-card">
+          {matchingSecrets.length
+            ? <SecretsTable secrets={matchingSecrets} />
+            : <div className="muted-note">
+                {secrets.length ? 'No secrets match your search.' : 'No secrets yet.'}
+              </div>}
+        </div>
+        <button className="credential-group-add" data-act="open-add-secret"
+          data-kind="secret">＋ Add secret</button>
+      </div>
     </div>
   );
 }
@@ -2902,12 +3094,18 @@ function SecretsStatusBar(): ReactNode {
   const available = supportsOnePassword(state.broker);
   const integrations = state.onepasswordIntegrations;
   const linked = state.secrets.filter((secret) => secret.source?.kind === 'one_password').length;
-  const total = state.secrets.length;
+  const passwords = state.secrets.filter((secret) => secret.kind === 'password').length;
+  const secrets = state.secrets.length - passwords;
   const open = state.vaultsPanelOpen && integrations.length > 0;
+  // Typed pages always split inventory the way their always-visible groups do.
+  const inventory = supportsTypedCredentials(state.broker)
+    ? `${passwords} ${passwords === 1 ? 'password' : 'passwords'}`
+      + ` · ${secrets} ${secrets === 1 ? 'secret' : 'secrets'}`
+    : `${secrets} ${secrets === 1 ? 'credential' : 'credentials'}`;
   return (
     <footer className="secrets-statusbar">
       <span className="sb-count">
-        {total} {total === 1 ? 'credential' : 'credentials'}
+        {inventory}
         {linked ? ` · ${linked} linked from 1Password` : ''}
       </span>
       <span className="sb-spacer"></span>
@@ -3388,8 +3586,8 @@ function DropdownCatalogSearch({ kind }: { kind: 'tool' | 'secret' }): ReactNode
   const isTool = kind === 'tool';
   return (
     <input className="cat-search dd-cat-search" type="search"
-      placeholder={isTool ? 'Search tools…' : 'Search secrets…'}
-      aria-label={isTool ? 'Search tools' : 'Search secrets'}
+      placeholder={isTool ? 'Search tools…' : 'Search credentials…'}
+      aria-label={isTool ? 'Search tools' : 'Search credentials'}
       value={isTool ? state.toolSearch : state.secretSearch}
       onChange={(e) => {
         if (isTool) state.toolSearch = e.currentTarget.value;
@@ -3594,7 +3792,7 @@ function MainWindow(): ReactNode {
   const takeover = brokerTakeover(state.broker, state.remoteSetup.open);
   const requestCount = activeRequestCount(state.approvals, state.elicitations);
   const pageTitle = state.tab === 'connections' ? 'Connect tools'
-    : state.tab === 'secrets' ? 'Manage secrets'
+    : state.tab === 'secrets' ? 'Credentials'
     : state.tab === 'inbox' ? 'Request inbox'
     // The sidebar keeps the tab's title-case label; the page header speaks
     // sentence case.
@@ -3621,8 +3819,8 @@ function MainWindow(): ReactNode {
       </div>
     : state.tab === 'secrets'
       ? <div className="dw-head-actions">
-          <input id="secret-search" className="cat-search" type="search" placeholder="Search secrets…"
-            aria-label="Search secrets" value={state.secretSearch}
+          <input id="secret-search" className="cat-search" type="search" placeholder="Search credentials…"
+            aria-label="Search credentials" value={state.secretSearch}
             onChange={(e) => { state.secretSearch = e.currentTarget.value; render(); }} />
           <button className="btn primary add-tool-btn" data-act="open-add-secret">
             <Icon markup={ICONS.plus} /> Add credential
@@ -3792,15 +3990,17 @@ function SecretContextMenu(): ReactNode {
     : null;
   if (!secret) return null;
   const revealed = state.reveal[secret.id] !== undefined;
+  const displayName = credentialDisplayName(secret);
+  const noun = credentialNoun(secret);
   return createPortal(
     <div className="tile-menu-wrap secret-context-menu-wrap">
-      <div className="tile-menu" aria-label={`Options for ${secret.name}`}>
+      <div className="tile-menu" aria-label={`Options for ${displayName}`}>
         {revealed
           ? <button className="menu-item" data-act="unreveal-secret" data-id={secret.id}>
-              <Icon markup={ICONS.eyeOff} /> Unreveal secret
+              <Icon markup={ICONS.eyeOff} /> Unreveal {noun}
             </button>
           : <button className="menu-item" data-act="reveal-secret-ask" data-id={secret.id}>
-              <Icon markup={ICONS.eye} /> Reveal secret…
+              <Icon markup={ICONS.eye} /> Reveal {noun}…
             </button>}
       </div>
     </div>,
@@ -3998,7 +4198,7 @@ function DeleteSecretConfirm(): ReactNode {
   const confirm = state.confirm;
   if (!confirm || confirm.kind !== 'del-secret') return null;
   const secret = state.secrets.find((candidate) => candidate.id === confirm.id);
-  const name = secret?.name ?? 'this credential';
+  const name = secret ? credentialDisplayName(secret) : 'this credential';
   const linked = secret?.source?.kind === 'one_password';
   return (
     <>
@@ -4022,7 +4222,7 @@ function RevealSecretConfirm(): ReactNode {
   const confirm = state.confirm;
   if (!confirm || confirm.kind !== 'reveal-secret') return null;
   const secret = state.secrets.find((candidate) => candidate.id === confirm.id);
-  const name = secret?.name ?? 'this credential';
+  const name = secret ? credentialDisplayName(secret) : 'this credential';
   return (
     <>
       <h3 id="reveal-secret-title">Reveal {name}?</h3>
@@ -4044,7 +4244,7 @@ function SecretInUseConfirm(): ReactNode {
   const confirm = state.confirm;
   if (!confirm || confirm.kind !== 'del-secret-inuse') return null;
   const secret = state.secrets.find((candidate) => candidate.id === confirm.id);
-  const name = secret?.name ?? 'this credential';
+  const name = secret ? credentialDisplayName(secret) : 'this credential';
   const usedBy = secret?.used_by_names ?? [];
   return (
     <>
@@ -4287,7 +4487,7 @@ function ElicitationSheet(): ReactNode {
               Don’t enter a password, API key, or other credential here.
               This form is a round trip to {request.connection} over MCP: whatever you type is
               sent back to it as ordinary text, and Multitool neither masks nor stores it.
-              Credentials belong in <strong>Secrets</strong>, where they stay in the Keychain and
+              Credentials belong in <strong>Credentials</strong>, where they stay in the Keychain and
               are attached to traffic without passing through a prompt.
             </span>
           </div>
@@ -4699,35 +4899,121 @@ function setDraftField(key: keyof ConnectionDraft & string, errKey: string, valu
   render();
 }
 
+/** Which shape the credential sheet is showing. Editing locks the type to
+ * the record's; adding follows the segment (secret unless preselected). */
+function sheetSecretKind(editing: boolean, secret: SecretSummary | null): SecretKind {
+  if (editing) {
+    if (secret) return secret.kind === 'password' ? 'password' : 'secret';
+    return state.draft.secretKind === 'password' ? 'password' : 'secret';
+  }
+  return supportsTypedCredentials(state.broker) && state.draft.secretKind === 'password'
+    ? 'password'
+    : 'secret';
+}
+
 function SecretSheet({ editing }: { editing: boolean }): ReactNode {
   const d = state.draft;
-  const secret = editing ? state.secrets.find((candidate) => candidate.id === state.sheet?.id) : null;
+  const secret = editing
+    ? state.secrets.find((candidate) => candidate.id === state.sheet?.id) ?? null
+    : null;
   const linked = secret?.source?.kind === 'one_password' ? secret.source : null;
+  const password = sheetSecretKind(editing, secret) === 'password';
+  const storedSite = password ? normalizedSitePreview(d.site ?? '') : null;
+  const title = linked ? 'Edit linked credential'
+    : editing ? (password ? 'Edit password' : 'Edit secret')
+    : supportsTypedCredentials(state.broker) ? 'Add credential' : 'Add secret';
+  // The value field's write-only machinery (mask on edit, modified flag) is
+  // shared by both shapes; only its labels change.
+  const valueField = (label: string, placeholder: string) => (
+    <input id="f-value" className={fieldCls('value')} type="password"
+      placeholder={placeholder}
+      value={d.value ?? ''}
+      onChange={(e) => {
+        if (editing) state.draft.secretValueModified = true;
+        setDraftField('value', 'value', e.currentTarget.value);
+      }} aria-label={label} />
+  );
   return (
     <>
-      <h3 id="secret-sheet-title">{linked ? 'Edit linked credential' : editing ? 'Edit secret' : 'Add secret'}</h3>
-      <div className="f-row">
-        <label htmlFor="f-name">Name</label>
-        <input id="f-name" className={fieldCls('name')} placeholder="e.g. STRIPE_API_KEY"
-          value={d.name ?? ''}
-          onChange={(e) => setDraftField('name', 'name', e.currentTarget.value)} />
-        <FieldError k="name" />
-      </div>
-      {linked ? <div className="linked-secret-source">
-        <span><Icon markup={ICONS.onepassword} /></span>
-        <div><b>{linked.integration_label}</b>
-          <small>{linked.vault_label} › {linked.item_label} › {linked.field_label}</small></div>
-      </div> : <div className="f-row">
-        <label htmlFor="f-value">{editing ? 'New value (saved to macOS Keychain)' : 'Value'}</label>
-        <input id="f-value" className={fieldCls('value')} type="password"
-          placeholder={editing ? '' : 'Your secret (saved in Keychain)'}
-          value={d.value ?? ''}
-          onChange={(e) => {
-            if (editing) state.draft.secretValueModified = true;
-            setDraftField('value', 'value', e.currentTarget.value);
-          }} />
-        <FieldError k="value" />
-      </div>}
+      <h3 id="secret-sheet-title">{title}</h3>
+      {!editing && supportsTypedCredentials(state.broker)
+        ? <div className="seg in-form secret-kind-seg" role="radiogroup" aria-label="Credential type">
+            <button className={`seg-btn ${password ? 'on' : ''}`} role="radio"
+              aria-checked={password} data-act="secret-kind" data-kind="password">Password</button>
+            <button className={`seg-btn ${!password ? 'on' : ''}`} role="radio"
+              aria-checked={!password} data-act="secret-kind" data-kind="secret">Secret</button>
+          </div>
+        : null}
+      {password
+        ? <>
+            <div className="f-row">
+              <label htmlFor="f-site">Website</label>
+              <input id="f-site" className={fieldCls('site')} placeholder="e.g. github.com"
+                autoComplete="off" spellCheck={false}
+                value={d.site ?? ''}
+                onChange={(e) => setDraftField('site', 'site', e.currentTarget.value)} />
+              <FieldError k="site" />
+              {storedSite ? <div className="field-hint">Stored as {storedSite}</div> : null}
+            </div>
+            <div className="f-row">
+              <label htmlFor="f-username">Username</label>
+              <input id="f-username" placeholder="you@example.com"
+                autoComplete="off" spellCheck={false} dir="auto"
+                value={d.username ?? ''}
+                onChange={(e) => setDraftField('username', 'username', e.currentTarget.value)} />
+            </div>
+            <div className="f-row">
+              <label htmlFor="f-value">{editing ? 'New password (saved to macOS Keychain)' : 'Password'}</label>
+              <div className="gen-row">
+                {valueField('Password', editing ? '' : 'Saved in Keychain')}
+                <button type="button" className="btn" data-act="generate-password"
+                  title="Fill in a generated password">Generate</button>
+              </div>
+              <FieldError k="value" />
+            </div>
+            <div className="f-row">
+              <label htmlFor="f-totp">2FA secret <span className="label-note">optional</span></label>
+              <input id="f-totp" className={fieldCls('totp')} type="password"
+                placeholder={secret?.totp ? '•••••••• (set) — paste to replace' : 'Base32 secret or otpauth:// URI'}
+                autoComplete="off" spellCheck={false}
+                value={d.totp ?? ''}
+                onChange={(e) => {
+                  state.draft.removeTotp = false;
+                  setDraftField('totp', 'totp', e.currentTarget.value);
+                }} />
+              <FieldError k="totp" />
+              {secret?.totp
+                ? <label className="totp-remove-check">
+                    <input type="checkbox" checked={Boolean(d.removeTotp)}
+                      onChange={(e) => {
+                        state.draft.removeTotp = e.currentTarget.checked;
+                        if (e.currentTarget.checked) state.draft.totp = '';
+                        delete state.sheetErrors.totp;
+                        render();
+                      }} />
+                    <span>Remove 2FA secret</span>
+                  </label>
+                : <div className="field-hint">From the site’s authenticator setup — the code it offers for manual entry.</div>}
+            </div>
+          </>
+        : <>
+            <div className="f-row">
+              <label htmlFor="f-name">Name</label>
+              <input id="f-name" className={fieldCls('name')} placeholder="e.g. STRIPE_API_KEY"
+                value={d.name ?? ''}
+                onChange={(e) => setDraftField('name', 'name', e.currentTarget.value)} />
+              <FieldError k="name" />
+            </div>
+            {linked ? <div className="linked-secret-source">
+              <span><Icon markup={ICONS.onepassword} /></span>
+              <div><b>{linked.integration_label}</b>
+                <small>{linked.vault_label} › {linked.item_label} › {linked.field_label}</small></div>
+            </div> : <div className="f-row">
+              <label htmlFor="f-value">{editing ? 'New value (saved to macOS Keychain)' : 'Value'}</label>
+              {valueField('Value', editing ? '' : 'Your secret (saved in Keychain)')}
+              <FieldError k="value" />
+            </div>}
+          </>}
       <FormGlobalError />
       <div className="sheet-actions">
         <button className="btn" data-act="sheet-cancel">Cancel</button>
@@ -5561,7 +5847,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
         <div className="rule-note" key="sigv4-note">
           The broker signs each request with these keys at dispatch time; no
           credential is ever injected into the request itself. Save the access
-          key ID and secret access key under Secrets first.
+          key ID and secret access key under Credentials first.
         </div>,
         <div className="f-row" key="sigv4-region">
           <label htmlFor="c-signer-region">Region</label>
@@ -5590,7 +5876,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
         <div className="rule-note" key="gcp-note">
           The broker mints short-lived access tokens from a service-account
           key at request time; no long-lived credential is ever injected.
-          Save the service account&rsquo;s JSON key file under Secrets first.
+          Save the service account&rsquo;s JSON key file under Credentials first.
         </div>,
         <div className="f-row" key="gcp-key">
           <label htmlFor="c-signer-gcp-key">Service-account key credential</label>
@@ -6005,6 +6291,7 @@ const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const tabLabel = (tab: Tab): string =>
   tab === 'connections' ? 'Tools'
   : tab === 'start' ? 'Connect agents'
+  : tab === 'secrets' ? 'Credentials'
   // The menu-bar dropdown's segmented tabs are narrow; the full "Activity
   // Log" belongs to the window's sidebar, where there is room for it.
   : tab === 'activity' ? (mode === 'dropdown' ? 'Activity' : 'Activity Log')
@@ -6471,41 +6758,66 @@ async function saveSecret(): Promise<void> {
   const sheet = state.sheet;
   if (!sheet || (sheet.kind !== 'add-secret' && sheet.kind !== 'edit-secret')) return;
   const epoch = brokerEpoch;
+  const adding = sheet.kind === 'add-secret';
+  const editingSecret = adding
+    ? null
+    : state.secrets.find((secret) => secret.id === sheet.id) ?? null;
+  const password = sheetSecretKind(!adding, editingSecret) === 'password';
   const name = (state.draft.name || '').trim();
   const value = state.draft.value || '';
+  const site = (state.draft.site || '').trim();
+  const username = (state.draft.username || '').trim();
+  const totp = (state.draft.totp || '').trim();
+  const valueModified = Boolean(state.draft.secretValueModified);
   let dependentConnectionIds: string[] = [];
-  const errs = validateSecretForm({
-    adding: sheet.kind === 'add-secret',
-    name,
-    value,
-    valueModified: Boolean(state.draft.secretValueModified),
-  });
+  const errs = password
+    ? validatePasswordForm({ adding, site, value, valueModified })
+    : validateSecretForm({ adding, name, value, valueModified });
   if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
-  if (sheet.kind === 'add-secret') {
-    try { await invoke('add_secret', { name, value }); }
-    catch (error) {
+  if (adding) {
+    try {
+      await invoke('add_secret', password
+        ? {
+            value,
+            kind: 'password',
+            site,
+            username: username || null,
+            totp: totp || null,
+          }
+        : { name, value });
+    } catch (error) {
       if (brokerEpochIsCurrent(epoch)) showFormError(error);
       return;
     }
     if (!brokerEpochIsCurrent(epoch)) return;
     toast('🔑 Saved to macOS Keychain');
   } else {
-    const usedBy = state.secrets.find((secret) => secret.id === sheet.id)?.used_by_names ?? [];
+    const usedBy = editingSecret?.used_by_names ?? [];
     dependentConnectionIds = state.connections
       .filter((connection) => usedBy.includes(connection.name))
       .map((connection) => connection.id);
     try {
-      await invoke('edit_secret', {
-        id: sheet.id ?? '',
-        newName: name,
-        newValue: state.draft.secretValueModified ? value : null,
-      });
+      await invoke('edit_secret', password
+        ? {
+            id: sheet.id ?? '',
+            newValue: valueModified ? value : null,
+            newSite: site !== (editingSecret?.site ?? '') ? site : null,
+            newUsername: username !== (editingSecret?.username ?? '') ? username : null,
+            // Removal is an explicit empty string; otherwise only a typed
+            // seed crosses. The stored seed itself never round-trips.
+            newTotp: state.draft.removeTotp ? '' : totp || null,
+          }
+        : {
+            id: sheet.id ?? '',
+            newName: name,
+            newValue: valueModified ? value : null,
+          });
     } catch (error) {
       if (brokerEpochIsCurrent(epoch)) showFormError(error);
       return;
     }
     if (!brokerEpochIsCurrent(epoch)) return;
-    toast('✏️ Secret updated');
+    toast(password ? '✏️ Password updated' : '✏️ Secret updated');
   }
   closeSheet();
   await refresh('secrets');
@@ -7484,23 +7796,64 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.confirm = { kind: 'del-conn', id };
       render();
       break;
-    case 'edit-secret':
+    case 'edit-secret': {
       if (!await holdDropdownFormOpen()) break;
       setSheet({ kind: 'edit-secret', id });
       // Controlled fields read the draft, so seed it with what the form
-      // shows: the current name and the masked value.
+      // shows: the current identity fields and the masked value. The 2FA
+      // seed is write-only — its field starts empty either way.
+      const secret = state.secrets.find((s) => s.id === id);
       state.draft = {
-        name: state.secrets.find((s) => s.id === id)?.name ?? '',
+        name: secret?.name ?? '',
         value: EDIT_SECRET_MASK,
+        secretKind: secret?.kind,
+        site: secret?.site ?? '',
+        username: secret?.username ?? '',
       };
       state.sheetErrors = {};
       render();
-      selectEditSecretMask();
+      if (secret?.kind === 'password') focusField('f-site');
+      else selectEditSecretMask();
       break;
-    case 'open-add-secret':
+    }
+    case 'open-add-secret': {
       if (!await holdDropdownFormOpen()) break;
-      setSheet({ kind: 'add-secret' }); state.draft = {}; state.sheetErrors = {};
-      render(); focusField('f-name'); break;
+      const kind = supportsTypedCredentials(state.broker)
+        ? btn.dataset.kind === 'secret' ? 'secret' as const : 'password' as const
+        : undefined;
+      setSheet({ kind: 'add-secret' });
+      state.draft = kind ? { secretKind: kind } : {};
+      state.sheetErrors = {};
+      render();
+      focusField(kind === 'password' ? 'f-site' : 'f-name');
+      break;
+    }
+    case 'secret-kind': {
+      const kind = btn.dataset.kind === 'password' ? 'password' as const : 'secret' as const;
+      if (state.draft.secretKind === kind) break;
+      state.draft.secretKind = kind;
+      state.sheetErrors = {};
+      render();
+      focusField(kind === 'password' ? 'f-site' : 'f-name');
+      break;
+    }
+    case 'generate-password':
+      if (state.sheet?.kind === 'edit-secret') state.draft.secretValueModified = true;
+      state.draft.value = generatedPassword();
+      delete state.sheetErrors.value;
+      render();
+      break;
+    case 'copy-totp': {
+      const epoch = brokerEpoch;
+      try {
+        const secondsRemaining = await invoke('copy_secret_totp', { id });
+        if (!brokerEpochIsCurrent(epoch)) break;
+        toast(`🔑 2FA code copied · valid ${secondsRemaining}s`);
+      } catch (error) {
+        if (brokerEpochIsCurrent(epoch)) toast('⚠ ' + errorMessage(error));
+      }
+      break;
+    }
     case 'save-secret': await saveSecret(); break;
 
     case 'conn-import': {

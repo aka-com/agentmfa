@@ -18,7 +18,7 @@ use aka_api::{
     AccessDto, ActivityDto, ApprovalDecisionDto, ApprovalDto, ConnectionDto, ElicitationDto,
     EndpointChip, IdentityDto, IssuedEndpointDto, ManageError, OAuthDto, OnePasswordFieldDto,
     OnePasswordHealthDto, OnePasswordIntegrationDto, OnePasswordItemDto, OnePasswordVaultDto,
-    RequestDto, SecretDto, SessionDto, SettingsDto,
+    RequestDto, SecretDto, SecretKindDto, SessionDto, SettingsDto, TotpCodeDto,
 };
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -28,7 +28,7 @@ use crate::broker::{Broker, ConnectionTestReport, IssuedEndpointInfo};
 use crate::error::CoreError;
 use crate::store::ConnectionSpec;
 use crate::types::{
-    Connection, ConnectionConfig, DecisionSurface, PgSslMode, SecretMeta, SecretValue,
+    Connection, ConnectionConfig, DecisionSurface, PgSslMode, SecretKind, SecretMeta, SecretValue,
 };
 
 /// A management call's result: the value, or the wire-shaped error the
@@ -67,6 +67,10 @@ impl From<CoreError> for ManageError {
             CoreError::ApprovalConnectionChanged => Self::ApprovalConnectionChanged,
             CoreError::SecretInUse(connections) => Self::SecretInUse { connections },
             CoreError::InvalidSecretName(name) => Self::InvalidSecretName { name },
+            CoreError::InvalidSite(message) => Self::InvalidSite { message },
+            CoreError::InvalidTotpSeed(message) => Self::InvalidTotpSeed { message },
+            CoreError::TotpNotConfigured => Self::TotpNotConfigured,
+            CoreError::NotAPassword => Self::NotAPassword,
             CoreError::InvalidConnectionName(name) => Self::InvalidConnectionName { name },
             CoreError::Template(error) => Self::Template {
                 message: error.to_string(),
@@ -109,6 +113,13 @@ pub fn secret_dto(broker: &Broker, meta: &SecretMeta) -> SecretDto {
             &meta.source,
             &broker.store.list_onepassword_integrations(),
         ),
+        kind: match meta.kind {
+            crate::types::SecretKind::Secret => aka_api::SecretKindDto::Secret,
+            crate::types::SecretKind::Password => aka_api::SecretKindDto::Password,
+        },
+        site: meta.site.clone(),
+        username: meta.username.clone(),
+        totp: meta.has_totp(),
     }
 }
 
@@ -914,22 +925,84 @@ impl crate::events::BrokerEvents for FanoutEvents {
 
 /* ---------------------------- request bodies ------------------------------ */
 
-/// `POST /v1/manage/secrets`. The value crosses as plaintext inside the
-/// (Unix-socket or tunneled) manage transport, exactly like the app's own
-/// IPC; it is wrapped zeroizing immediately after parse.
+/// `POST /v1/manage/secrets`. The value (and any TOTP seed) crosses as
+/// plaintext inside the (Unix-socket or tunneled) manage transport, exactly
+/// like the app's own IPC; both are wrapped zeroizing immediately after
+/// parse. Pre-typing clients send only `name` + `value` and get a plain
+/// secret, which is also what a typed body defaults to.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SecretAddBody {
-    pub name: String,
+    /// Required for secrets. Ignored for passwords, whose name derives
+    /// from site + username broker-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub value: String,
+    #[serde(default)]
+    pub kind: SecretKindDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// A raw 2FA seed (Base32 or otpauth:// URI), validated broker-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp: Option<String>,
 }
 
-/// `PATCH /v1/manage/secrets/{id}`.
+impl SecretAddBody {
+    /// The classic named-secret body, for callers that predate typing.
+    pub fn plain(name: String, value: String) -> Self {
+        Self {
+            name: Some(name),
+            value,
+            kind: SecretKindDto::Secret,
+            site: None,
+            username: None,
+            totp: None,
+        }
+    }
+
+    /// The broker-side spec: wire strings become zeroizing values here, at
+    /// the first parse boundary.
+    pub fn into_spec(self) -> CredentialAddSpec {
+        CredentialAddSpec {
+            kind: match self.kind {
+                SecretKindDto::Secret => SecretKind::Secret,
+                SecretKindDto::Password => SecretKind::Password,
+            },
+            name: self.name,
+            site: self.site,
+            username: self.username,
+            value: zeroize::Zeroizing::new(self.value),
+            totp: self.totp.map(zeroize::Zeroizing::new),
+        }
+    }
+}
+
+/// What `Broker::ui_add_credential` validates and stores.
+pub struct CredentialAddSpec {
+    pub kind: SecretKind,
+    pub name: Option<String>,
+    pub site: Option<String>,
+    pub username: Option<String>,
+    pub value: SecretValue,
+    /// Raw seed input; parsed and canonicalized by the broker.
+    pub totp: Option<SecretValue>,
+}
+
+/// `PATCH /v1/manage/secrets/{id}`. Absent fields stay unchanged; an empty
+/// `new_username` or `new_totp` clears that field (passwords only).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SecretEditBody {
     #[serde(default)]
     pub new_name: Option<String>,
     #[serde(default)]
     pub new_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_site: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_totp: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -1404,17 +1477,19 @@ pub trait ManagementBackend: Send + Sync {
 
     /* secrets */
     async fn list_secrets(&self) -> ManageResult<Vec<SecretDto>>;
-    async fn add_secret(&self, name: String, value: SecretValue) -> ManageResult<()>;
-    async fn edit_secret(
-        &self,
-        id: Uuid,
-        new_name: Option<String>,
-        new_value: Option<SecretValue>,
-    ) -> ManageResult<()>;
+    async fn add_credential(&self, body: SecretAddBody) -> ManageResult<()>;
+    /// The classic named-secret add, for callers that predate typing.
+    async fn add_secret(&self, name: String, value: SecretValue) -> ManageResult<()> {
+        self.add_credential(SecretAddBody::plain(name, value.to_string()))
+            .await
+    }
+    async fn edit_secret(&self, id: Uuid, body: SecretEditBody) -> ManageResult<()>;
     async fn delete_secret(&self, id: Uuid) -> ManageResult<()>;
     async fn reveal_secret(&self, id: Uuid) -> ManageResult<SecretValue>;
     async fn secret_value_for_copy(&self, id: Uuid) -> ManageResult<SecretValue>;
     async fn note_secret_copied(&self, id: Uuid) -> ManageResult<()>;
+    /// The current 2FA code for a password with a TOTP factor.
+    async fn secret_totp_code(&self, id: Uuid) -> ManageResult<TotpCodeDto>;
 
     /* 1Password integrations */
     async fn list_onepassword_integrations(&self) -> ManageResult<Vec<OnePasswordIntegrationDto>>;
@@ -1663,20 +1738,26 @@ impl ManagementBackend for LocalBackend {
             .collect())
     }
 
-    async fn add_secret(&self, name: String, value: SecretValue) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_add_secret(&name, value).map(|_| ()))
+    async fn add_credential(&self, body: SecretAddBody) -> ManageResult<()> {
+        self.blocking(move |broker| broker.ui_add_credential(body.into_spec()).map(|_| ()))
             .await
     }
 
-    async fn edit_secret(
-        &self,
-        id: Uuid,
-        new_name: Option<String>,
-        new_value: Option<SecretValue>,
-    ) -> ManageResult<()> {
+    async fn edit_secret(&self, id: Uuid, body: SecretEditBody) -> ManageResult<()> {
         self.blocking(move |broker| {
+            let value = body
+                .new_value
+                .filter(|value| !value.is_empty())
+                .map(zeroize::Zeroizing::new);
             broker
-                .ui_edit_secret(&id, new_name.as_deref(), new_value)
+                .ui_edit_credential(
+                    &id,
+                    body.new_name.as_deref(),
+                    value,
+                    body.new_site,
+                    body.new_username,
+                    body.new_totp,
+                )
                 .map(|_| ())
         })
         .await
@@ -1697,6 +1778,14 @@ impl ManagementBackend for LocalBackend {
 
     async fn note_secret_copied(&self, id: Uuid) -> ManageResult<()> {
         Ok(self.broker.ui_note_secret_copied(&id)?)
+    }
+
+    async fn secret_totp_code(&self, id: Uuid) -> ManageResult<TotpCodeDto> {
+        let (code, seconds_remaining) = self.broker.ui_secret_totp_code(&id).await?;
+        Ok(TotpCodeDto {
+            code,
+            seconds_remaining,
+        })
     }
 
     async fn list_onepassword_integrations(&self) -> ManageResult<Vec<OnePasswordIntegrationDto>> {

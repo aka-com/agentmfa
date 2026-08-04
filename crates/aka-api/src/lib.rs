@@ -25,6 +25,9 @@ pub const APPROVAL_SURFACE_CAPABILITY: &str = "request_surface_v1";
 /// Manage-plane support for provider configuration, catalog browsing, and
 /// live-linked 1Password secret references.
 pub const ONEPASSWORD_PROVIDER_CAPABILITY: &str = "onepassword_provider_v1";
+/// Manage-plane support for typed credentials: password records carrying
+/// site/username metadata and an optional local TOTP factor.
+pub const TYPED_CREDENTIALS_CAPABILITY: &str = "typed_credentials_v1";
 /// Response header acknowledging how a manage-event stream was classified.
 pub const APPROVAL_SURFACE_STATUS_HEADER: &str = "x-aka-approval-surface-status";
 pub const APPROVAL_SURFACE_STATUS_ACTIVE: &str = "active";
@@ -88,6 +91,14 @@ pub enum ManageError {
     InvalidSecretName {
         name: String,
     },
+    InvalidSite {
+        message: String,
+    },
+    InvalidTotpSeed {
+        message: String,
+    },
+    TotpNotConfigured,
+    NotAPassword,
     InvalidConnectionName {
         name: String,
     },
@@ -180,6 +191,13 @@ impl std::fmt::Display for ManageError {
                 f,
                 "invalid name {name:?}: names are 1-64 chars of [A-Za-z0-9_] not starting with a digit"
             ),
+            Self::InvalidSite { message } => write!(f, "invalid website: {message}"),
+            Self::InvalidTotpSeed { message } => write!(f, "invalid 2FA secret: {message}"),
+            Self::TotpNotConfigured => write!(f, "this credential has no 2FA secret"),
+            Self::NotAPassword => write!(
+                f,
+                "only passwords carry sign-in fields; this credential is a plain secret"
+            ),
             Self::InvalidConnectionName { name } => write!(
                 f,
                 "invalid tool name {name:?}: use 1-64 ASCII letters, numbers, spaces, or safe endpoint punctuation; start with a letter or number and do not end with a space"
@@ -252,6 +270,35 @@ pub struct SecretDto {
     pub updated_at: String,
     #[serde(default)]
     pub source: SecretSourceDto,
+    /// What the credential is; records from before typing are secrets.
+    #[serde(default)]
+    pub kind: SecretKindDto,
+    /// Password metadata: the canonical host the password signs in to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Whether a local TOTP factor is attached (never the seed itself).
+    #[serde(default)]
+    pub totp: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretKindDto {
+    #[default]
+    Secret,
+    Password,
+}
+
+/// `GET /v1/manage/secrets/{id}/totp`: one code, computed broker-side. The
+/// code crosses the authenticated manage transport like a revealed prefix
+/// does; the seed itself never leaves the vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TotpCodeDto {
+    pub code: String,
+    /// Whole seconds until this code rolls over.
+    pub seconds_remaining: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

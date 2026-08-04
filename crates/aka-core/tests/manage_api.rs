@@ -1236,3 +1236,72 @@ async fn revoking_a_manage_token_closes_its_live_event_stream() {
         .expect("revoked stream did not close");
     assert!(ended.is_none(), "revoked stream disclosed another frame");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_credential_edits_do_not_commit_an_earlier_rename() {
+    let h = harness().await;
+    let (status, body) = h
+        .manage(
+            "POST",
+            "/v1/manage/secrets",
+            Some(json!({ "kind": "password", "site": "x.com", "value": "pw" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, secrets) = h.manage("GET", "/v1/manage/secrets", None).await;
+    let password_id = secrets[0]["id"].as_str().unwrap().to_string();
+    let original_name = secrets[0]["name"].as_str().unwrap().to_string();
+
+    let (status, body) = h
+        .manage(
+            "PATCH",
+            &format!("/v1/manage/secrets/{password_id}"),
+            Some(json!({
+                "new_name": "RENAMED_ANYWAY",
+                "new_site": "not a host",
+            })),
+        )
+        .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["code"], "invalid_site");
+    let (_, secrets) = h.manage("GET", "/v1/manage/secrets", None).await;
+    assert_eq!(secrets[0]["name"], original_name);
+    assert_eq!(secrets[0]["site"], "x.com");
+
+    let (status, body) = h
+        .manage(
+            "POST",
+            "/v1/manage/secrets",
+            Some(json!({ "name": "PLAIN", "value": "v" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, secrets) = h.manage("GET", "/v1/manage/secrets", None).await;
+    let plain_id = secrets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|secret| secret["name"] == "PLAIN")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = h
+        .manage(
+            "PATCH",
+            &format!("/v1/manage/secrets/{plain_id}"),
+            Some(json!({
+                "new_name": "PLAIN_RENAMED",
+                "new_site": "x.com",
+            })),
+        )
+        .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["code"], "not_a_password");
+    let (_, secrets) = h.manage("GET", "/v1/manage/secrets", None).await;
+    assert!(secrets
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|secret| secret["name"] == "PLAIN"));
+}

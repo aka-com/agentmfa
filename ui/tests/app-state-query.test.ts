@@ -9,7 +9,7 @@ Object.defineProperty(globalThis, 'location', {
   value: { hash: '' },
 });
 
-test('navigation defaults to Secrets and follows each shell order', async () => {
+test('navigation defaults to the Credentials tab and follows each shell order', async () => {
   const { DROPDOWN_TABS, state, TABS } = await import('../src/app-state');
 
   assert.equal(state.tab, 'secrets');

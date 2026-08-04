@@ -114,11 +114,165 @@ test('the application root boots against the mock bridge', () => {
   const tabs = [...document.querySelectorAll<HTMLButtonElement>('.dw-nav [data-act="tab"]')];
   assert.deepEqual(
     tabs.slice(0, 3).map((tab) => tab.textContent?.trim()),
-    ['Secrets', 'Tools', 'Connect agents'],
+    ['Credentials', 'Tools', 'Connect agents'],
   );
   assert.equal(tabs[0]?.dataset.tab, 'secrets');
   assert.equal(tabs[0]?.classList.contains('on'), true);
-  assert.ok(document.body.textContent?.includes('Manage secrets'));
+  assert.ok(document.body.textContent?.includes('Credentials'));
+});
+
+test('the credential library always groups passwords apart from secrets', async () => {
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="secrets"]')!,
+  );
+  const groups = await testingLibrary.waitFor(() => {
+    const found = [...document.querySelectorAll<HTMLElement>('.secrets-group-h')];
+    assert.equal(found.length, 2, 'both typed groups are always visible');
+    return found;
+  });
+  assert.deepEqual(groups.map((group) => group.textContent), ['Passwords', 'Secrets']);
+
+  assert.deepEqual(
+    [...document.querySelectorAll<HTMLButtonElement>('.credential-group-add')]
+      .map((button) => button.textContent?.trim()),
+    ['＋ Add password', '＋ Add secret'],
+  );
+
+  // Password rows read site → username → masked value; the desktop window
+  // renders the x.com entry's current 2FA code and countdown.
+  const hosts = [...document.querySelectorAll<HTMLElement>('.site-host')]
+    .map((host) => host.textContent);
+  assert.deepEqual(hosts, ['google.com', 'x.com']);
+  assert.ok(document.body.textContent?.includes('raykyri@gmail.com'));
+  const xRow = [...document.querySelectorAll<HTMLElement>('.site-host')]
+    .find((host) => host.textContent === 'x.com')?.closest('tr');
+  const liveTotp = await testingLibrary.waitFor(() => {
+    const button = xRow?.querySelector<HTMLButtonElement>('.totp-live:not(.totp-live-loading)');
+    assert.ok(button);
+    assert.match(button.textContent ?? '', /246 801\d+s/);
+    return button;
+  });
+  assert.equal(liveTotp.getAttribute('aria-label'), 'Copy the current 2FA code for x.com');
+  assert.ok(testingLibrary.getByRole(xRow!, 'button', { name: 'Edit password x.com' }));
+  const deletePassword = testingLibrary.getByRole(xRow!, 'button', {
+    name: 'Delete password x.com',
+  });
+  const googleRow = [...document.querySelectorAll<HTMLElement>('.site-host')]
+    .find((host) => host.textContent === 'google.com')?.closest('tr');
+  assert.equal(googleRow?.querySelector('.totp-live'), null);
+  // Derived names stay internal — password rows never show them.
+  assert.equal(document.body.textContent?.includes('PASSWORD_X_COM'), false);
+
+  // The status bar inventory splits the way the page does.
+  assert.match(
+    document.querySelector('.sb-count')?.textContent ?? '',
+    /2 passwords · 7 secrets/,
+  );
+
+  // The live display is still a copy action when pressed.
+  testingLibrary.fireEvent.click(liveTotp);
+  const mock = await import('../src/mock-bridge');
+  await testingLibrary.waitFor(async () => {
+    const page = await mock.invoke('list_activity', { limit: 5 }) as {
+      entries: Array<{ text: string }>;
+    };
+    assert.ok(page.entries.some((entry) => entry.text.includes('2FA code issued')));
+  });
+
+  // Generated PASSWORD_* identifiers are wiring details, including in
+  // context menus and destructive/reveal confirmations.
+  testingLibrary.fireEvent.contextMenu(xRow!, { clientX: 20, clientY: 20 });
+  const menu = await testingLibrary.findByLabelText(document.body, 'Options for x.com');
+  const reveal = testingLibrary.getByRole(menu, 'button', { name: 'Reveal password…' });
+  testingLibrary.fireEvent.click(reveal);
+  const revealDialog = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Reveal x.com?',
+  });
+  assert.equal(revealDialog.textContent?.includes('PASSWORD_X_COM'), false);
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(revealDialog, 'button', { name: 'Cancel' }),
+  );
+
+  testingLibrary.fireEvent.click(deletePassword);
+  const deleteDialog = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Delete x.com?',
+  });
+  assert.equal(deleteDialog.textContent?.includes('PASSWORD_X_COM'), false);
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(deleteDialog, 'button', { name: 'Cancel' }),
+  );
+});
+
+test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, async () => {
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>(
+      '.dw-head-actions button[data-act="open-add-secret"]',
+    )!,
+  );
+  const dialog = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Add credential',
+  });
+  await testingLibrary.waitFor(() => {
+    assert.ok(dialog.querySelector('#f-site'), 'the add sheet preselects the password shape');
+    assert.equal(dialog.querySelector('#f-name'), null);
+    assert.equal(
+      dialog.querySelector('button[data-act="secret-kind"][data-kind="password"]')
+        ?.getAttribute('aria-checked'),
+      'true',
+    );
+  });
+  testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#f-site')!, {
+    target: { value: 'https://WWW.Example.com/login' },
+  });
+  assert.equal(dialog.querySelector('.field-hint')?.textContent, 'Stored as example.com');
+  testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#f-username')!, {
+    target: { value: 'user@example.com' },
+  });
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="generate-password"]')!,
+  );
+  const generated = dialog.querySelector<HTMLInputElement>('#f-value')!.value;
+  assert.match(generated, /^[^-]{5}(-[^-]{5}){3}$/, 'Generate fills a grouped password');
+  testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#f-totp')!, {
+    target: { value: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ' },
+  });
+  testingLibrary.fireEvent.click(
+    dialog.querySelector<HTMLButtonElement>('button[data-act="save-secret"]')!,
+  );
+  // React Testing Library's waitFor act()-wrapper live-locks while this
+  // save's command promise is pending, so settle natively — the same
+  // reasoning as the 1Password save's deliberate nativeSetTimeout below.
+  await new Promise<void>((resolve, reject) => {
+    const t0 = Date.now();
+    const iv = nativeSetInterval(() => {
+      if (!document.querySelector('#f-site')) { clearInterval(iv); resolve(); }
+      else if (Date.now() - t0 > 5000) { clearInterval(iv); reject(new Error('sheet still open')); }
+    }, 50);
+    iv.unref();
+  });
+  const hosts = [...document.querySelectorAll<HTMLElement>('.site-host')]
+    .map((host) => host.textContent);
+  assert.ok(hosts.includes('example.com'), `site is canonicalized (got ${hosts.join(', ')})`);
+  const newRow = [...document.querySelectorAll<HTMLElement>('.site-host')]
+    .find((host) => host.textContent === 'example.com')?.closest('tr');
+  assert.ok(newRow?.querySelector('.totp-live'), 'the saved 2FA seed shows a desktop live code');
+  assert.match(document.querySelector('.sb-count')?.textContent ?? '', /3 passwords/);
+
+  testingLibrary.fireEvent.click(
+    newRow!.querySelector<HTMLButtonElement>('button[data-act="edit-secret"]')!,
+  );
+  const editDialog = await testingLibrary.findByRole(document.body, 'dialog', {
+    name: 'Edit password',
+  });
+  const removeTotp = editDialog.querySelector<HTMLInputElement>('.totp-remove-check input');
+  assert.ok(removeTotp, 'stored 2FA factors use the remove checkbox');
+  assert.equal(removeTotp.checked, false);
+  assert.equal(editDialog.querySelector('button[data-act="remove-totp"]'), null);
+  testingLibrary.fireEvent.click(removeTotp);
+  assert.equal(removeTotp.checked, true);
+  testingLibrary.fireEvent.click(
+    editDialog.querySelector<HTMLButtonElement>('button[data-act="sheet-cancel"]')!,
+  );
 });
 
 test('the 1Password sheet links a field through all three steps', { timeout: 8_000 }, async () => {
@@ -205,9 +359,12 @@ test('the 1Password sheet links a field through all three steps', { timeout: 8_0
   await new Promise((resolve) => nativeSetTimeout(resolve, 100));
   assert.equal(document.querySelector('.onepassword-sheet'), null);
   assert.ok(document.body.textContent?.includes(alias.value));
+  const linkedRow = [...document.querySelectorAll<HTMLElement>('.s-name')]
+    .find((name) => name.textContent === alias.value)?.closest('tr');
+  assert.ok(linkedRow?.querySelector('.s-source-icon svg'));
+  assert.equal(linkedRow?.querySelector('.s-source'), null);
   const credentialCount = document.querySelector<HTMLElement>('.secrets-statusbar .sb-count');
-  assert.equal(credentialCount?.textContent?.trim(), '8 credentials');
-  assert.equal(credentialCount?.textContent?.includes('1Password'), false);
+  assert.match(credentialCount?.textContent?.trim() ?? '', /\d+ passwords · \d+ secrets/);
   testingLibrary.fireEvent.click(
     document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="connections"]')!,
   );

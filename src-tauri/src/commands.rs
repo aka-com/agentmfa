@@ -1,8 +1,9 @@
 //! The Tauri command surface locked to the minimal set the UI needs:
 //!
 //! - one command returns a stored secret value — the reveal the user asks
-//!   for per credential and confirms — and copy still writes core-side to
-//!   the clipboard without the value passing through the webview;
+//!   for per credential and confirms — while the full desktop window may
+//!   receive an ephemeral 2FA code for its live display; compact-window
+//!   copies still write core-side without the value passing through;
 //! - destructive actions that need an ordinary application confirmation are
 //!   confirmed in the webview before reaching this layer;
 //!
@@ -645,22 +646,57 @@ pub async fn check_known_hosts(
 
 /* ------------------------------ secrets ---------------------------------- */
 
+/// The typed add: a plain named secret, or a password carrying site,
+/// username, and an optional 2FA seed. Kind defaults to secret so the
+/// pre-typing call shape still works verbatim.
 #[tauri::command]
-pub async fn add_secret(state: State<'_, AppState>, name: String, value: String) -> FormResult<()> {
+#[allow(clippy::too_many_arguments)]
+pub async fn add_secret(
+    state: State<'_, AppState>,
+    name: Option<String>,
+    value: String,
+    kind: Option<String>,
+    site: Option<String>,
+    username: Option<String>,
+    totp: Option<String>,
+) -> FormResult<()> {
+    let kind = match kind.as_deref() {
+        None | Some("secret") => aka_api::SecretKindDto::Secret,
+        Some("password") => aka_api::SecretKindDto::Password,
+        Some(other) => {
+            return Err(FormError::global(
+                "system",
+                "invalid_credential_kind",
+                "Couldn’t save this credential",
+                Some(format!("unknown credential kind {other:?}")),
+            ));
+        }
+    };
     state
         .brokers
         .backend()
-        .add_secret(name, Zeroizing::new(value))
+        .add_credential(aka_core::manage::SecretAddBody {
+            name,
+            value,
+            kind,
+            site,
+            username,
+            totp,
+        })
         .await
         .map_err(|error| FormError::from_manage(error, FormContext::Secret))
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn edit_secret(
     state: State<'_, AppState>,
     id: String,
     new_name: Option<String>,
     new_value: Option<String>,
+    new_site: Option<String>,
+    new_username: Option<String>,
+    new_totp: Option<String>,
 ) -> FormResult<()> {
     let id = parse_id(&id).map_err(|detail| {
         FormError::global(
@@ -670,13 +706,62 @@ pub async fn edit_secret(
             Some(detail),
         )
     })?;
-    let value = new_value.filter(|v| !v.is_empty()).map(Zeroizing::new);
     state
         .brokers
         .backend()
-        .edit_secret(id, new_name, value)
+        .edit_secret(
+            id,
+            aka_core::manage::SecretEditBody {
+                new_name,
+                new_value,
+                new_site,
+                new_username,
+                new_totp,
+            },
+        )
         .await
         .map_err(|error| FormError::from_manage(error, FormContext::Secret))
+}
+
+/// Return the current 2FA code for the desktop window's live countdown. This
+/// is deliberately separate from the menu-bar copy command: the compact
+/// surface never receives the code itself.
+#[tauri::command]
+pub async fn get_secret_totp(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    id: String,
+) -> CmdResult<aka_api::TotpCodeDto> {
+    if window.label() != crate::windows::MAIN {
+        return Err("live 2FA codes are only available in the main window".into());
+    }
+    let id = parse_id(&id)?;
+    state
+        .brokers
+        .backend()
+        .secret_totp_code(id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Copy the current 2FA code for a password with a TOTP factor. The code is
+/// computed broker-side and goes straight to the clipboard with hygiene; the
+/// menu-bar webview only learns how long the code stays valid.
+#[tauri::command]
+pub async fn copy_secret_totp(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<u64> {
+    let id = parse_id(&id)?;
+    let code = state
+        .brokers
+        .backend()
+        .secret_totp_code(id)
+        .await
+        .map_err(|e| e.to_string())?;
+    crate::clipboard::copy_with_hygiene(&app, Zeroizing::new(code.code))?;
+    Ok(code.seconds_remaining)
 }
 
 #[tauri::command]
@@ -2160,6 +2245,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         delete_secret,
         reveal_secret,
         copy_secret,
+        get_secret_totp,
+        copy_secret_totp,
         add_connection,
         edit_connection,
         delete_connection,

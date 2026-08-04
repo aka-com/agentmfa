@@ -20,6 +20,7 @@ import type {
   OnePasswordItem,
   OnePasswordVault,
   RequestRecord,
+  SecretKind,
   SecretSummary,
   SessionSummary,
   Settings,
@@ -87,6 +88,15 @@ export interface ConnectionDraft {
   value?: string;
   /** Whether the masked value in an edit-secret sheet was actually changed. */
   secretValueModified?: boolean;
+  /** The add-credential sheet's type segment. */
+  secretKind?: SecretKind;
+  /** Password fields (kind 'password'). */
+  site?: string;
+  username?: string;
+  /** Raw 2FA seed input (write-only, like value). */
+  totp?: string;
+  /** The edit sheet's explicit "remove 2FA" choice. */
+  removeTotp?: boolean;
   importWarnings?: string[];
   origin?: string | null;
   isMcp?: boolean;

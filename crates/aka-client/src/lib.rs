@@ -20,7 +20,7 @@ use aka_api::{
     ActivityDto, ActivityPageDto, ApprovalDecisionDto, ApprovalDto, ApprovalSnapshotDto,
     ApprovalSurfaceDto, ConnectionDto, IdentityDto, IssuedEndpointDto, ManageError,
     OnePasswordFieldDto, OnePasswordHealthDto, OnePasswordIntegrationDto, OnePasswordItemDto,
-    OnePasswordVaultDto, RequestDto, SecretDto, SessionDto, SettingsDto,
+    OnePasswordVaultDto, RequestDto, SecretDto, SessionDto, SettingsDto, TotpCodeDto,
 };
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
@@ -647,31 +647,12 @@ impl ManagementBackend for RemoteBackend {
         self.get("/v1/manage/secrets").await
     }
 
-    async fn add_secret(&self, name: String, value: SecretValue) -> ManageResult<()> {
-        self.post(
-            "/v1/manage/secrets",
-            &SecretAddBody {
-                name,
-                value: value.to_string(),
-            },
-        )
-        .await
+    async fn add_credential(&self, body: SecretAddBody) -> ManageResult<()> {
+        self.post("/v1/manage/secrets", &body).await
     }
 
-    async fn edit_secret(
-        &self,
-        id: Uuid,
-        new_name: Option<String>,
-        new_value: Option<SecretValue>,
-    ) -> ManageResult<()> {
-        self.patch(
-            &format!("/v1/manage/secrets/{id}"),
-            &SecretEditBody {
-                new_name,
-                new_value: new_value.map(|value| value.to_string()),
-            },
-        )
-        .await
+    async fn edit_secret(&self, id: Uuid, body: SecretEditBody) -> ManageResult<()> {
+        self.patch(&format!("/v1/manage/secrets/{id}"), &body).await
     }
 
     async fn delete_secret(&self, id: Uuid) -> ManageResult<()> {
@@ -694,6 +675,11 @@ impl ManagementBackend for RemoteBackend {
         // The broker audits the copy at value release; there is no
         // honor-system note to send.
         Ok(())
+    }
+
+    async fn secret_totp_code(&self, id: Uuid) -> ManageResult<TotpCodeDto> {
+        self.post_empty(&format!("/v1/manage/secrets/{id}/totp"))
+            .await
     }
 
     async fn list_onepassword_integrations(&self) -> ManageResult<Vec<OnePasswordIntegrationDto>> {
@@ -842,10 +828,7 @@ impl ManagementBackend for RemoteBackend {
             "/v1/manage/connections",
             &ConnectionAddBody {
                 spec,
-                new_secret: Some(SecretAddBody {
-                    name: secret_name,
-                    value: value.to_string(),
-                }),
+                new_secret: Some(SecretAddBody::plain(secret_name, value.to_string())),
             },
         )
         .await
@@ -1479,8 +1462,13 @@ mod tests {
         backend
             .edit_secret(
                 secrets[0].id.parse().unwrap(),
-                Some("GH_TOKEN".into()),
-                None,
+                SecretEditBody {
+                    new_name: Some("GH_TOKEN".into()),
+                    new_value: None,
+                    new_site: None,
+                    new_username: None,
+                    new_totp: None,
+                },
             )
             .await
             .unwrap();

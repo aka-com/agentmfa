@@ -51,6 +51,18 @@ pub enum CoreError {
     #[error("invalid name {0:?}: names are 1-64 chars of [A-Za-z0-9_] not starting with a digit")]
     InvalidSecretName(String),
 
+    #[error("invalid website: {0}")]
+    InvalidSite(String),
+
+    #[error("invalid 2FA secret: {0}")]
+    InvalidTotpSeed(String),
+
+    #[error("this credential has no 2FA secret")]
+    TotpNotConfigured,
+
+    #[error("only passwords carry sign-in fields; this credential is a plain secret")]
+    NotAPassword,
+
     #[error(
         "invalid tool name {0:?}: use 1-64 ASCII letters, numbers, spaces, or safe endpoint punctuation; start with a letter or number and do not end with a space"
     )]

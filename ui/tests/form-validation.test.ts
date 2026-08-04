@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  normalizedSitePreview,
   retargetsIssuedEndpoint,
   validateConnectionForm,
   validateSecretForm,
@@ -34,6 +35,27 @@ test('secret validation distinguishes adds from untouched and replaced edits', (
   assert.deepEqual(validateSecretForm({
     adding: false, name: 'TOKEN', value: '', valueModified: true,
   }), { value: 'Invalid value' });
+});
+
+test('password site previews mirror the broker canonical form', () => {
+  assert.equal(normalizedSitePreview('https://WWW.Example.com/login'), 'example.com');
+  assert.equal(normalizedSitePreview('www.com'), 'www.com');
+  assert.equal(normalizedSitePreview('http://Example.com:8080/path'), 'example.com:8080');
+  assert.equal(normalizedSitePreview('http://example.com:443'), 'example.com');
+  assert.equal(normalizedSitePreview('example.com:80'), 'example.com');
+  assert.equal(normalizedSitePreview('example.com.'), 'example.com');
+  assert.equal(normalizedSitePreview('ftp://example.com'), null);
+  assert.equal(normalizedSitePreview('https://user@example.com'), null);
+  for (const input of [
+    'http://example.com:443',
+    'https://www.x.com/login',
+    'x.com:8443',
+    'example.com.',
+  ]) {
+    const stored = normalizedSitePreview(input);
+    assert.ok(stored);
+    assert.equal(normalizedSitePreview(stored), stored, input);
+  }
 });
 
 test('credential-less API edits do not invent a template requirement', () => {

@@ -22,6 +22,7 @@ percent-encoding = { workspace = true }
 dirs = { workspace = true }
 tempfile = { workspace = true }
 getrandom = { workspace = true }
+sha1 = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 tracing = { workspace = true }

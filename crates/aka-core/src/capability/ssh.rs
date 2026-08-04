@@ -982,10 +982,7 @@ fn grade_login(
     log: &str,
 ) -> Result<String, TestError> {
     let ConnectionConfig::Ssh {
-        host,
-        port,
-        user,
-        ..
+        host, port, user, ..
     } = &connection.config
     else {
         return Err("not an ssh connection".into());

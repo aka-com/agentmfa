@@ -15,11 +15,44 @@ pub type SecretValue = Zeroizing<String>;
 pub struct SecretMeta {
     pub id: Uuid,
     /// e.g. "GITHUB_API_KEY", unique; templates resolve secrets by name.
+    /// Passwords derive theirs from site + username at creation.
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub source: SecretSource,
+    /// What the credential is; records from before typing load as secrets.
+    #[serde(default)]
+    pub kind: SecretKind,
+    /// Password metadata: the canonical host this password signs in to
+    /// (see `password::normalize_site`). Not secret; the match key for
+    /// future origin-scoped dispensing, so it is normalized on write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Vault item holding the password's TOTP seed (RFC 6238 factor). The
+    /// id is an opaque handle; the seed itself lives only in the vault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_vault_id: Option<Uuid>,
+}
+
+impl SecretMeta {
+    /// Whether a local TOTP factor is attached.
+    pub fn has_totp(&self) -> bool {
+        self.totp_vault_id.is_some()
+    }
+}
+
+/// The credential taxonomy: a named value (API key, token, private key) or
+/// a site password with sign-in metadata. One store, one vault item for the
+/// sensitive value either way — the kind only decides the fields around it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretKind {
+    #[default]
+    Secret,
+    Password,
 }
 
 /// Where a secret is resolved. External references contain identifiers and

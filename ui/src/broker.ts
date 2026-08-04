@@ -6,6 +6,7 @@
 import type { BrokerProfile, ConnectionType } from './types';
 
 export const ONEPASSWORD_PROVIDER_CAPABILITY = 'onepassword_provider_v1';
+export const TYPED_CREDENTIALS_CAPABILITY = 'typed_credentials_v1';
 
 export const LOCAL_BROKER: BrokerProfile = {
   mode: 'local',
@@ -13,11 +14,17 @@ export const LOCAL_BROKER: BrokerProfile = {
   connected: true,
   error: null,
   has_saved_token: false,
-  capabilities: [ONEPASSWORD_PROVIDER_CAPABILITY],
+  capabilities: [ONEPASSWORD_PROVIDER_CAPABILITY, TYPED_CREDENTIALS_CAPABILITY],
 };
 
 export function supportsOnePassword(profile: BrokerProfile): boolean {
   return profile.capabilities.includes(ONEPASSWORD_PROVIDER_CAPABILITY);
+}
+
+/** Whether this broker stores typed credentials (passwords with site,
+ * username, and an optional TOTP factor). Older remote brokers do not. */
+export function supportsTypedCredentials(profile: BrokerProfile): boolean {
+  return profile.capabilities.includes(TYPED_CREDENTIALS_CAPABILITY);
 }
 
 /** The switcher's label: "Local" for this machine, or the remote host. */

@@ -278,7 +278,8 @@ test('forms preserve credential-less edits without guessing from masked text', a
 
   assert.match(app, /return initialSecretSource\(\{/);
   assert.match(appState, /secretValueModified\?: boolean/);
-  assert.match(saveSecret, /state\.draft\.secretValueModified \? value : null/);
+  assert.match(saveSecret, /Boolean\(state\.draft\.secretValueModified\)/);
+  assert.match(saveSecret, /valueModified \? value : null/);
   assert.doesNotMatch(saveSecret, /includes\('•'\)/);
   assert.match(saveConnection, /existingConnection\?\.secret_names\.length/);
   assert.match(saveConnection, /d\.template !== existingConnection\?\.template/);
@@ -314,7 +315,7 @@ test('connection detail headings have no leading connection icon', async () => {
   assert.doesNotMatch(detail, /ICONS\.chevronsLeftRightEllipsis/);
 });
 
-test('Secrets leaves agent-key management to Settings', async () => {
+test('Credentials leaves agent-key management to Settings', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const secrets = app.match(
     /function SecretsView\(\): ReactNode \{([\s\S]*?)function ActivityRow/,
@@ -323,7 +324,7 @@ test('Secrets leaves agent-key management to Settings', async () => {
     /function SettingsSheet\(\): ReactNode \{([\s\S]*?)\/\* --------------------------------- helpers/,
   )?.[1];
 
-  assert.ok(secrets, 'Secrets view is present');
+  assert.ok(secrets, 'Credentials view is present');
   assert.doesNotMatch(secrets, /identity|agent key|rotate-key|SharedKeyCard/);
   assert.match(app, /case 'secrets': return \['secrets'\]/);
   assert.ok(settings, 'Settings sheet is present');

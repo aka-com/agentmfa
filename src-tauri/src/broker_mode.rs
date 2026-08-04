@@ -47,7 +47,10 @@ impl BrokerProfileInfo {
             connected: true,
             error: None,
             has_saved_token: false,
-            capabilities: vec![aka_api::ONEPASSWORD_PROVIDER_CAPABILITY.into()],
+            capabilities: vec![
+                aka_api::ONEPASSWORD_PROVIDER_CAPABILITY.into(),
+                aka_api::TYPED_CREDENTIALS_CAPABILITY.into(),
+            ],
         }
     }
 }

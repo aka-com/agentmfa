@@ -17,6 +17,48 @@ export function validateSecretForm(input: {
   return errors;
 }
 
+/** The password shape of the credential sheet. The site's real
+ * canonicalization happens broker-side; here we only refuse the obviously
+ * empty or unaddressable. The 2FA seed is optional and validated broker-side
+ * too (Base32 or otpauth:// — a shape the UI should not re-implement). */
+export function validatePasswordForm(input: {
+  adding: boolean;
+  site: string;
+  value: string;
+  valueModified: boolean;
+}): FormErrors {
+  const errors: FormErrors = {};
+  const site = input.site.trim();
+  if (!site) errors.site = 'Website is required';
+  else if (/\s/.test(site)) errors.site = 'Enter one website address';
+  if (input.adding && !input.value) errors.value = 'Password is required';
+  if (!input.adding && input.valueModified && !input.value) {
+    errors.value = 'Invalid password';
+  }
+  return errors;
+}
+
+/** Best-effort preview of the canonical site the broker will store.
+ * The broker remains authoritative on save; this mirrors its normalization
+ * only so the password form can explain what a pasted URL will become. */
+export function normalizedSitePreview(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:')
+        || url.username || url.password) return null;
+    let host = url.hostname.replace(/\.$/, '').toLowerCase();
+    if (!host) return null;
+    const withoutWww = host.startsWith('www.') ? host.slice(4) : host;
+    if (withoutWww.includes('.')) host = withoutWww;
+    const port = url.port;
+    return port && port !== '80' && port !== '443' ? `${host}:${port}` : host;
+  } catch {
+    return null;
+  }
+}
+
 export interface ConnectionValidationInput {
   adding: boolean;
   type: ConnectionType;

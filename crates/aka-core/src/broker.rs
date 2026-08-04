@@ -645,6 +645,74 @@ impl Broker {
         Ok(meta)
     }
 
+    /// Store a typed credential. This is the validation layer: the site is
+    /// normalized and the TOTP seed parsed/canonicalized here, so the store
+    /// transaction only ever sees well-formed material.
+    pub fn ui_add_credential(&self, spec: crate::manage::CredentialAddSpec) -> Result<SecretMeta> {
+        let crate::manage::CredentialAddSpec {
+            kind,
+            name,
+            site,
+            username,
+            value,
+            totp,
+        } = spec;
+        let (site, totp) = match kind {
+            crate::types::SecretKind::Secret => (None, None),
+            crate::types::SecretKind::Password => {
+                let site = crate::password::normalize_site(site.as_deref().unwrap_or_default())?;
+                let totp = totp
+                    .as_deref()
+                    .filter(|seed| !seed.trim().is_empty())
+                    .map(|seed| crate::totp::TotpSpec::parse(seed).map(|spec| spec.canonical()))
+                    .transpose()?;
+                (Some(site), totp)
+            }
+        };
+        let meta = self.store.add_credential(crate::store::NewCredential {
+            kind,
+            name,
+            site,
+            username: username
+                .map(|username| username.trim().to_string())
+                .filter(|username| !username.is_empty()),
+            value,
+            totp,
+        })?;
+        self.audit.append(match meta.kind {
+            crate::types::SecretKind::Secret => AuditEntry::new(
+                AuditKind::SecretAdded,
+                format!("Secret added: {}", meta.name),
+            ),
+            crate::types::SecretKind::Password => AuditEntry::new(
+                AuditKind::SecretAdded,
+                format!(
+                    "Password added for {}",
+                    meta.site.as_deref().unwrap_or_default()
+                ),
+            )
+            .field("has_totp", meta.has_totp()),
+        });
+        self.events.secrets_changed();
+        Ok(meta)
+    }
+
+    /// The current TOTP code for a password's 2FA factor. Computed here so
+    /// the seed never leaves the vault; audited like a value release since a
+    /// live code is a usable credential for its 30-second window.
+    pub async fn ui_secret_totp_code(&self, id: &Uuid) -> Result<(String, u64)> {
+        let (code, seconds_remaining) = self.store.secret_totp_code(id).await?;
+        let meta = self.store.secret_by_id(id)?;
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::SecretCopied,
+                format!("2FA code issued for {}", meta.name),
+            )
+            .field("seconds_remaining", seconds_remaining),
+        );
+        Ok((code, seconds_remaining))
+    }
+
     /// The Edit-secret sheet: rename and/or replace the value; blank value
     /// keeps the current one.
     pub fn ui_edit_secret(
@@ -653,11 +721,48 @@ impl Broker {
         new_name: Option<&str>,
         new_value: Option<SecretValue>,
     ) -> Result<SecretMeta> {
+        self.ui_edit_credential(id, new_name, new_value, None, None, None)
+    }
+
+    /// The full edit surface. Beyond rename + value replacement, passwords
+    /// may update their sign-in profile (`new_site` replaces; `new_username`
+    /// replaces, empty clearing it) and their TOTP factor (`new_totp` sets a
+    /// parsed-and-canonicalized seed, empty removes it).
+    pub fn ui_edit_credential(
+        &self,
+        id: &Uuid,
+        new_name: Option<&str>,
+        new_value: Option<SecretValue>,
+        new_site: Option<String>,
+        new_username: Option<String>,
+        new_totp: Option<String>,
+    ) -> Result<SecretMeta> {
         let _gate = self.config_gate.lock().unwrap();
         let mut meta = self.store.secret_by_id(id)?;
         if new_value.is_some() && !matches!(meta.source, crate::types::SecretSource::Local) {
             return Err(CoreError::ExternalSecretReadOnly);
         }
+        // Validate password-field input before any mutation commits, so an
+        // invalid site cannot land after a rename already happened.
+        let profile_edit = new_site.is_some() || new_username.is_some();
+        if (profile_edit || new_totp.is_some()) && meta.kind != crate::types::SecretKind::Password {
+            return Err(CoreError::NotAPassword);
+        }
+        if new_totp.is_some() && !matches!(meta.source, crate::types::SecretSource::Local) {
+            return Err(CoreError::ExternalSecretReadOnly);
+        }
+        let new_site = new_site
+            .map(|site| crate::password::normalize_site(&site))
+            .transpose()?;
+        let totp_edit = new_totp
+            .map(|seed| {
+                if seed.trim().is_empty() {
+                    Ok(None)
+                } else {
+                    crate::totp::TotpSpec::parse(&seed).map(|spec| Some(spec.canonical()))
+                }
+            })
+            .transpose()?;
         let mut changes = Vec::new();
         let mut rename: Option<(String, String, usize)> = None;
         if let Some(new_name) = new_name {
@@ -696,6 +801,26 @@ impl Broker {
                         .close_connection_sessions(&connection.id, "secret_rotated");
                 }
             }
+        }
+        if profile_edit {
+            meta = self.store.set_password_profile(
+                id,
+                new_site,
+                new_username.map(|username| {
+                    let username = username.trim().to_string();
+                    (!username.is_empty()).then_some(username)
+                }),
+            )?;
+            changes.push("sign-in profile updated".into());
+        }
+        if let Some(totp) = totp_edit {
+            let removing = totp.is_none();
+            meta = self.store.set_totp_factor(id, totp)?;
+            changes.push(if removing {
+                "2FA secret removed".into()
+            } else {
+                "2FA secret set".into()
+            });
         }
         if !changes.is_empty() {
             let mut entry = AuditEntry::new(

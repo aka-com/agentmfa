@@ -4,6 +4,7 @@
 // are never bundled into the desktop application.
 
 import { sshInvocationCommand } from './connect-agents';
+import { normalizedSitePreview } from './form-validation';
 import type {
   ActivityEntry,
   Approval,
@@ -27,6 +28,7 @@ import type {
   OnePasswordItem,
   OnePasswordVault,
   RequestRecord,
+  SecretKind,
   SecretSummary,
   SessionSummary,
   Settings,
@@ -125,6 +127,11 @@ interface MockSecret {
   created_at: string;
   updated_at: string;
   source?: SecretSummary['source'];
+  kind?: SecretKind;
+  site?: string | null;
+  username?: string | null;
+  /** The stored 2FA seed; the DTO only ever says whether one exists. */
+  _totp?: string | null;
 }
 
 interface MockConnection {
@@ -248,6 +255,13 @@ interface MockArgs {
   orderedIds?: string[];
   settings: NotificationSettings;
   label?: string;
+  kind?: SecretKind;
+  site?: string | null;
+  username?: string | null;
+  totp?: string | null;
+  newSite?: string | null;
+  newUsername?: string | null;
+  newTotp?: string | null;
   method?: 'desktop_app' | 'service_account' | 'connect';
   account?: string | null;
   connectUrl?: string | null;
@@ -336,6 +350,100 @@ const db: MockDatabase = {
 function mkSecret(name: string, value: string, source?: SecretSummary['source']): MockSecret {
   return { id: uid(), name, _value: value, created_at: now(), updated_at: now(), source };
 }
+function mkPassword(
+  site: string,
+  username: string | null,
+  value: string,
+  totp: string | null,
+): MockSecret {
+  return {
+    ...mkSecret(derivePasswordName(site, username), value),
+    kind: 'password',
+    site,
+    username,
+    _totp: totp,
+  };
+}
+/** The core's PASSWORD_<SITE>[_<USER>] derivation, mock-grade. */
+function derivePasswordName(site: string, username: string | null): string {
+  const part = (value: string): string =>
+    value.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').toUpperCase();
+  const user = username ? part(username.split('@')[0]) : '';
+  const stem = `PASSWORD_${part(site)}${user ? `_${user}` : ''}`.slice(0, 64);
+  if (!db.secrets.some((secret) => secret.name === stem)) return stem;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${stem.slice(0, 64 - String(suffix).length - 1)}_${suffix}`;
+    if (!db.secrets.some((secret) => secret.name === candidate)) return candidate;
+  }
+}
+/** Use the same pure preview as the form so frontend-only development has
+ * the broker's canonical site semantics, including its fixpoint guarantee. */
+function normalizeSite(input: string): string {
+  const site = normalizedSitePreview(input);
+  if (site) return site;
+  throw formError('validation', 'invalid_site', 'site', 'Enter a website address');
+}
+
+/** Validate enough of a TOTP enrollment to keep the mock aligned with the
+ * core: TOTP-only otpauth URIs, supported parameters, and at least eight
+ * decoded bytes of Base32 key material. */
+function validateTotpSeed(input: string): string {
+  const invalid = (): never => {
+    throw formError(
+      'validation',
+      'invalid_totp_seed',
+      'totp',
+      'Paste the Base32 secret or otpauth:// URI',
+    );
+  };
+  const trimmed = input.trim();
+  if (!trimmed || trimmed.length > 2048) return invalid();
+  let seed = trimmed;
+  if (trimmed.toLowerCase().startsWith('otpauth://')) {
+    let uri: URL;
+    try {
+      uri = new URL(trimmed);
+    } catch {
+      return invalid();
+    }
+    if (uri.protocol !== 'otpauth:' || uri.hostname.toLowerCase() !== 'totp') return invalid();
+    seed = '';
+    for (const [key, value] of uri.searchParams) {
+      switch (key.toLowerCase()) {
+        case 'secret': seed = value; break;
+        case 'algorithm':
+          if (!['SHA1', 'SHA256', 'SHA512'].includes(value.toUpperCase())) return invalid();
+          break;
+        case 'digits': {
+          const digits = Number(value);
+          if (!Number.isInteger(digits) || digits < 6 || digits > 8) return invalid();
+          break;
+        }
+        case 'period': {
+          const period = Number(value);
+          if (!Number.isInteger(period) || period < 15 || period > 120) return invalid();
+          break;
+        }
+      }
+    }
+  } else if (trimmed.toLowerCase().includes('://')) {
+    return invalid();
+  }
+  const formatted = seed.replace(/[ -]/g, '');
+  const paddingAt = formatted.indexOf('=');
+  if (paddingAt >= 0 && /[^=]/.test(formatted.slice(paddingAt))) return invalid();
+  const encoded = (paddingAt >= 0 ? formatted.slice(0, paddingAt) : formatted).toUpperCase();
+  if (!/^[A-Z2-7]+$/.test(encoded) || Math.floor(encoded.length * 5 / 8) < 8) {
+    return invalid();
+  }
+  return trimmed;
+}
+// Password seeds derive their names against db.secrets, so they join the
+// store right after it exists rather than inside its own initializer.
+db.secrets.push(
+  mkPassword('x.com', 'raykyri@gmail.com', 'demo-pw-x', 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'),
+  mkPassword('google.com', 'social@aka.com', 'demo-pw-google', null),
+);
 function secretDto(secret: MockSecret): SecretSummary {
   const names = db.connections
     .filter((connection) => connection.secret_names.includes(secret.name))
@@ -348,6 +456,10 @@ function secretDto(secret: MockSecret): SecretSummary {
     created_at: secret.created_at,
     updated_at: secret.updated_at,
     source: secret.source ?? { kind: 'local' },
+    kind: secret.kind ?? 'secret',
+    site: secret.site ?? null,
+    username: secret.username ?? null,
+    totp: Boolean(secret._totp),
   };
 }
 seedConnections();
@@ -824,7 +936,7 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
 // are reviewable in a plain browser.
 let mockBroker: import('./types').BrokerProfile = {
   mode: 'local', url: null, connected: true, error: null, has_saved_token: false,
-  capabilities: ['onepassword_provider_v1'],
+  capabilities: ['onepassword_provider_v1', 'typed_credentials_v1'],
 };
 let mockNotificationSettings: NotificationSettings = {
   mode: 'when_hidden',
@@ -985,7 +1097,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         return {
           mode: 'local', url: null, connected: false,
           error: 'the local broker exited unexpectedly', has_saved_token: false,
-          capabilities: ['onepassword_provider_v1'],
+          capabilities: ['onepassword_provider_v1', 'typed_credentials_v1'],
         };
       }
       return { ...mockBroker };
@@ -1004,7 +1116,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       mockBroker = {
         mode: 'local', url: mockBroker.url, connected: true, error: null,
         has_saved_token: mockBroker.has_saved_token,
-        capabilities: ['onepassword_provider_v1'],
+        capabilities: ['onepassword_provider_v1', 'typed_credentials_v1'],
       };
       emit('aka://broker-changed', mockBroker);
       return { ...mockBroker };
@@ -1066,6 +1178,14 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
           'The keychain is locked or unavailable',
         );
       }
+      if (args.kind === 'password') {
+        const site = normalizeSite(args.site ?? '');
+        const totp = args.totp?.trim() ? validateTotpSeed(args.totp) : null;
+        const password = mkPassword(site, args.username || null, args.value, totp);
+        db.secrets.push(password);
+        audit('secretAdded', `Password added for ${site}`);
+        return;
+      }
       if (db.secrets.some((s) => s.name === args.name)) {
         throw formError('conflict', 'secret_name_taken', 'name', 'That credential name is already in use');
       }
@@ -1076,6 +1196,17 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (!s) {
         throw formError('conflict', 'secret_not_found', null, 'This credential was removed elsewhere');
       }
+      if ((args.newSite != null || args.newUsername != null || args.newTotp != null)
+          && s.kind !== 'password') {
+        throw formError('validation', 'not_a_password', null, 'Only passwords carry sign-in fields');
+      }
+      // Match the broker's all-validation-before-mutation contract. A bad
+      // site or 2FA enrollment bundled with a rename must not land half of
+      // the edit in frontend-only development.
+      const newSite = args.newSite != null ? normalizeSite(args.newSite) : undefined;
+      const newTotp = args.newTotp != null
+        ? (args.newTotp.trim() ? validateTotpSeed(args.newTotp) : '')
+        : undefined;
       if (args.newName && args.newName !== s.name) {
         const newName = args.newName;
         if (db.secrets.some((other) => other.id !== s.id && other.name === newName)) {
@@ -1088,6 +1219,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         s.name = newName;
       }
       if (args.newValue) s._value = args.newValue;
+      if (newSite !== undefined) s.site = newSite;
+      if (args.newUsername != null) s.username = args.newUsername.trim() || null;
+      if (newTotp !== undefined) s._totp = newTotp || null;
       s.updated_at = now(); audit('secretUpdated', `Secret updated: ${s.name}`); return;
     }
     case 'delete_secret': {
@@ -1108,6 +1242,24 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       const entry = audit('secretCopied', `Secret copied: ${s.name}`);
       emit('aka://activity-appended', entry);
       return;
+    }
+    case 'get_secret_totp': {
+      const s = db.secrets.find((x) => x.id === args.id); if (!s) throw 'no such secret';
+      if (!s._totp) throw 'this credential has no 2FA secret';
+      const entry = audit('secretCopied', `2FA code issued for ${s.name}`);
+      emit('aka://activity-appended', entry);
+      return {
+        code: '246801',
+        seconds_remaining: 30 - (Math.floor(Date.now() / 1000) % 30),
+      };
+    }
+    case 'copy_secret_totp': {
+      const s = db.secrets.find((x) => x.id === args.id); if (!s) throw 'no such secret';
+      if (!s._totp) throw 'this credential has no 2FA secret';
+      const entry = audit('secretCopied', `2FA code issued for ${s.name}`);
+      emit('aka://activity-appended', entry);
+      // The webview only ever learns the code's remaining validity.
+      return 30 - (Math.floor(Date.now() / 1000) % 30);
     }
     case 'add_connection': {
       const i = args.input;

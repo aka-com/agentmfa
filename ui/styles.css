@@ -1806,19 +1806,20 @@
 }
 .secrets-card .sec-table { margin: 0; }
 .dropdown-surface .secrets-card .sec-table { table-layout: fixed; }
-.dropdown-surface .secrets-card .sec-table th:nth-child(1) { width: 50%; }
-.dropdown-surface .secrets-card .sec-table th:nth-child(2) { width: 22%; }
-.dropdown-surface .secrets-card .sec-table th:nth-child(3) { width: 14%; }
-.dropdown-surface .secrets-card .sec-table th:nth-child(4) { width: 14%; }
+.dropdown-surface .secrets-card .sec-table.is-passwords th:nth-child(1) { width: 40%; }
+.dropdown-surface .secrets-card .sec-table.is-passwords th:nth-child(2) { width: 23%; }
+.dropdown-surface .secrets-card .sec-table.is-passwords th:nth-child(3) { width: 22%; }
+.dropdown-surface .secrets-card .sec-table.is-passwords th:nth-child(4) { width: 15%; }
+.dropdown-surface .secrets-card .sec-table.is-secrets th:nth-child(1) { width: 62%; }
+.dropdown-surface .secrets-card .sec-table.is-secrets th:nth-child(2) { width: 20%; }
+.dropdown-surface .secrets-card .sec-table.is-secrets th:nth-child(3) { width: 18%; }
 .dropdown-surface .secrets-card .sec-table td:first-child,
 .dropdown-surface .secrets-card .used-by-cell,
 .dropdown-surface .secrets-card .val { overflow: hidden; }
-.dropdown-surface .secrets-card .s-name,
-.dropdown-surface .secrets-card .s-source-label {
+.dropdown-surface .secrets-card .s-name {
   display: block; min-width: 0; max-width: 100%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.dropdown-surface .secrets-card .s-source-label { flex: 1; }
 .dropdown-surface .secrets-card .used-by-link { max-width: 100%; }
 .dropdown-surface .secrets-card .val-wrap { display: flex; max-width: 100%; }
 .dropdown-surface .secrets-card .val-slot { min-width: 0; width: 100%; overflow: hidden; }
@@ -1831,15 +1832,78 @@
   padding: 9px 6px; font-size: 0.65625rem; font-weight: 700;
   letter-spacing: .07em; text-transform: uppercase;
 }
-/* The last row's hairline is the card's own bottom edge (or the divider
-   above the tray's Add credential row); drawing both doubles it. */
+/* The last row's hairline is the card's own bottom edge. */
 .secrets-card .sec-table tr:last-child td { border-bottom: 0; }
 .secrets-card > .muted-note { padding: 10px 14px; }
-/* The tray keeps Add credential as a full-bleed activatable row; the wide
-   window promotes it to the page header instead. */
-.secrets-card .cat-add-secret { border-top: 1px solid var(--line-soft); }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
+
+/* Both credential groups stay visible even when one is empty. Their add
+   controls are quiet links below (not full-bleed card footers). */
+.secrets-groups { display: flex; flex-direction: column; gap: 16px; }
+.credential-group { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
+.secrets-group-h {
+  margin: 2px 2px 0; color: var(--muted);
+  font-size: 0.71875rem; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.secrets-group-h:first-child { margin-top: 0; }
+.credential-group-add {
+  align-self: flex-start; padding: 1px 2px; border: 0; background: transparent;
+  color: var(--muted); font: inherit; font-size: 0.71875rem; cursor: pointer;
+  text-align: left;
+}
+.credential-group-add:hover { color: var(--accent-text); text-decoration: underline; }
+/* Password rows lead with the site — a monogram tile plus the canonical
+   host — because that is how people recall them. */
+.site-cell { display: inline-flex; align-items: center; gap: 9px; }
+.site-tile {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 26px; height: 26px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--chip-bg); color: var(--ink-2);
+  font-size: 0.78125rem; font-weight: 700;
+}
+.site-host { font-weight: 600; font-size: 0.8125rem; }
+.username-cell { color: var(--ink-2); font-size: 0.8125rem; }
+/* Linked credentials keep only the provider mark, right-aligned in their
+   identity cell; the vault label belongs in the tooltip, not a second row. */
+.s-credential-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.s-credential-cell .s-name { flex: 1; min-width: 0; }
+.s-source-icon { display: inline-flex; flex: 0 0 auto; color: var(--muted); }
+.s-source-icon svg { width: 12px; height: 12px; }
+/* The menu-bar 2FA chip is an action beside the masked password. */
+.totp-chip {
+  flex: 0 0 auto; padding: 2px 7px;
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  background: transparent; color: var(--muted);
+  font: inherit; font-size: 0.65625rem; font-weight: 650; cursor: pointer;
+  vertical-align: middle;
+}
+.totp-chip:hover { background: var(--accent-wash); color: var(--accent-ink); border-color: transparent; }
+/* The full window renders the current code and an honest broker-anchored
+   countdown. It remains a button so one press still copies with hygiene. */
+.totp-live {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 7px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--accent-ink);
+  font: 600 0.75rem ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: .04em; cursor: pointer; vertical-align: middle;
+}
+.totp-live:hover { background: var(--accent-wash); }
+.totp-live-loading { color: var(--muted-2); cursor: default; }
+.totp-countdown { min-width: 2.2em; color: var(--muted); font-size: 0.65625rem; letter-spacing: 0; }
+/* The credential sheet's type segments and password extras. */
+.secret-kind-seg { margin-bottom: 12px; }
+.secret-kind-seg .seg-btn { flex: 1; }
+.gen-row { display: flex; align-items: stretch; gap: 6px; }
+.gen-row input { flex: 1; min-width: 0; }
+.gen-row .btn { flex: 0 0 auto; }
+.label-note { margin-left: 4px; color: var(--muted-2); font-weight: 400; }
+.field-hint { margin-top: 4px; color: var(--muted); font-size: 0.71875rem; line-height: 1.45; }
+.totp-remove-check {
+  display: inline-flex; align-items: center; gap: 7px; margin-top: 7px;
+  color: var(--muted); font-size: 0.78125rem; cursor: pointer;
+}
+.totp-remove-check input { margin: 0; accent-color: var(--accent); }
 
 /* The status bar: vault state compressed into one line of chrome flush with
    the window bottom, outside the scroll pane, so it costs the table nothing
@@ -1913,11 +1977,6 @@
   display: inline-flex; align-items: center; gap: 6px;
 }
 .onepassword-integration-actions { flex: 0 0 auto; }
-.s-source {
-  display: flex; align-items: center; gap: 4px; margin-top: 2px;
-  color: var(--muted); font-size: 0.65625rem;
-}
-.s-source svg { width: 11px; height: 11px; }
 .linked-secret-source {
   display: flex; align-items: center; gap: 10px; margin: 2px 0 10px; padding: 10px;
   border: 1px solid var(--line); border-radius: 8px; background: var(--wash);

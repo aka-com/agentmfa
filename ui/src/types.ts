@@ -1,5 +1,7 @@
 export type ConnectionType = 'api' | 'pg' | 'ssh';
 
+export type SecretKind = 'secret' | 'password';
+
 export interface SecretSummary {
   id: string;
   name: string;
@@ -7,6 +9,13 @@ export interface SecretSummary {
   used_by_names: string[];
   created_at: string;
   updated_at: string;
+  /** Records from before typing arrive without a kind and are secrets. */
+  kind?: SecretKind;
+  /** Password metadata: the canonical host the password signs in to. */
+  site?: string | null;
+  username?: string | null;
+  /** Whether a local TOTP factor is attached (never the seed itself). */
+  totp?: boolean;
   source?:
     | { kind: 'local' }
     | {
@@ -23,6 +32,11 @@ export interface SecretSummary {
         field_label: string;
         field_type?: string | null;
       };
+}
+
+export interface TotpCode {
+  code: string;
+  seconds_remaining: number;
 }
 
 export interface OnePasswordIntegration {
@@ -687,16 +701,32 @@ export interface CommandMap {
   copy_agent_setup: CommandSpec<undefined, void>;
   inspect_ssh_import: CommandSpec<{ source: string }, SshImportPreview>;
   check_known_hosts: CommandSpec<{ host: string; port: number }, KnownHostsLookup>;
-  add_secret: CommandSpec<{ name: string; value: string }, void>;
+  add_secret: CommandSpec<{
+    name?: string | null;
+    value: string;
+    kind?: SecretKind;
+    site?: string | null;
+    username?: string | null;
+    totp?: string | null;
+  }, void>;
   edit_secret: CommandSpec<{
     id: string;
     newName?: string | null;
     newValue?: string | null;
+    newSite?: string | null;
+    /** An empty string clears the username. */
+    newUsername?: string | null;
+    /** An empty string removes the 2FA factor. */
+    newTotp?: string | null;
   }, void>;
   delete_secret: CommandSpec<{ id: string }, void>;
   /** The whole value, for a reveal the user asked for and confirmed. */
   reveal_secret: CommandSpec<{ id: string }, string>;
   copy_secret: CommandSpec<{ id: string }, void>;
+  /** A current 2FA code for the desktop window's live countdown. */
+  get_secret_totp: CommandSpec<{ id: string }, TotpCode>;
+  /** Copies the current 2FA code; resolves to its remaining validity (s). */
+  copy_secret_totp: CommandSpec<{ id: string }, number>;
   add_connection: CommandSpec<{ input: ConnectionInput }, void>;
   edit_connection: CommandSpec<{
     id: string;

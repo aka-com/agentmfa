@@ -1317,6 +1317,9 @@ fn die(message: impl std::fmt::Display) -> ! {
 fn manage_error_exit_code(error: &ManageError) -> ExitCode {
     match error {
         ManageError::InvalidSecretName { .. }
+        | ManageError::InvalidSite { .. }
+        | ManageError::InvalidTotpSeed { .. }
+        | ManageError::NotAPassword
         | ManageError::InvalidConnectionName { .. }
         | ManageError::Template { .. }
         | ManageError::UnknownTemplateRef { .. }
@@ -1330,6 +1333,7 @@ fn manage_error_exit_code(error: &ManageError) -> ExitCode {
         ManageError::InvalidManageToken { .. } => ExitCode::Authentication,
         ManageError::SecretNotFound
         | ManageError::ConnectionNotFound
+        | ManageError::TotpNotConfigured
         | ManageError::EndpointNotFound => ExitCode::NotFound,
         ManageError::SecretNameTaken { .. }
         | ManageError::ConnectionNameTaken { .. }
@@ -1788,11 +1792,16 @@ fn conn_dto(managed: &Managed, name: &str) -> ConnectionDto {
 fn cmd_secret_rename(name: String, new_name: String, root: Option<PathBuf>, url: Option<String>) {
     let managed = management_backend(root, url);
     let dto = secret_dto(&managed, &name);
-    managed.run(
-        managed
-            .backend
-            .edit_secret(dto_id(&dto.id), Some(new_name.clone()), None),
-    );
+    managed.run(managed.backend.edit_secret(
+        dto_id(&dto.id),
+        aka_core::manage::SecretEditBody {
+            new_name: Some(new_name.clone()),
+            new_value: None,
+            new_site: None,
+            new_username: None,
+            new_totp: None,
+        },
+    ));
     eprintln!("renamed secret {name} → {new_name}");
 }
 
@@ -1807,11 +1816,16 @@ fn cmd_secret_replace(
     let byte_len = value.len();
     let managed = management_backend(root, url);
     let dto = secret_dto(&managed, &name);
-    managed.run(
-        managed
-            .backend
-            .edit_secret(dto_id(&dto.id), None, Some(value)),
-    );
+    managed.run(managed.backend.edit_secret(
+        dto_id(&dto.id),
+        aka_core::manage::SecretEditBody {
+            new_name: None,
+            new_value: Some(value.to_string()),
+            new_site: None,
+            new_username: None,
+            new_totp: None,
+        },
+    ));
     eprintln!("replaced the value of secret {name} ({byte_len} bytes)");
 }
 

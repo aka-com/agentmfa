@@ -580,15 +580,24 @@ impl<A: KeychainApi> SecretVault for KeychainVault<A> {
         let removed = self.api.remove(self.keychain, &self.service, &account);
         // An un-migrated login-keychain copy must go too, or a "deleted"
         // secret would come back the next time it is read.
+        let mut removed_legacy = false;
         if self.keychain == Keychain::DataProtection {
             match self.api.remove(Keychain::Login, &self.service, &account) {
-                Ok(()) | Err(KeychainError::NotFound) => {}
+                Ok(()) => removed_legacy = true,
+                Err(KeychainError::NotFound) => {}
                 Err(error) => {
                     tracing::warn!("could not remove the login-keychain copy: {error}")
                 }
             }
         }
-        removed.map_err(CoreError::from)
+        match removed {
+            Ok(()) => Ok(()),
+            // Before its first read, a legacy item exists only in the login
+            // keychain. Deleting that item is success even though the selected
+            // data-protection keychain correctly reported no current copy.
+            Err(KeychainError::NotFound) if removed_legacy => Ok(()),
+            Err(error) => Err(CoreError::from(error)),
+        }
     }
 
     fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError> {
@@ -1088,6 +1097,23 @@ pub(crate) mod tests {
             None,
             "a deleted secret must not come back from the login keychain"
         );
+        assert!(matches!(
+            vault.get(&id).await,
+            Err(CoreError::SecretNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_login_only_legacy_item_reports_success() {
+        let api = Arc::new(FakeKeychain::entitled());
+        let id = Uuid::new_v4();
+        let account = id.to_string();
+        api.seed(Keychain::Login, SERVICE, &account, "legacy-only");
+
+        let vault = KeychainVault::with_keychain(api.clone(), SERVICE, Keychain::DataProtection);
+        vault.delete(&id).unwrap();
+
+        assert_eq!(api.peek(Keychain::Login, SERVICE, &account), None);
         assert!(matches!(
             vault.get(&id).await,
             Err(CoreError::SecretNotFound)

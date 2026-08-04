@@ -116,6 +116,10 @@ fn manage_error_response(error: ManageError) -> Response {
         | ManageError::EndpointLimit { .. }
         | ManageError::EndpointRequiresWiring => StatusCode::CONFLICT,
         ManageError::InvalidSecretName { .. }
+        | ManageError::InvalidSite { .. }
+        | ManageError::InvalidTotpSeed { .. }
+        | ManageError::TotpNotConfigured
+        | ManageError::NotAPassword
         | ManageError::InvalidConnectionName { .. }
         | ManageError::Template { .. }
         | ManageError::UnknownTemplateRef { .. }
@@ -184,6 +188,8 @@ pub fn router() -> Router<AppState> {
         .route("/secrets", get(list_secrets).post(add_secret))
         .route("/secrets/{id}", patch(edit_secret).delete(delete_secret))
         .route("/secrets/{id}/reveal", post(reveal_secret))
+        // POST: issuing a code is audited, so the route is not a safe GET.
+        .route("/secrets/{id}/totp", post(secret_totp_code))
         .route("/secrets/{id}/copy-value", post(secret_value_for_copy))
         .route(
             "/integrations",
@@ -296,6 +302,7 @@ async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Respons
         "capabilities": [
             aka_api::APPROVAL_SURFACE_CAPABILITY,
             aka_api::ONEPASSWORD_PROVIDER_CAPABILITY,
+            aka_api::TYPED_CREDENTIALS_CAPABILITY,
         ],
         "approval_surface_attached": state.broker.events.has_approval_surface(),
     }))
@@ -635,12 +642,7 @@ async fn add_secret(
     _authed: ManageAuthed,
     ApiJson(body): ApiJson<SecretAddBody>,
 ) -> Response {
-    respond(
-        state
-            .manage
-            .add_secret(body.name, Zeroizing::new(body.value))
-            .await,
-    )
+    respond(state.manage.add_credential(body).await)
 }
 
 async fn edit_secret(
@@ -649,8 +651,15 @@ async fn edit_secret(
     Path(id): Path<Uuid>,
     ApiJson(body): ApiJson<SecretEditBody>,
 ) -> Response {
-    let value = body.new_value.filter(|v| !v.is_empty()).map(Zeroizing::new);
-    respond(state.manage.edit_secret(id, body.new_name, value).await)
+    respond(state.manage.edit_secret(id, body).await)
+}
+
+async fn secret_totp_code(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    respond(state.manage.secret_totp_code(id).await)
 }
 
 async fn delete_secret(
@@ -805,7 +814,9 @@ async fn add_connection(
             state
                 .manage
                 .add_connection_with_secret(
-                    new_secret.name,
+                    // Connection-first setup stores a plain named secret;
+                    // typed fields have no meaning on this path.
+                    new_secret.name.unwrap_or_default(),
                     Zeroizing::new(new_secret.value),
                     body.spec,
                 )

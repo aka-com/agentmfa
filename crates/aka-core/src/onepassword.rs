@@ -178,7 +178,11 @@ pub fn validate_integration(label: &str, auth: &OnePasswordAuth) -> Result<()> {
 /// Drop blank optional display/metadata fields. 1Password sections often
 /// have an empty title; that is not an error, just "no label".
 pub(crate) fn normalize_reference(mut reference: OnePasswordSecretRef) -> OnePasswordSecretRef {
-    if reference.section_id.as_ref().is_some_and(|value| value.is_empty()) {
+    if reference
+        .section_id
+        .as_ref()
+        .is_some_and(|value| value.is_empty())
+    {
         reference.section_id = None;
     }
     if reference
@@ -188,7 +192,11 @@ pub(crate) fn normalize_reference(mut reference: OnePasswordSecretRef) -> OnePas
     {
         reference.section_label = None;
     }
-    if reference.field_type.as_ref().is_some_and(|value| value.is_empty()) {
+    if reference
+        .field_type
+        .as_ref()
+        .is_some_and(|value| value.is_empty())
+    {
         reference.field_type = None;
     }
     reference
@@ -233,8 +241,7 @@ pub(crate) fn validate_reference(reference: &OnePasswordSecretRef) -> Result<()>
     }
     // Blank labels are normalized away; only reject non-empty junk.
     if reference.section_label.as_ref().is_some_and(|value| {
-        !value.is_empty()
-            && (value.chars().count() > 256 || value.chars().any(char::is_control))
+        !value.is_empty() && (value.chars().count() > 256 || value.chars().any(char::is_control))
     }) {
         return Err(CoreError::InvalidOnePasswordIntegration(
             "invalid 1Password section label".into(),
