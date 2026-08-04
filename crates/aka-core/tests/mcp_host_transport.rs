@@ -343,6 +343,140 @@ async fn rust_host_projects_and_invokes_native_broker_tools() {
 }
 
 #[tokio::test]
+async fn rust_host_discovers_a_provisioned_upstream_without_reconnecting() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+            let id = body["id"].clone();
+            let result = match body["method"].as_str() {
+                Some("initialize") => json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "notes", "version": "1"},
+                }),
+                Some("tools/list") => json!({
+                    "tools": [{
+                        "name": "search",
+                        "description": "Search notes",
+                        "inputSchema": {"type": "object"},
+                    }],
+                }),
+                Some("tools/call") => json!({
+                    "content": [{"type": "text", "text": "new connection works"}],
+                }),
+                _ => Value::Null,
+            };
+            axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, upstream).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::new(
+        Paths::under(dir.path()),
+        Arc::new(MemoryVault::new()),
+        BrokerConfig::default(),
+        Arc::new(NoopEvents),
+    )
+    .await
+    .unwrap();
+    let token = broker.identity.token();
+    let host = mcp_host::serve(broker.clone()).await.unwrap();
+    let client = reqwest::Client::new();
+    let session = initialize(&client, &host.mcp_url(), &token).await;
+
+    let before = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        2,
+        "tools/list",
+        json!({}),
+    )
+    .await;
+    assert!(!before["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "multitool_notes_search"));
+
+    let events = client
+        .get(host.mcp_url())
+        .bearer_auth(&token)
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "2025-06-18")
+        .header("accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.status(), StatusCode::OK);
+    let mut event_bytes = events.bytes_stream();
+
+    broker
+        .ui_add_connection(ConnectionSpec {
+            name: "notes".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(upstream_port),
+                trusted_ca_bundle_path: None,
+                template: String::new(),
+                mcp_path: Some("/mcp".into()),
+                test_path: None,
+                oauth: None,
+                signer: None,
+                client_cert_path: None,
+                client_key_path: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), event_bytes.next())
+        .await
+        .expect("proactive tools/list_changed event")
+        .expect("open event stream")
+        .expect("event bytes");
+    assert!(String::from_utf8_lossy(&event).contains("notifications/tools/list_changed"));
+
+    let after = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        3,
+        "tools/list",
+        json!({}),
+    )
+    .await;
+    assert!(after["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "multitool_notes_search"));
+
+    let called = rpc(
+        &client,
+        &host.mcp_url(),
+        &token,
+        &session,
+        4,
+        "tools/call",
+        json!({"name": "multitool_notes_search", "arguments": {}}),
+    )
+    .await;
+    assert!(called["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("new connection works"));
+}
+
+#[tokio::test]
 async fn rust_host_cancels_active_calls_and_notifies_the_upstream() {
     let started = Arc::new(tokio::sync::Notify::new());
     let cancelled = Arc::new(tokio::sync::Notify::new());

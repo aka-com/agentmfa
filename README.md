@@ -156,8 +156,8 @@ credentials stay in the vault too. HTTP/Postgres/SSH connections are
 registered as one native Multitool tool each. Streamable-HTTP MCP upstreams
 contribute their own bounded tool names and may be limited to a curated
 subset in the app; upstream stdio servers are not supported. Native
-connection enable/rename changes are announced during a session, while an
-upstream MCP catalog is discovered at session start—reconnect to refresh it.
+connection changes and upstream provisioning are announced to active sessions;
+the agent refreshes its catalog without reconnecting to Multitool.
 Use `multitool_status` first when a tool is missing or an upstream failed.
 
 **Claude Code**:

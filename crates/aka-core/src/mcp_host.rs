@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,7 @@ struct HostState {
     broker: Arc<Broker>,
     port: u16,
     sessions: Arc<SessionStore>,
+    catalog_generation: Arc<AtomicU64>,
     active_requests: Arc<Mutex<HashMap<String, ActiveRequest>>>,
 }
 
@@ -65,6 +67,7 @@ struct BrokerConnection {
 #[derive(Clone, Default)]
 struct ProtocolCatalog {
     discovered: bool,
+    generation: u64,
     tools: HashMap<String, UpstreamToolBinding>,
     search_only: Vec<UpstreamToolBinding>,
     resources: Vec<UpstreamResourceBinding>,
@@ -208,9 +211,49 @@ impl SessionStore {
 
     fn replace_protocol_catalog(&self, id: &str, client_id: uuid::Uuid, catalog: ProtocolCatalog) {
         if let Some(session) = self.sessions.lock().unwrap().get_mut(id) {
-            if session.client_id == client_id {
+            if session.client_id == client_id
+                && catalog.generation == session.protocol_catalog.generation
+            {
                 session.protocol_catalog = catalog;
                 session.last_seen = Instant::now();
+            }
+        }
+    }
+
+    fn invalidate_agent_surfaces(&self, generation: u64) {
+        let mut sessions = self.sessions.lock().unwrap();
+        Self::sweep_locked(&mut sessions);
+        for session in sessions.values_mut() {
+            let resources_were_listed =
+                session.listed_resources.is_some() || session.listed_templates.is_some();
+            let prompts_were_listed = session.listed_prompts.is_some();
+            session.native_tools.clear();
+            session.protocol_catalog = ProtocolCatalog {
+                generation,
+                ..ProtocolCatalog::default()
+            };
+            session.listed_tools = None;
+            session.listed_resources = None;
+            session.listed_templates = None;
+            session.listed_prompts = None;
+            if !session.initialized {
+                continue;
+            }
+            let _ = session.events.send(json!({
+                "jsonrpc": "2.0",
+                "method": CatalogKind::Tools.notification(),
+            }));
+            if resources_were_listed {
+                let _ = session.events.send(json!({
+                    "jsonrpc": "2.0",
+                    "method": CatalogKind::Resources.notification(),
+                }));
+            }
+            if prompts_were_listed {
+                let _ = session.events.send(json!({
+                    "jsonrpc": "2.0",
+                    "method": CatalogKind::Prompts.notification(),
+                }));
             }
         }
     }
@@ -290,6 +333,7 @@ impl CatalogKind {
 pub struct McpHostHandle {
     addr: std::net::SocketAddr,
     task: tokio::task::JoinHandle<()>,
+    catalog_task: tokio::task::JoinHandle<()>,
 }
 
 impl McpHostHandle {
@@ -309,6 +353,7 @@ impl McpHostHandle {
 impl Drop for McpHostHandle {
     fn drop(&mut self) {
         self.task.abort();
+        self.catalog_task.abort();
     }
 }
 
@@ -316,22 +361,47 @@ impl Drop for McpHostHandle {
 pub async fn serve(broker: Arc<Broker>) -> io::Result<McpHostHandle> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let app = router(broker, addr.port());
+    let sessions = Arc::new(SessionStore::default());
+    let mut surface_changes = broker.subscribe_agent_surface_changes();
+    let catalog_generation = Arc::new(AtomicU64::new(*surface_changes.borrow()));
+    let app = router(
+        broker,
+        addr.port(),
+        sessions.clone(),
+        catalog_generation.clone(),
+    );
+    let catalog_task = tokio::spawn(async move {
+        while surface_changes.changed().await.is_ok() {
+            let generation = *surface_changes.borrow_and_update();
+            catalog_generation.store(generation, Ordering::Release);
+            sessions.invalidate_agent_surfaces(generation);
+        }
+    });
     let task = tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, app).await {
             tracing::error!("Rust MCP host exited: {error}");
         }
     });
-    Ok(McpHostHandle { addr, task })
+    Ok(McpHostHandle {
+        addr,
+        task,
+        catalog_task,
+    })
 }
 
-fn router(broker: Arc<Broker>, port: u16) -> Router {
+fn router(
+    broker: Arc<Broker>,
+    port: u16,
+    sessions: Arc<SessionStore>,
+    catalog_generation: Arc<AtomicU64>,
+) -> Router {
     Router::new()
         .route(MCP_PATH, any(handle))
         .with_state(HostState {
             broker,
             port,
-            sessions: Arc::new(SessionStore::default()),
+            sessions,
+            catalog_generation,
             active_requests: Arc::new(Mutex::new(HashMap::new())),
         })
 }
@@ -582,7 +652,10 @@ fn initialize(state: &HostState, client_id: uuid::Uuid, request: Value) -> Respo
             initialized: false,
             last_seen: Instant::now(),
             native_tools: HashMap::new(),
-            protocol_catalog: ProtocolCatalog::default(),
+            protocol_catalog: ProtocolCatalog {
+                generation: state.catalog_generation.load(Ordering::Acquire),
+                ..ProtocolCatalog::default()
+            },
             listed_tools: None,
             listed_resources: None,
             listed_templates: None,
@@ -2532,7 +2605,8 @@ async fn ensure_protocol_catalog(
     listed: Option<&[BrokerConnection]>,
     native_names: impl Iterator<Item = &str>,
 ) -> ProtocolCatalog {
-    if session.protocol_catalog.discovered {
+    let generation = state.catalog_generation.load(Ordering::Acquire);
+    if session.protocol_catalog.discovered && session.protocol_catalog.generation == generation {
         let mut catalog = session.protocol_catalog.clone();
         if let Some(connections) = listed {
             let current = |captured: &BrokerConnection| {
@@ -2576,6 +2650,7 @@ async fn ensure_protocol_catalog(
     }
     let mut catalog = ProtocolCatalog {
         discovered: true,
+        generation,
         ..ProtocolCatalog::default()
     };
     let Some(connections) = listed else {

@@ -496,11 +496,11 @@ and `multitool_call_tool` rather than flooding `tools/list`.
 `multitool_connect` only files a request for the user to configure a service;
 it grants nothing.
 
-Native Multitool tools follow connection enable/disable and rename changes
-during a serving session and send `tools/list_changed`. Upstream MCP catalogs
-are discovered when the serving session starts; reconnect to refresh an
-upstream's tools, schemas, resources, or curated subset. Each upstream
-operation creates and then closes its own upstream MCP session.
+Multitool connection, credential, access, and curated-subset changes invalidate
+the affected serving catalogs and send `tools/list_changed` to active sessions.
+The next list rediscovers upstream tools, schemas, resources, and prompts, so
+provisioning does not require an agent reconnect. Each upstream operation
+creates and then closes its own upstream MCP session.
 A call to a stale catalog entry may therefore receive a 403 because the tool
 is no longer current; do not interpret that response alone as a policy denial.
 
@@ -788,7 +788,7 @@ mod tests {
             "multitool_search_tools",
             "multitool_call_tool",
             "upstream stdio servers are not supported",
-            "reconnect to refresh",
+            "does not require an agent reconnect",
             "`mcp-session-id` as usable",
             "SSH_AUTH_SOCK",
             "session binding and host-bound authentication automatically",

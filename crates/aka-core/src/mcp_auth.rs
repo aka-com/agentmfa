@@ -976,6 +976,7 @@ async fn run_flow(
                 .store
                 .replace_secret_value(&secret_id, Zeroizing::new(tokens.access_token.to_string()))
                 .map_err(|e| FlowFailure::plain(format!("could not store the new token: {e}")))?;
+            broker.publish_agent_surface_change();
             broker.events.connections_changed();
             (connection.id, connection.name)
         }

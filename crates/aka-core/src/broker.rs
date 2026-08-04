@@ -174,6 +174,11 @@ pub struct Broker {
     /// Advertised in the discovery manifest so `multitool mcp` and other bridges
     /// can find the MCP endpoint without a config file.
     mcp_host_port: Mutex<Option<u16>>,
+    /// Monotonic signal for changes to the tools, resources, and prompts an
+    /// already-connected agent can discover. The MCP host subscribes to this
+    /// independently of UI/manage events so catalog refreshes do not depend
+    /// on which management surface performed the mutation.
+    agent_surface_changes: tokio::sync::watch::Sender<u64>,
     /// The PG proxy's ephemeral loopback port, set when the daemon starts;
     /// surfaced only in open responses' DSNs.
     pub(crate) pg_proxy_port: std::sync::OnceLock<u16>,
@@ -358,6 +363,7 @@ impl Broker {
         ));
         let endpoint_uploads =
             Arc::new(tokio::sync::Semaphore::new(config.endpoint_global_uploads));
+        let (agent_surface_changes, _) = tokio::sync::watch::channel(0_u64);
         let broker = Arc::new(Self {
             vault,
             data_plane,
@@ -373,6 +379,7 @@ impl Broker {
             data_plane_bind: std::sync::OnceLock::new(),
             advertise_host: std::sync::OnceLock::new(),
             mcp_host_port: Mutex::new(None),
+            agent_surface_changes,
             pg_proxy_port: std::sync::OnceLock::new(),
             pg_cancels: Arc::new(crate::capability::pg::CancelRegistry::default()),
             token_limiter: KeyedLimiter::new(
@@ -619,6 +626,15 @@ impl Broker {
 
     /* ----------------------- secrets (UI commands) ------------------------ */
 
+    pub(crate) fn subscribe_agent_surface_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.agent_surface_changes.subscribe()
+    }
+
+    pub(crate) fn publish_agent_surface_change(&self) {
+        self.agent_surface_changes
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
     pub fn ui_add_secret(&self, name: &str, value: SecretValue) -> Result<SecretMeta> {
         let meta = self.store.add_secret(name, value)?;
         self.audit.append(AuditEntry::new(
@@ -697,6 +713,9 @@ impl Broker {
             }
             self.audit.append(entry);
             self.events.secrets_changed();
+            if value_replaced {
+                self.publish_agent_surface_change();
+            }
         }
         Ok(meta)
     }
@@ -887,6 +906,7 @@ impl Broker {
         .field("kind", conn.kind().as_str())
         .field("target", conn.target());
         self.audit.append(entry);
+        self.publish_agent_surface_change();
         Ok(conn)
     }
 
@@ -948,6 +968,7 @@ impl Broker {
         .field("kind", conn.kind().as_str())
         .field("target", conn.target());
         self.audit.append(entry);
+        self.publish_agent_surface_change();
         Ok(conn)
     }
 
@@ -1098,6 +1119,7 @@ impl Broker {
                 .field("renamed_to", conn.name.clone());
         }
         self.audit.append(entry);
+        self.publish_agent_surface_change();
         Ok(conn)
     }
 
@@ -1135,6 +1157,7 @@ impl Broker {
             .connection(conn.name.clone())
             .field("closed_sessions", closed_sessions),
         );
+        self.publish_agent_surface_change();
         Ok(conn)
     }
 
@@ -1490,6 +1513,7 @@ impl Broker {
                     .field("oauth", true),
                 );
                 publish_oauth_change(self.events.as_ref());
+                self.publish_agent_surface_change();
             }
             ManageOAuthPlan::Reconnect {
                 connection_id,
@@ -1579,6 +1603,7 @@ impl Broker {
             .field("oauth", true),
         );
         publish_oauth_change(self.events.as_ref());
+        self.publish_agent_surface_change();
         Ok(conn)
     }
 
@@ -2536,6 +2561,7 @@ impl Broker {
                 .field("closed_sessions", closed_sessions),
             );
             self.events.wirings_changed();
+            self.publish_agent_surface_change();
         }
         if !enabled {
             // Nothing is authorized here any more, so an open window and a
@@ -2818,6 +2844,7 @@ impl Broker {
                 .connection(connection.name.clone()),
             );
             self.events.wirings_changed();
+            self.publish_agent_surface_change();
         }
         Ok(changed)
     }
