@@ -7,7 +7,10 @@
    Rules below reference tokens only — never a raw scheme-dependent color. */
 
 :root{
-  color-scheme: light dark;
+  /* Match data-theme (theme.js), not the OS alone. `light dark` lets native
+     controls (checkboxes, radios, scrollbars) keep the OS scheme even when
+     the app is forced light — dark checkbox wells on a light sheet. */
+  color-scheme: light;
 
   /* layout */
   --content-max: 47.5rem;  /* main-window column cap (head + listing share it) */
@@ -650,10 +653,15 @@
   .elicit-dlg-fields{ margin-top: 14px; text-align: left; }
   .elicit-field{ display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px;
     font-size: 0.78125rem; font-weight: 600; color: var(--muted); }
-  .elicit-field input{ width: 100%; min-height: 32px; padding: 6px 9px; font-size: 0.875rem;
+  .elicit-field input:not([type="checkbox"]):not([type="radio"]){
+    width: 100%; min-height: 32px; padding: 6px 9px; font-size: 0.875rem;
     font-family: inherit; color: var(--ink); background: var(--field-bg);
-    border: 1px solid var(--line-field); border-radius: 7px; }
-  .elicit-field input:focus{ outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent); }
+    border: 1px solid var(--line-field); border-radius: 7px;
+  }
+  .elicit-field input:not([type="checkbox"]):not([type="radio"]):focus{
+    outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent);
+  }
+  .elicit-field input[type="checkbox"]{ accent-color: var(--accent); width: auto; }
   .elicit-dlg-actions{ margin-top: 16px; }
   .elicit-dlg-spacer{ flex: 1; }
   .elicit-refuse-btn{ color: var(--danger-ink); }
@@ -1015,10 +1023,22 @@
   .sheet h3{ font-size: 0.9375rem; margin-bottom: 12px; }
   .f-row{ margin-bottom: 10px; }
   .f-row label{ display: block; font-size: 0.78125rem; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
-  .f-row input{ width: 100%; min-height: 32px; padding: 6px 8px; border: 1px solid var(--line-field); border-radius: 7px; font-size: 0.875rem; font-family: inherit; background-color: var(--field-bg); color: var(--ink); }
-  .f-row input[readonly]{ background-color: var(--chip-bg); color: var(--muted-ink); cursor: default; }
-  .f-row input:focus{ outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent); }
-  .f-row input.err{ border-color: var(--danger); outline: none; }
+  /* Text fields only — checkboxes/radios keep native chrome (driven by
+     color-scheme above) so they are not stretched into full-width wells. */
+  .f-row input:not([type="checkbox"]):not([type="radio"]){
+    width: 100%; min-height: 32px; padding: 6px 8px; border: 1px solid var(--line-field);
+    border-radius: 7px; font-size: 0.875rem; font-family: inherit;
+    background-color: var(--field-bg); color: var(--ink);
+  }
+  .f-row input:not([type="checkbox"]):not([type="radio"])[readonly]{
+    background-color: var(--chip-bg); color: var(--muted-ink); cursor: default;
+  }
+  .f-row input:not([type="checkbox"]):not([type="radio"]):focus{
+    outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent);
+  }
+  .f-row input:not([type="checkbox"]):not([type="radio"]).err{
+    border-color: var(--danger); outline: none;
+  }
   .field-error{ margin-top: 4px; color: var(--danger-ink); font-size: 0.78125rem; font-weight: 400; }
   .f-row input.name-conflict-warning, .f-row input.name-conflict-warning:focus{
   border-color: var(--amber-strong); outline: none;
@@ -1142,6 +1162,8 @@
      OS preference — so this one selector serves both and the
      prefers-color-scheme media query lives in JS, not here. -------------- */
 :root[data-theme="dark"] {
+    color-scheme: dark;
+
     --ink: #ececf0;
     --ink-2: #d8d8de;
     --ink-3: #c9c9d2;
@@ -1991,6 +2013,7 @@
 .onepassword-field.unsupported { opacity: .6; }
 .onepassword-field-check { display: flex; align-items: flex-start; gap: 9px; min-width: 0; cursor: pointer; }
 .onepassword-field.unsupported .onepassword-field-check { cursor: not-allowed; }
+/* Native checkbox; color-scheme on :root supplies light/dark well color. */
 .onepassword-field-check input { margin-top: 3px; accent-color: var(--accent); }
 .onepassword-field-check span { min-width: 0; }
 .onepassword-field-check b { display: block; font-size: 0.78125rem; overflow-wrap: anywhere; }
