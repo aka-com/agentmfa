@@ -6,6 +6,10 @@
 //!   copies still write core-side without the value passing through;
 //! - destructive actions that need an ordinary application confirmation are
 //!   confirmed in the webview before reaching this layer;
+//! - every command that hands credential material back (a revealed value, a
+//!   2FA code, a clipboard write of a key or endpoint) calls
+//!   [`crate::applock::require_unlocked`] first, so the app lock is enforced
+//!   at this boundary rather than by the overlay the webview draws;
 //!
 //! Every command reaches the broker through the [`ManagementBackend`]
 //! seam: in local mode that is the in-process broker, in remote mode an
@@ -735,6 +739,7 @@ pub async fn get_secret_totp(
     if window.label() != crate::windows::MAIN {
         return Err("live 2FA codes are only available in the main window".into());
     }
+    crate::applock::require_unlocked(&window.app_handle().clone())?;
     let id = parse_id(&id)?;
     state
         .brokers
@@ -753,6 +758,7 @@ pub async fn copy_secret_totp(
     state: State<'_, AppState>,
     id: String,
 ) -> CmdResult<u64> {
+    crate::applock::require_unlocked(&app)?;
     let id = parse_id(&id)?;
     let code = state
         .brokers
@@ -781,7 +787,12 @@ pub async fn delete_secret(state: State<'_, AppState>, id: String) -> CmdResult<
 /// confirmed the reveal, and it drops the value again as soon as the reveal
 /// ends (unreveal, tab change, window blur).
 #[tauri::command]
-pub async fn reveal_secret(state: State<'_, AppState>, id: String) -> CmdResult<String> {
+pub async fn reveal_secret(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<String> {
+    crate::applock::require_unlocked(&app)?;
     let id = parse_id(&id)?;
     state
         .brokers
@@ -797,6 +808,7 @@ pub async fn reveal_secret(state: State<'_, AppState>, id: String) -> CmdResult<
 /// The value never re-enters the webview.
 #[tauri::command]
 pub async fn copy_secret(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    crate::applock::require_unlocked(&app)?;
     let id = parse_id(&id)?;
     let value = state
         .brokers
@@ -1732,6 +1744,7 @@ pub async fn copy_endpoint_text(
     format: String,
     task_body: Option<String>,
 ) -> CmdResult<()> {
+    crate::applock::require_unlocked(&app)?;
     let connection_id = parse_id(&connection_id)?;
     let backend = state.brokers.backend();
     // The copy path takes the gate and writes the "Direct endpoint copied"
@@ -2061,6 +2074,7 @@ pub async fn rotate_key(state: State<'_, AppState>) -> CmdResult<()> {
 /// need it — agents read the token file themselves.
 #[tauri::command]
 pub async fn copy_key(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    crate::applock::require_unlocked(&app)?;
     let token = state
         .brokers
         .backend()
@@ -2289,6 +2303,14 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         open_notification_settings,
         get_autostart,
         set_autostart,
+        crate::applock::get_lock_state,
+        crate::applock::set_lock_settings,
+        crate::applock::lock_app,
+        crate::applock::unlock_app,
+        crate::applock::note_activity,
+        crate::applock::start_embedded_unlock,
+        crate::applock::retry_embedded_unlock,
+        crate::applock::stop_embedded_unlock,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,
         crate::windows::ui_hide_dropdown,

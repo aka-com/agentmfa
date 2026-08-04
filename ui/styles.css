@@ -2741,3 +2741,36 @@ label.totp-remove-check {
 @media (prefers-reduced-motion: reduce){
   .recheck-tools-btn.running svg{ animation: none; }
 }
+
+/* ---- app lock ----------------------------------------------------------- */
+/* The lock covers everything, including the sheets and the anchored menus
+   (z-index 16 is the highest of those), and in the tray it must take the
+   panel's rounded corners the same way the sheet scrims do. */
+.lock-takeover{
+  position: fixed; inset: 0; z-index: 40;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface);
+  -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px);
+}
+  .dropdown-surface ~ .lock-takeover{ border-radius: var(--dropdown-radius); }
+  .lock-card{
+    display: flex; flex-direction: column; align-items: center;
+    gap: 8px; padding: 24px; max-width: 320px; text-align: center;
+  }
+  .lock-icon{ width: 72px; height: 72px; line-height: 0; margin-bottom: 4px; }
+  .lock-icon svg{ width: 100%; height: 100%; }
+  .lock-title{ font-size: 1.0625rem; font-weight: 700; color: var(--ink); }
+  .lock-sub{ font-size: 0.8125rem; color: var(--muted); line-height: 1.45; }
+  /* The hole the native LAAuthenticationView is parented over. Sized, not
+     filled: the control is drawn by AppKit on top of this box, so anything
+     rendered inside would peek out around it. */
+  .lock-sensor-slot{ width: 64px; height: 64px; margin: 6px 0 2px; }
+  .lock-unlock{ margin-top: 6px; min-width: 148px; }
+  .lock-error{ font-size: 0.75rem; color: var(--danger-ink); }
+  /* The scope disclaimer is deliberately on the lock screen itself: this gate
+     covers the windows, not the broker, and the moment to say so is while
+     someone is looking at a screen that says "Locked". */
+  .lock-note{
+    margin-top: 10px; font-size: 0.6875rem; color: var(--muted-2);
+    line-height: 1.4; border-top: 1px solid var(--line-soft); padding-top: 10px;
+  }

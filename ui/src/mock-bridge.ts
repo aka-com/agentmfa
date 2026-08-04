@@ -22,6 +22,7 @@ import type {
   McpAuthDraft,
   McpAuthState,
   McpStatusReport,
+  LockState,
   NotificationSettings,
   OnePasswordField,
   OnePasswordIntegration,
@@ -950,6 +951,21 @@ let mockNotificationSettings: NotificationSettings = {
   canRequestPermission: false,
 };
 let mockAutostart = false;
+// Outside Tauri there is no LocalAuthentication, so the mock stands in for
+// it: `unlock_app` always succeeds after a beat, which is enough to develop
+// the overlay against. It reports `available` so the settings row and the
+// lock takeover are both reachable in a plain browser.
+let mockLock: LockState = {
+  locked: false,
+  enabled: false,
+  autoLockSecs: 300,
+  lockOnHide: false,
+  available: true,
+  mechanism: 'biometry',
+  // The browser has no LAAuthenticationView to host, but the slot is part of
+  // the layout, so the mock reports it and leaves the space empty.
+  embedded: true,
+};
 
 function mockConnectRemote(url: string, token: string | null): unknown {
   const trimmed = url.trim().replace(/\/+$/, '');
@@ -1139,6 +1155,27 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         canRequestPermission: false,
       };
       return { ...mockNotificationSettings };
+    case 'get_lock_state': return { ...mockLock };
+    case 'set_lock_settings':
+      mockLock = { ...mockLock, ...args.settings };
+      if (!mockLock.enabled) mockLock.locked = false;
+      emit('aka://lock-changed', { ...mockLock });
+      return { ...mockLock };
+    case 'lock_app':
+      if (mockLock.enabled) mockLock = { ...mockLock, locked: true };
+      emit('aka://lock-changed', { ...mockLock });
+      return { ...mockLock };
+    case 'unlock_app':
+      // Stands in for the system sheet's latency so the "Waiting for
+      // authentication…" state is reachable in a plain browser.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      mockLock = { ...mockLock, locked: false };
+      emit('aka://lock-changed', { ...mockLock });
+      return { ...mockLock };
+    case 'note_activity': return;
+    case 'start_embedded_unlock': return;
+    case 'retry_embedded_unlock': return;
+    case 'stop_embedded_unlock': return;
     case 'get_autostart': return mockAutostart;
     case 'set_autostart':
       mockAutostart = Boolean(args.on);

@@ -901,3 +901,77 @@ test('key rotation requires an ordinary destructive confirmation', async () => {
     testingLibrary.getByRole(confirmation, 'button', { name: 'Cancel' }),
   );
 });
+
+test('the app lock takes over both windows and is armed from Settings', async () => {
+  // Self-contained: whatever the previous test left open is dismissed before
+  // this one opens Settings for itself.
+  const openSheet = testingLibrary.queryByRole(document.body, 'button', { name: 'Done' });
+  if (openSheet) testingLibrary.fireEvent.click(openSheet);
+  await testingLibrary.waitFor(() => {
+    assert.equal(document.querySelector('.sheet-backdrop'), null);
+  });
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }),
+  );
+  testingLibrary.fireEvent.click(
+    document.querySelector<HTMLButtonElement>('button[data-act="open-settings"]')!,
+  );
+  const dialog = await testingLibrary.findByRole(document.body, 'dialog', { name: 'Settings' });
+  const toggle = testingLibrary.getByRole(dialog, 'checkbox', { name: 'Lock this window' });
+  assert.equal(toggle.getAttribute('aria-checked'), 'false');
+  // The idle and put-away rows only exist once the lock is armed — an
+  // unarmed lock has no schedule to configure.
+  assert.equal(testingLibrary.queryByRole(dialog, 'radiogroup', { name: 'Lock when idle' }), null);
+
+  testingLibrary.fireEvent.click(toggle);
+  const idle = await testingLibrary.findByRole(dialog, 'radiogroup', { name: 'Lock when idle' });
+  assert.deepEqual(
+    [...idle.querySelectorAll<HTMLButtonElement>('.seg-btn')].map((b) => b.textContent),
+    ['Never', '1 min', '5 min', '15 min', '1 hr'],
+  );
+  assert.equal(
+    idle.querySelector('[data-id="300"]')?.getAttribute('aria-checked'),
+    'true',
+    'five minutes is the default delay',
+  );
+  assert.ok(testingLibrary.getByRole(dialog, 'checkbox', { name: 'Lock when put away' }));
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(dialog, 'button', { name: 'Done' }),
+  );
+
+  const mock = await import('../src/mock-bridge');
+  await mock.invoke('lock_app');
+  const lock = await testingLibrary.findByLabelText(document.body, 'Multitool is locked');
+  assert.equal(lock.getAttribute('role'), 'dialog');
+  assert.equal(lock.getAttribute('aria-modal'), 'true');
+  // The inline Touch ID control is a native view parented over this slot, so
+  // the webview must leave the hole and report where it is.
+  const slot = lock.querySelector('.lock-sensor-slot');
+  assert.ok(slot, 'the lock card leaves a slot for the native control');
+  assert.equal(slot.textContent, '', 'nothing renders inside the slot');
+  // Touch ID being armed already makes the button the password fallback.
+  assert.ok(testingLibrary.getByRole(lock, 'button', { name: 'Enter password…' }));
+  // The scope disclaimer is part of the lock screen, not a settings footnote:
+  // this gate covers the windows, not the broker behind them.
+  assert.match(lock.textContent ?? '', /Agents keep working while the app is locked/);
+  // Locking closes whatever sheet was open rather than leaving it under the
+  // takeover, and takes the settings menu with it.
+  assert.equal(document.querySelector('.settings-menu'), null);
+
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(lock, 'button', { name: 'Enter password…' }),
+  );
+  // Polled directly rather than through waitFor: the unlock resolves from a
+  // promise outside React's act(), which waitFor's act wrapper waits on
+  // forever.
+  for (let tries = 0; tries < 50 && document.querySelector('.lock-takeover'); tries += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(document.querySelector('.lock-takeover'), null, 'the takeover is dismissed');
+  assert.ok(document.querySelector('.surface'), 'the window is back');
+
+  // Leave the shared app instance as the other tests expect to find it.
+  await mock.invoke('set_lock_settings', {
+    settings: { enabled: false, autoLockSecs: 300, lockOnHide: false },
+  });
+});

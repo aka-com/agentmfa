@@ -14,6 +14,7 @@ import type {
   McpAuthState,
   McpStatusReport,
   McpToolInfo,
+  LockState,
   NotificationSettings,
   OnePasswordField,
   OnePasswordIntegration,
@@ -256,6 +257,12 @@ export interface AppState {
   agentSetupInstructions: string;
   settings: Settings;
   notificationSettings: NotificationSettings;
+  /** The app lock: state and settings, mirrored from the Rust side. */
+  lock: LockState;
+  /** True while the system authentication sheet is up. */
+  unlocking: boolean;
+  /** A failed unlock's message, shown under the prompt until the next try. */
+  unlockError: string;
   launchAtLogin: boolean;
   loadStatus: Record<LoadKey, LoadStatus>;
   /** Secret id → the value currently on screen. Held only for as long as the
@@ -349,6 +356,16 @@ export const DEFAULT_SETTINGS: Settings = {
   confirm_ssh_host_keys: false,
 };
 
+export const DEFAULT_LOCK_STATE: LockState = {
+  locked: false,
+  enabled: false,
+  autoLockSecs: 300,
+  lockOnHide: false,
+  available: false,
+  mechanism: 'none',
+  embedded: false,
+};
+
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   mode: 'when_hidden',
   showContext: false,
@@ -400,6 +417,9 @@ function createInitialState(): AppState {
     agentSetupInstructions: '',
     settings: { ...DEFAULT_SETTINGS },
     notificationSettings: { ...DEFAULT_NOTIFICATION_SETTINGS },
+    lock: { ...DEFAULT_LOCK_STATE },
+    unlocking: false,
+    unlockError: '',
     launchAtLogin: false,
     loadStatus: defaultLoadStatus(),
     reveal: {},

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use aka_client::{credentials::TokenStore, RemoteBackend, RemoteConfig};
 use aka_core::manage::ManagementBackend;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter as _};
+use tauri::{AppHandle, Emitter as _, Manager as _};
 
 use crate::commands::LocalRuntime;
 
@@ -72,7 +72,7 @@ fn advertised_capabilities(whoami: &serde_json::Value) -> Vec<String> {
 /// The persisted mode choice (`shell.json` in the app data dir). The token
 /// itself lives in the token store, never here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct ShellConfig {
+pub(crate) struct ShellConfig {
     #[serde(default)]
     mode: Option<String>,
     #[serde(default)]
@@ -81,6 +81,10 @@ struct ShellConfig {
     /// not of whichever local or hosted broker it currently manages.
     #[serde(default)]
     notifications: NotificationSettings,
+    /// Likewise the window lock: it gates this app's surfaces, not the
+    /// broker behind them.
+    #[serde(default)]
+    lock: crate::applock::LockSettings,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +235,27 @@ pub fn saved_notification_settings(data_dir: &Path) -> NotificationSettings {
         .with_safe_persisted_escalation()
 }
 
+/// Lock settings are read at startup, before the windows exist, so the
+/// watchdog is armed from the first tick.
+pub fn saved_lock_settings(data_dir: &Path) -> crate::applock::LockSettings {
+    load_config(data_dir).lock.with_safe_persisted_delay()
+}
+
+/// Persist a lock-settings change through the same serialized shell-config
+/// path everything else uses, so it cannot stomp a concurrent broker or
+/// notification write.
+pub fn save_lock_settings(
+    app: &AppHandle,
+    settings: crate::applock::LockSettings,
+) -> Result<(), String> {
+    let state = app
+        .try_state::<crate::commands::AppState>()
+        .ok_or_else(|| "app state is not ready".to_string())?;
+    state
+        .brokers
+        .update_shell_config(|config| config.lock = settings)
+}
+
 impl BrokerState {
     /// Construct for local mode with an already-started local runtime.
     pub fn new_local(data_dir: PathBuf, runtime: LocalRuntime) -> Self {
@@ -335,7 +360,10 @@ impl BrokerState {
         Ok(settings)
     }
 
-    fn update_shell_config(&self, update: impl FnOnce(&mut ShellConfig)) -> Result<(), String> {
+    pub(crate) fn update_shell_config(
+        &self,
+        update: impl FnOnce(&mut ShellConfig),
+    ) -> Result<(), String> {
         let _write = self.shell_write.lock().unwrap();
         let mut config = load_config(&self.data_dir);
         update(&mut config);

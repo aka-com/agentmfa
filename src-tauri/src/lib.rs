@@ -6,6 +6,7 @@
 //! plane over the Unix socket + PG data plane), installs the tray
 //! and windows, and exposes the management command surface.
 
+mod applock;
 mod attention;
 mod broker_mode;
 mod clipboard;
@@ -289,6 +290,17 @@ pub fn run() {
             // saved remote can reconnect and replay a waiting request while
             // the rest of setup is still installing the windows and tray.
             let notification_settings = broker_mode::saved_notification_settings(&data_dir);
+            // The window lock is armed before the windows exist: the saved
+            // idle delay counts from launch, not from the first time the
+            // user opens Settings.
+            let lock = Arc::new(applock::AppLock::new(broker_mode::saved_lock_settings(
+                &data_dir,
+            )));
+            app.manage(lock.clone());
+            applock::start_watchdog(handle.clone(), lock.clone());
+            // Sleep, screen lock and fast user switching mean "gone" long
+            // before the idle delay would say so.
+            applock::away::observe(handle.clone(), lock);
             app.manage(attention::RequestAttention::new(notification_settings));
             attention::initialize_notification_delivery(&handle);
 

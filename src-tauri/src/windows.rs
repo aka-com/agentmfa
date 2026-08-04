@@ -31,6 +31,7 @@ pub const EVT_OPEN_SETTINGS: &str = "aka://open-settings";
 pub const EVT_OPEN_REQUESTS: &str = "aka://open-requests";
 const APP_WINDOW_MENU_ID: &str = "app-window";
 const NEW_WINDOW_MENU_ID: &str = "new-window";
+const LOCK_MENU_ID: &str = "lock-now";
 const TRAY_OPEN_ID: &str = "tray-open";
 const TRAY_REQUESTS_ID: &str = "tray-requests";
 const TRAY_SETTINGS_ID: &str = "tray-settings";
@@ -207,6 +208,19 @@ pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
         }
     }
 
+    // ⌘L is the platform-conventional lock; the item stays enabled even when
+    // the lock is off so the settings row is discoverable from the menu bar
+    // (choosing it while disabled is a no-op the settings sheet explains).
+    let lock_now = MenuItem::with_id(app, LOCK_MENU_ID, "Lock Now", true, Some("CmdOrCtrl+L"))?;
+    for item in menu.items()? {
+        if let MenuItemKind::Submenu(submenu) = item {
+            if submenu.text()? == "File" {
+                submenu.append_items(&[&PredefinedMenuItem::separator(app)?, &lock_now])?;
+                break;
+            }
+        }
+    }
+
     let app_window = MenuItem::with_id(app, APP_WINDOW_MENU_ID, "Multitool", true, None::<&str>)?;
     if let Some(MenuItemKind::Submenu(window_menu)) = menu.get(WINDOW_SUBMENU_ID) {
         let separator = PredefinedMenuItem::separator(app)?;
@@ -216,6 +230,11 @@ pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
     app.on_menu_event(|app, event| match event.id().as_ref() {
         NEW_WINDOW_MENU_ID => open_main(app),
         APP_WINDOW_MENU_ID => focus_existing_or_reopen(app),
+        LOCK_MENU_ID => {
+            if let Some(lock) = app.try_state::<std::sync::Arc<crate::applock::AppLock>>() {
+                lock.lock(app);
+            }
+        }
         _ => {}
     });
     Ok(())
@@ -616,6 +635,7 @@ pub fn hide_dropdown(app: &AppHandle) -> bool {
             hide_dropdown_window(app, &window);
         }
     }
+    crate::applock::lock_if_hidden(app);
     true
 }
 
@@ -782,6 +802,7 @@ pub fn ui_set_mode(app: AppHandle, mode: String) -> Result<(), String> {
 #[tauri::command]
 pub fn ui_hide_main(app: AppHandle) {
     retreat_to_menu_bar(&app);
+    crate::applock::lock_if_hidden(&app);
 }
 
 #[cfg(test)]

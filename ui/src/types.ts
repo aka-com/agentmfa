@@ -445,6 +445,35 @@ export interface NotificationSettings {
   canRequestPermission: boolean;
 }
 
+/**
+ * The Touch ID / device-password gate over this app's windows.
+ *
+ * It gates this desktop UI only: the broker keeps serving agents while the
+ * window is locked, by design, so an agent run does not die because a laptop
+ * was left alone. Nothing about how secrets are stored changes.
+ */
+export interface LockState {
+  locked: boolean;
+  enabled: boolean;
+  /** Idle seconds before the window locks itself; zero is off. */
+  autoLockSecs: 0 | 60 | 300 | 900 | 3600;
+  /** Also lock whenever both windows are hidden. */
+  lockOnHide: boolean;
+  /** False when the platform cannot authenticate; the toggle is disabled. */
+  available: boolean;
+  unavailableReason?: string;
+  /** Which prompt the unlock will actually raise. */
+  mechanism: 'biometry' | 'password' | 'none';
+  /**
+   * Whether the lock card hosts the inline Touch ID control
+   * (LAAuthenticationView, drawn natively over the webview). False on a Mac
+   * with no enrolled biometry, where the password sheet is the only path.
+   */
+  embedded: boolean;
+  /** The last inline attempt's failure. Cancels are not failures. */
+  embeddedError?: string;
+}
+
 export interface HostKeyCandidate {
   fingerprint: string;
   algorithm: string;
@@ -695,6 +724,19 @@ export interface CommandMap {
   }, NotificationSettings>;
   request_notification_permission: CommandSpec<undefined, NotificationSettings>;
   open_notification_settings: CommandSpec<undefined, void>;
+  get_lock_state: CommandSpec<undefined, LockState>;
+  set_lock_settings: CommandSpec<{
+    settings: { enabled: boolean; autoLockSecs: number; lockOnHide: boolean };
+  }, LockState>;
+  lock_app: CommandSpec<undefined, LockState>;
+  unlock_app: CommandSpec<undefined, LockState>;
+  note_activity: CommandSpec<undefined, void>;
+  /** Host the native Touch ID control over the slot the lock card measured. */
+  start_embedded_unlock: CommandSpec<{
+    slot: { x: number; y: number; width: number; height: number };
+  }, void>;
+  retry_embedded_unlock: CommandSpec<undefined, void>;
+  stop_embedded_unlock: CommandSpec<undefined, void>;
   get_autostart: CommandSpec<undefined, boolean>;
   set_autostart: CommandSpec<{ on: boolean }, boolean>;
   get_agent_setup: CommandSpec<undefined, string>;
@@ -814,6 +856,7 @@ export interface EventMap {
   'aka://open-settings': Record<string, never>;
   'aka://open-requests': Record<string, never>;
   'aka://notification-settings-changed': NotificationSettings;
+  'aka://lock-changed': LockState;
   'aka://dropdown-hidden': Record<string, never>;
   'aka://dropdown-shown': Record<string, never>;
 }

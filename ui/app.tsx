@@ -98,6 +98,7 @@ import type {
   ConnectionType,
   ElicitationRequest,
   McpAuthDraft,
+  LockState,
   McpAuthState,
   NotificationSettings,
   RequestRecord,
@@ -605,6 +606,23 @@ async function loadNotificationSettings(): Promise<void> {
     console.error('get_autostart', launchAtLogin.reason);
   }
 }
+/** The lock's saved settings and current state. A failure leaves the
+ * defaults, which is "no lock" — the gate is enforced in Rust regardless, so
+ * a webview that fails this read cannot talk its way past it. */
+async function loadLockState(): Promise<void> {
+  try {
+    state.lock = await invoke('get_lock_state');
+  } catch (error) {
+    console.error('get_lock_state', error);
+  }
+}
+
+/** "5 min" / "1 hr" for the auto-lock toast. */
+function relLockDelay(secs: number): string {
+  if (secs >= 3600) return `${secs / 3600} hr`;
+  return `${secs / 60} min`;
+}
+
 async function loadLocalUsername(): Promise<void> {
   try { state.localUsername = await invoke('get_local_username'); }
   catch (e) { console.error('get_local_username', e); }
@@ -4329,6 +4347,136 @@ function ConnectionActionMenu(): ReactNode {
   );
 }
 
+/* ---------------------------------- lock --------------------------------- */
+// The lock takeover. Rendered above every other surface in both windows, so
+// whatever was on screen when the lock engaged is covered rather than
+// unmounted — after unlocking the user is back where they were.
+//
+// This is a UI gate, not storage protection: the Rust side refuses the
+// credential-bearing commands while locked (see applock.rs), and the broker
+// keeps serving agents throughout. The copy says so rather than implying
+// everything stopped.
+function LockOverlay(): ReactNode {
+  const lock = state.lock;
+  const inputRef = useRef<HTMLButtonElement | null>(null);
+  const slotRef = useRef<HTMLDivElement | null>(null);
+  const locked = lock.locked;
+  const embedded = lock.embedded;
+  useEffect(() => {
+    if (!locked) return;
+    // Take focus off whatever was behind the overlay so a stray keystroke
+    // cannot reach a form under it, and give Return an obvious target.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    inputRef.current?.focus();
+  }, [locked]);
+  // The inline Touch ID control is a native NSView the Rust side parents to
+  // this window, not an element in this document — all the webview owns is
+  // the hole it sits in. So the slot's position has to be reported up, and
+  // re-reported whenever the layout moves it.
+  useEffect(() => {
+    if (!locked || !embedded) return undefined;
+    const report = (): void => {
+      const rect = slotRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      void invoke('start_embedded_unlock', {
+        slot: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      }).catch((error) => console.error('start_embedded_unlock', error));
+    };
+    report();
+    window.addEventListener('resize', report);
+    return () => {
+      window.removeEventListener('resize', report);
+      // A native view outlives this component's DOM; leaving it parented
+      // would float a live Touch ID control over the unlocked app.
+      void invoke('stop_embedded_unlock').catch(() => { /* window may be gone */ });
+    };
+    // `embeddedError` is a dependency because the card is centred: adding the
+    // error line grows it and shifts the slot out from under the control.
+  }, [locked, embedded, lock.embeddedError]);
+  if (!locked) return null;
+  const prompt = lock.mechanism === 'biometry'
+    ? `Touch ID or enter the password for the user “${state.localUsername || 'this account'}” to unlock.`
+    : `Enter the password for the user “${state.localUsername || 'this account'}” to unlock.`;
+  return (
+    <div className="lock-takeover" role="dialog" aria-modal="true"
+      aria-label="Multitool is locked">
+      <div className="lock-card">
+        <div className="lock-icon"><Icon markup={ICONS.appIcon} /></div>
+        <h2 className="lock-title">Multitool Is Locked</h2>
+        <p className="lock-sub">{prompt}</p>
+        {embedded
+          // Deliberately empty: the native control is drawn over this box, and
+          // anything rendered inside it would show through around the edges if
+          // the two ever disagreed about size.
+          ? <div ref={slotRef} className="lock-sensor-slot" aria-hidden="true" />
+          : null}
+        {lock.embeddedError
+          ? <p className="lock-error" role="alert">
+              {lock.embeddedError}{' '}
+              <button className="cd-live-link" data-act="retry-embedded-unlock">Try again</button>
+            </p>
+          : null}
+        <button ref={inputRef} className={`btn lock-unlock ${embedded ? '' : 'primary'}`}
+          data-act="unlock-app" disabled={state.unlocking}>
+          {state.unlocking ? 'Waiting for authentication…'
+            : embedded ? 'Enter password…' : 'Unlock'}
+        </button>
+        {state.unlockError
+          ? <p className="lock-error" role="alert">{state.unlockError}</p>
+          : null}
+        <p className="lock-note">Agents keep working while the app is locked.</p>
+      </div>
+    </div>
+  );
+}
+
+// Heartbeat for the idle timer. Throttled hard: the Rust side only compares
+// it against delays measured in minutes, so one call per interaction burst
+// is plenty and an unthrottled listener would be a per-keystroke IPC.
+let lastActivityPing = 0;
+
+function noteActivity(): void {
+  if (!state.lock.enabled || !state.lock.autoLockSecs || state.lock.locked) return;
+  const now = Date.now();
+  if (now - lastActivityPing < 15000) return;
+  lastActivityPing = now;
+  void invoke('note_activity').catch(() => { /* the watchdog is best-effort */ });
+}
+
+async function unlockApp(): Promise<void> {
+  if (state.unlocking) return;
+  state.unlocking = true;
+  state.unlockError = '';
+  render();
+  try {
+    state.lock = await invoke('unlock_app');
+    // A cancelled or failed sheet returns normally, still locked. Say so
+    // once instead of leaving the button looking inert.
+    if (state.lock.locked) state.unlockError = 'Authentication was cancelled.';
+  } catch (error) {
+    state.unlockError = errorMessage(error);
+  } finally {
+    state.unlocking = false;
+    render();
+  }
+}
+
+// Locking must also drop whatever the webview is holding: a revealed value
+// sitting behind the overlay is exactly what the lock is supposed to stop
+// someone from reading over a shoulder.
+function receiveLockState(next: LockState): void {
+  const wasLocked = state.lock.locked;
+  state.lock = next;
+  if (next.locked && !wasLocked) {
+    state.reveal = {};
+    state.unlockError = '';
+    closeSheet();
+    state.menuOpen = false;
+  }
+  if (!next.locked) state.unlockError = '';
+  if (booted) render();
+}
+
 function AppRoot(): ReactNode {
   // Subscribes this root to store publications; the revision itself is not
   // used as a key — the windows reconcile in place rather than remounting.
@@ -4363,6 +4511,7 @@ function AppRoot(): ReactNode {
       <ConnectionActionMenu />
       <ConnectionContextMenu />
       <SecretContextMenu />
+      <LockOverlay />
     </div>
   );
 }
@@ -6619,6 +6768,45 @@ function SettingsSheet(): ReactNode {
         {escalationBtn(0, 'Off')}{escalationBtn(15, '15 sec')}
         {escalationBtn(30, '30 sec')}{escalationBtn(60, '1 min')}
       </div></div>;
+  const lock = state.lock;
+  // The lock is this computer's, like the notification rows: it gates these
+  // windows, not the broker they are driving.
+  const lockRow = <div className="set-row"><div className="set-txt">
+      <div className="st-title">Lock this window</div>
+      <div className="st-sub">
+        Require Touch ID or your account password to use Multitool's windows.
+        Agents keep working while it is locked — this covers the app, not the
+        broker.
+      </div></div>
+      <button className={`switch ${lock.enabled ? 'on' : ''}`}
+        data-act="toggle-app-lock" role="checkbox"
+        aria-label="Lock this window"
+        disabled={!lock.available}
+        aria-checked={lock.enabled}></button></div>;
+  const lockWarning = lock.available ? null
+    : <div className="notification-warning" role="status">
+      <b>This computer can't authenticate you.</b>
+      <span>{lock.unavailableReason || 'Set an account password or enroll Touch ID.'}</span>
+    </div>;
+  const autoLockBtn = (secs: LockState['autoLockSecs'], label: string): ReactNode => (
+    <button className={`seg-btn ${lock.autoLockSecs === secs ? 'on' : ''}`}
+      data-act="set-auto-lock" data-id={secs} role="radio"
+      aria-checked={lock.autoLockSecs === secs}>{label}</button>
+  );
+  const autoLockRow = !lock.enabled ? null
+    : <div className="set-row"><div className="set-txt"><div className="st-title">Lock when idle</div>
+      <div className="st-sub">Lock after this long without interaction. ⌘L locks immediately.</div></div>
+      <div className="seg in-form" role="radiogroup" aria-label="Lock when idle">
+        {autoLockBtn(0, 'Never')}{autoLockBtn(60, '1 min')}{autoLockBtn(300, '5 min')}
+        {autoLockBtn(900, '15 min')}{autoLockBtn(3600, '1 hr')}
+      </div></div>;
+  const lockOnHideRow = !lock.enabled ? null
+    : <div className="set-row"><div className="set-txt"><div className="st-title">Lock when put away</div>
+      <div className="st-sub">Lock as soon as both the window and the menu-bar dropdown are closed.</div></div>
+      <button className={`switch ${lock.lockOnHide ? 'on' : ''}`}
+        data-act="toggle-lock-on-hide" role="checkbox"
+        aria-label="Lock when put away"
+        aria-checked={lock.lockOnHide}></button></div>;
   const autostartRow = <div className="set-row"><div className="set-txt">
       <div className="st-title">Launch Multitool at login</div>
       <div className="st-sub">Start the broker and tray automatically so agents do not arrive before their approval surface.</div></div>
@@ -6685,6 +6873,7 @@ function SettingsSheet(): ReactNode {
       <h3 id="settings-title">Settings</h3>
       {notificationRow}{notificationWarning}{notificationPreviewRow}
       {notificationSoundRow}{notificationFocusRow}{notificationEscalationRow}
+      {lockRow}{lockWarning}{autoLockRow}{lockOnHideRow}
       {autostartRow}{sampleToolsRow}
       {brokerKeyRow}
       {settingsFailed ? settingsFailureRow : <>{hostKeyRow}{dockRow}</>}
@@ -9333,6 +9522,69 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       render();
       break;
     }
+    case 'unlock-app': await unlockApp(); break;
+    case 'retry-embedded-unlock':
+      state.lock = { ...state.lock, embeddedError: undefined };
+      render();
+      await invoke('retry_embedded_unlock');
+      break;
+    case 'lock-now': {
+      state.lock = await invoke('lock_app');
+      render();
+      break;
+    }
+    case 'toggle-app-lock': {
+      const enabled = !state.lock.enabled;
+      try {
+        state.lock = await invoke('set_lock_settings', {
+          settings: {
+            enabled,
+            autoLockSecs: state.lock.autoLockSecs,
+            lockOnHide: state.lock.lockOnHide,
+          },
+        });
+        toast(enabled ? '🔒 Multitool will lock' : 'Multitool will not lock');
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+      }
+      render();
+      break;
+    }
+    case 'set-auto-lock': {
+      const autoLockSecs = Number(id);
+      try {
+        state.lock = await invoke('set_lock_settings', {
+          settings: {
+            enabled: state.lock.enabled,
+            autoLockSecs,
+            lockOnHide: state.lock.lockOnHide,
+          },
+        });
+        toast(autoLockSecs === 0
+          ? 'Multitool will not lock on its own'
+          : `🔒 Multitool locks after ${relLockDelay(autoLockSecs)} idle`);
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+      }
+      render();
+      break;
+    }
+    case 'toggle-lock-on-hide': {
+      const lockOnHide = !state.lock.lockOnHide;
+      try {
+        state.lock = await invoke('set_lock_settings', {
+          settings: {
+            enabled: state.lock.enabled,
+            autoLockSecs: state.lock.autoLockSecs,
+            lockOnHide,
+          },
+        });
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+      }
+      render();
+      break;
+    }
     case 'toggle-autostart': {
       try {
         state.launchAtLogin = await invoke('set_autostart', {
@@ -9634,6 +9886,27 @@ function handleStartMenuKeyDown(e: KeyboardEvent): boolean {
 }
 
 function handleAppKeyDown(e: KeyboardEvent): void {
+  noteActivity();
+  // Locked: the overlay owns the keyboard. Return re-raises the system
+  // prompt; nothing else reaches the surfaces underneath.
+  if (state.lock.locked) {
+    // Touch ID is already armed when the control is hosted; Return is the
+    // deliberate reach for the password sheet.
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      void unlockApp();
+    }
+    return;
+  }
+  // ⌘L mirrors the File ▸ Lock Now menu item. The native accelerator only
+  // fires while a native menu is attached, and the dropdown panel has none.
+  if (e.key.toLowerCase() === 'l' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+    if (state.lock.enabled) {
+      e.preventDefault();
+      void invoke('lock_app').then(receiveLockState);
+      return;
+    }
+  }
   // A focused row moves with Alt+Up/Down — the keyboard-accessible
   // equivalent of dragging it.
   if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')
@@ -9784,6 +10057,9 @@ const ERR_KEY_BY_INPUT = {
 // draft updates, error clearing, and the draft-test-override disarm.
 
 function handleDocumentScroll(): void {
+  // Reading a long list by trackpad is interaction: without this, scrolling
+  // through the activity log for six minutes gets you locked mid-read.
+  noteActivity();
   positionOpenMenus();
 }
 
@@ -9801,12 +10077,14 @@ function useExternalAppEvents(): void {
     window.addEventListener('focus', handleWindowFocus);
     window.addEventListener('resize', handleWindowResize);
     document.addEventListener('keydown', handleAppKeyDown);
+    document.addEventListener('pointerdown', noteActivity, true);
     document.addEventListener('scroll', handleDocumentScroll, true);
     return () => {
       window.removeEventListener('blur', handleWindowBlur);
       window.removeEventListener('focus', handleWindowFocus);
       window.removeEventListener('resize', handleWindowResize);
       document.removeEventListener('keydown', handleAppKeyDown);
+      document.removeEventListener('pointerdown', noteActivity, true);
       document.removeEventListener('scroll', handleDocumentScroll, true);
     };
   }, []);
@@ -9844,6 +10122,9 @@ async function boot() {
   await listen('aka://settings-changed', () => {
     void refresh('settings');
   });
+  // Both windows observe the same lock, and either can engage it. Subscribe
+  // before the first read so a lock taken during boot is not missed.
+  await listen('aka://lock-changed', (event) => receiveLockState(event.payload));
   // Which broker this app manages decides everything else about boot.
   try {
     setBrokerProfile(await invoke('get_broker_profile'));
@@ -9860,6 +10141,7 @@ async function boot() {
   await Promise.all([
     loadLocalUsername(),
     loadNotificationSettings(),
+    loadLockState(),
     load('connections', 'list_connections'),
     loadIdentity(),
   ]);
