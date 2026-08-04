@@ -131,23 +131,6 @@ if [[ "$(uname)" == "Darwin" ]]; then
     /usr/libexec/PlistBuddy \
       -c "Add :com.apple.application-identifier string ${team_id}.${bundle_id}" \
       "$entitlements" >/dev/null
-    # Tauri's macOS `files` map copies into Contents/, which is where macOS
-    # looks for the embedded profile. Merged over the checked-in bundle
-    # config rather than passed as a second --config, so there is exactly one
-    # config file either way.
-    bundle_config="src-tauri/tauri.build.conf.json"
-    node -e '
-      const fs = require("fs");
-      const [base, profile, out] = process.argv.slice(1);
-      const config = JSON.parse(fs.readFileSync(base, "utf8"));
-      config.bundle ??= {};
-      config.bundle.macOS ??= {};
-      config.bundle.macOS.files = {
-        ...(config.bundle.macOS.files ?? {}),
-        "embedded.provisionprofile": profile,
-      };
-      fs.writeFileSync(out, JSON.stringify(config, null, 2) + "\n");
-    ' "$repo_root/src-tauri/tauri.bundle.conf.json" "$profile" "$repo_root/$bundle_config"
     echo "Embedding provisioning profile: $profile"
   fi
 
@@ -167,7 +150,44 @@ if [[ "$(uname)" == "Darwin" ]]; then
     "$sidecar_dir/multitool-onepassword-aarch64-apple-darwin" \
     "$sidecar_dir/multitool-onepassword-x86_64-apple-darwin" \
     -output "$sidecar_dir/multitool-onepassword-universal-apple-darwin"
-  chmod 0755 "$sidecar_dir/multitool-onepassword-universal-apple-darwin"
+  sidecar="$sidecar_dir/multitool-onepassword-universal-apple-darwin"
+  chmod 0755 "$sidecar"
+
+  # Tauri has one entitlements setting for the app and every external binary,
+  # but the 1Password SDK's wazero compiler needs an executable-memory
+  # exception that the desktop process should not inherit. Sign the helper
+  # separately, then copy it as a custom Contents/MacOS file; Tauri seals the
+  # existing nested signature when it signs the outer app without replacing
+  # the helper's dedicated entitlements.
+  sidecar_entitlements="$repo_root/src-tauri/onepassword-sidecar.entitlements.plist"
+  echo "Signing 1Password helper with dedicated entitlements"
+  codesign --force --timestamp --options runtime \
+    --entitlements "$sidecar_entitlements" \
+    --sign "$APPLE_SIGNING_IDENTITY" \
+    "$sidecar"
+  codesign --verify --all-architectures --strict "$sidecar"
+
+  # Tauri's macOS `files` map copies into Contents/. Use it for both the
+  # pre-signed helper and the optional provisioning profile. Merging over the
+  # checked-in bundle config rather than passing a second --config leaves one
+  # unambiguous config file for the bundler.
+  bundle_config="src-tauri/tauri.build.conf.json"
+  node -e '
+    const fs = require("fs");
+    const [base, profile, sidecar, out] = process.argv.slice(1);
+    const config = JSON.parse(fs.readFileSync(base, "utf8"));
+    config.bundle ??= {};
+    config.bundle.externalBin = [];
+    config.bundle.macOS ??= {};
+    config.bundle.macOS.files = {
+      ...(config.bundle.macOS.files ?? {}),
+      "MacOS/multitool-onepassword": sidecar,
+    };
+    if (profile) {
+      config.bundle.macOS.files["embedded.provisionprofile"] = profile;
+    }
+    fs.writeFileSync(out, JSON.stringify(config, null, 2) + "\n");
+  ' "$repo_root/src-tauri/tauri.bundle.conf.json" "$profile" "$sidecar" "$repo_root/$bundle_config"
   target_args=(--target universal-apple-darwin)
 fi
 

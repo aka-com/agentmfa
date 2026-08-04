@@ -185,9 +185,20 @@ scripts/build-onepassword-sidecar.sh \
 
 Set `MULTITOOL_ONEPASSWORD_SIDECAR` to that absolute path when the helper is
 not beside the broker executable. `scripts/build.sh` builds both macOS
-architectures, combines them for the universal app, and lets Tauri copy and
-sign the helper as nested code. `scripts/npm-dist.sh` stages the matching
-helper in every platform package.
+architectures, combines and signs them for the universal app, and lets Tauri
+copy the pre-signed helper as nested code. `scripts/npm-dist.sh` stages the
+matching helper in every platform package.
+
+The SDK's service-account backend uses wazero's WebAssembly compiler, which
+turns anonymous writable memory into executable memory. A hardened macOS
+process is killed when it does that without
+`com.apple.security.cs.allow-unsigned-executable-memory`. `scripts/build.sh`
+therefore signs the universal helper with
+`src-tauri/onepassword-sidecar.entitlements.plist`, then includes the signed
+binary through Tauri's macOS `files` map. It deliberately does not use Tauri's
+`externalBin` path on macOS: Tauri applies the app's entitlements to every
+external binary, which would either grant the exception to the desktop process
+or omit it from the helper. Other platforms continue to use `externalBin`.
 
 The Go SDK requires CGO because the helper includes desktop-app
 authentication. Linux cross-builds therefore use the same GNU/Zig C compiler
