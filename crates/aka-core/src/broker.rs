@@ -12,6 +12,10 @@ use uuid::Uuid;
 
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::config::BrokerConfig;
+use crate::domain::{
+    AuthorityChange, ConnectionUpdate, CredentialEdit, DomainOutboxEvent, DomainOutboxEventKind,
+    DomainRepository, LocalDomainRepository, PolicyChange, PolicyUpdate,
+};
 use crate::error::CoreError;
 use crate::events::BrokerEvents;
 use crate::executions::Executions;
@@ -129,6 +133,9 @@ pub struct BrokerRepositories {
     pub policy: Arc<dyn PolicyRepository>,
     pub endpoints: Arc<dyn EndpointRepository>,
     pub identity: Arc<dyn IdentityRepository>,
+    /// Atomic user-visible mutations plus their transactional outbox. This
+    /// must operate on the same workspace-scoped state as the read models.
+    pub domain: Arc<dyn DomainRepository>,
 }
 
 impl BrokerRepositories {
@@ -138,6 +145,7 @@ impl BrokerRepositories {
         policy: Arc<dyn PolicyRepository>,
         endpoints: Arc<dyn EndpointRepository>,
         identity: Arc<dyn IdentityRepository>,
+        domain: Arc<dyn DomainRepository>,
     ) -> Self {
         Self {
             workspace,
@@ -145,6 +153,7 @@ impl BrokerRepositories {
             policy,
             endpoints,
             identity,
+            domain,
         }
     }
 }
@@ -165,13 +174,15 @@ pub struct Broker {
     /// Per-connection direct endpoints (stable DSN/URL issuance). Bounds and
     /// teardown ride alongside the access table.
     pub endpoints: Arc<dyn EndpointRepository>,
+    /// Cross-repository unit of work. Hosted implementations back this with a
+    /// database transaction; runtime effects are applied from its outbox.
+    pub domain: Arc<dyn DomainRepository>,
     /// Live endpoint listeners, keyed on endpoint id. Runtime only:
     /// re-established from `endpoints` at daemon start, stopped on teardown.
     endpoint_listeners: Mutex<HashMap<Uuid, crate::endpoints::EndpointListenerHandle>>,
-    /// Serializes configuration mutations that read-then-write shared state
-    /// (connection edits, access changes) so concurrent UI actions cannot
-    /// interleave.
-    pub(crate) config_gate: tokio::sync::Mutex<()>,
+    /// Serializes local configuration mutations that have not moved into the
+    /// domain unit of work (settings, endpoint posture, and key rotation).
+    pub(crate) config_gate: Arc<tokio::sync::Mutex<()>>,
     /// The shared local identity ("this computer's key").
     pub identity: Arc<dyn IdentityRepository>,
     pub executions: Executions,
@@ -262,12 +273,10 @@ pub struct Broker {
     _instance_lock: BrokerInstanceLock,
 }
 
-/// OAuth connect/reconnect mutates one stored secret and its owning
-/// connection as one user-visible action. Publish both resources together so
-/// every management surface refreshes the same atomic change.
-fn publish_oauth_change(events: &dyn BrokerEvents) {
-    events.secrets_changed();
-    events.connections_changed();
+#[derive(Default)]
+pub(crate) struct AppliedDomainEffects {
+    closed_sessions: usize,
+    endpoints_removed: usize,
 }
 
 impl Broker {
@@ -382,12 +391,14 @@ impl Broker {
             let events = events.clone();
             audit.subscribe(move |entry| events.audit_appended(entry));
         }
+        let config_gate = Arc::new(tokio::sync::Mutex::new(()));
         let BrokerRepositories {
             workspace,
             catalog: store,
             policy: access,
             endpoints,
             identity,
+            domain,
         } = match repositories {
             Some(repositories) => repositories,
             None => {
@@ -428,12 +439,19 @@ impl Broker {
                         Some(local_store.clone()),
                     )?);
                 let store: Arc<dyn CatalogRepository> = local_store;
+                let domain: Arc<dyn DomainRepository> = Arc::new(LocalDomainRepository::with_gate(
+                    store.clone(),
+                    access.clone(),
+                    endpoints.clone(),
+                    config_gate.clone(),
+                ));
                 BrokerRepositories::new(
                     WorkspaceContext::local(),
                     store,
                     access,
                     endpoints,
                     identity,
+                    domain,
                 )
             }
         };
@@ -509,9 +527,10 @@ impl Broker {
             store,
             access,
             endpoints,
+            domain,
             endpoint_listeners: Mutex::new(HashMap::new()),
             endpoint_uploads,
-            config_gate: tokio::sync::Mutex::new(()),
+            config_gate,
             identity,
             executions,
             task_runtime,
@@ -747,13 +766,152 @@ impl Broker {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
+    /// Apply runtime-only consequences after the durable unit of work has
+    /// committed. These handlers are deliberately idempotent so the hosted
+    /// outbox may retry delivery after a crash.
+    pub(crate) fn apply_domain_outbox(&self, outbox: &[DomainOutboxEvent]) -> AppliedDomainEffects {
+        let mut effects = AppliedDomainEffects::default();
+        for event in outbox {
+            match &event.kind {
+                DomainOutboxEventKind::CredentialChanged {
+                    credential_id,
+                    value_replaced,
+                    templates_rewritten,
+                } => {
+                    self.events.secrets_changed();
+                    if *templates_rewritten > 0 {
+                        self.events.connections_changed();
+                    }
+                    if *value_replaced {
+                        for connection in self.store.list_connections(&self.workspace) {
+                            if !connection.secrets.contains(credential_id) {
+                                continue;
+                            }
+                            self.approvals.revoke(&connection.id);
+                            self.elicitations.revoke(&connection.id);
+                            effects.closed_sessions += self.data_plane.close_connection_sessions(
+                                &connection.id,
+                                AuthorityChange::CredentialRotated.as_str(),
+                            );
+                        }
+                    }
+                    self.publish_agent_surface_change();
+                }
+                DomainOutboxEventKind::ConnectionCreated {
+                    credential_created, ..
+                } => {
+                    if *credential_created {
+                        self.events.secrets_changed();
+                    }
+                    self.events.connections_changed();
+                    self.publish_agent_surface_change();
+                }
+                DomainOutboxEventKind::ConnectionChanged {
+                    connection_id,
+                    capability_changed,
+                    target_changed,
+                    removed_endpoint_ids,
+                } => {
+                    if *capability_changed {
+                        effects.closed_sessions += self.data_plane.close_connection_sessions(
+                            connection_id,
+                            AuthorityChange::ConnectionChanged.as_str(),
+                        );
+                    }
+                    if *target_changed {
+                        self.teardown_endpoint_ids(
+                            removed_endpoint_ids,
+                            AuthorityChange::ConnectionChanged.as_str(),
+                        );
+                        effects.endpoints_removed += removed_endpoint_ids.len();
+                        self.approvals.revoke(connection_id);
+                        self.elicitations.revoke(connection_id);
+                        self.health.forget(connection_id);
+                        self.forget_mcp_tools_cache(connection_id);
+                        if !removed_endpoint_ids.is_empty() {
+                            self.events.wirings_changed();
+                        }
+                    }
+                    self.events.connections_changed();
+                    self.publish_agent_surface_change();
+                }
+                DomainOutboxEventKind::ConnectionDeleted {
+                    connection_id,
+                    policy_removed,
+                    removed_endpoint_ids,
+                } => {
+                    self.health.forget(connection_id);
+                    self.forget_mcp_tools_cache(connection_id);
+                    self.approvals.revoke(connection_id);
+                    self.elicitations.revoke(connection_id);
+                    self.teardown_endpoint_ids(
+                        removed_endpoint_ids,
+                        AuthorityChange::ConnectionDeleted.as_str(),
+                    );
+                    effects.endpoints_removed += removed_endpoint_ids.len();
+                    effects.closed_sessions += self.data_plane.close_connection_sessions(
+                        connection_id,
+                        AuthorityChange::ConnectionDeleted.as_str(),
+                    );
+                    if *policy_removed || !removed_endpoint_ids.is_empty() {
+                        self.events.wirings_changed();
+                    }
+                    self.events.connections_changed();
+                    self.publish_agent_surface_change();
+                }
+                DomainOutboxEventKind::PolicyChanged {
+                    connection_id,
+                    change,
+                } => {
+                    match change {
+                        PolicyChange::Enabled(enabled) => {
+                            if !enabled {
+                                self.approvals.revoke(connection_id);
+                                self.elicitations.revoke(connection_id);
+                                effects.closed_sessions +=
+                                    self.data_plane.close_connection_sessions(
+                                        connection_id,
+                                        AuthorityChange::AccessDisabled.as_str(),
+                                    );
+                            }
+                            self.publish_agent_surface_change();
+                        }
+                        PolicyChange::AllowedTools(_) => {
+                            self.approvals.revoke(connection_id);
+                            self.publish_agent_surface_change();
+                        }
+                        PolicyChange::Confirm(_)
+                        | PolicyChange::ExposeResponseCredentials(_)
+                        | PolicyChange::AuditStatements(_) => {}
+                    }
+                    self.events.wirings_changed();
+                }
+            }
+        }
+        effects
+    }
+
     pub async fn ui_add_secret(&self, name: &str, value: SecretValue) -> Result<SecretMeta> {
-        let meta = self.store.add_secret(&self.workspace, name, value).await?;
+        let committed = self
+            .domain
+            .add_credential(
+                &self.workspace,
+                crate::store::NewCredential {
+                    kind: crate::types::SecretKind::Secret,
+                    name: Some(name.to_string()),
+                    site: None,
+                    username: None,
+                    value,
+                    totp: None,
+                },
+            )
+            .await?;
+        self.apply_domain_outbox(&committed.outbox);
+        let meta = committed.value;
         self.audit.append(AuditEntry::new(
             AuditKind::SecretAdded,
             format!("Secret added: {name}"),
         ));
-        self.events.secrets_changed();
         Ok(meta)
     }
 
@@ -784,8 +942,8 @@ impl Broker {
                 (Some(site), totp)
             }
         };
-        let meta = self
-            .store
+        let committed = self
+            .domain
             .add_credential(
                 &self.workspace,
                 crate::store::NewCredential {
@@ -800,6 +958,8 @@ impl Broker {
                 },
             )
             .await?;
+        self.apply_domain_outbox(&committed.outbox);
+        let meta = committed.value;
         self.audit.append(match meta.kind {
             crate::types::SecretKind::Secret => AuditEntry::new(
                 AuditKind::SecretAdded,
@@ -814,7 +974,6 @@ impl Broker {
             )
             .field("has_totp", meta.has_totp()),
         });
-        self.events.secrets_changed();
         Ok(meta)
     }
 
@@ -859,8 +1018,7 @@ impl Broker {
         new_username: Option<String>,
         new_totp: Option<String>,
     ) -> Result<SecretMeta> {
-        let _gate = self.config_gate.lock().await;
-        let mut meta = self.store.secret_by_id(&self.workspace, id)?;
+        let meta = self.store.secret_by_id(&self.workspace, id)?;
         if new_value.is_some() && !matches!(meta.source, crate::types::SecretSource::Local) {
             return Err(CoreError::ExternalSecretReadOnly);
         }
@@ -885,73 +1043,48 @@ impl Broker {
                 }
             })
             .transpose()?;
-        let mut changes = Vec::new();
-        let mut rename: Option<(String, String, usize)> = None;
-        if let Some(new_name) = new_name {
-            if new_name != meta.name {
-                let old = meta.name.clone();
-                let (updated, rewritten) = self
-                    .store
-                    .rename_secret(&self.workspace, id, new_name)
-                    .await?;
-                meta = updated;
-                changes.push(if rewritten > 0 {
-                    format!(
-                        "renamed {old} → {new_name} ({rewritten} template{} rewritten)",
-                        if rewritten == 1 { "" } else { "s" }
-                    )
-                } else {
-                    format!("renamed {old} → {new_name}")
-                });
-                rename = Some((old, new_name.to_string(), rewritten));
-            }
-        }
-        let value_replaced = new_value.is_some();
-        let mut closed_sessions = 0;
-        if let Some(value) = new_value {
-            meta = self
-                .store
-                .replace_secret_value(&self.workspace, id, value)
-                .await?;
-            changes.push("value replaced".into());
-            // Rotating a credential has to reach the traffic already using it.
-            // A live session authenticated with the old value keeps working
-            // until it idles out, which is exactly the window a rotation is
-            // meant to close — so drop the sessions of every tool bound to
-            // this secret and make the next call redial with the new value.
-            // A rename leaves the value alone and needs none of this.
-            for connection in self.store.list_connections(&self.workspace) {
-                if connection.secrets.contains(id) {
-                    self.approvals.revoke(&connection.id);
-                    self.elicitations.revoke(&connection.id);
-                    closed_sessions += self
-                        .data_plane
-                        .close_connection_sessions(&connection.id, "secret_rotated");
-                }
-            }
-        }
-        if profile_edit {
-            meta = self
-                .store
-                .set_password_profile(
-                    &self.workspace,
-                    id,
+        let totp_removing = totp_edit.as_ref().is_some_and(|totp| totp.is_none());
+        let new_username = new_username.map(|username| {
+            let username = username.trim().to_string();
+            (!username.is_empty()).then_some(username)
+        });
+        let committed = self
+            .domain
+            .edit_credential(
+                &self.workspace,
+                CredentialEdit {
+                    id: *id,
+                    new_name: new_name.map(str::to_string),
+                    new_value,
                     new_site,
-                    new_username.map(|username| {
-                        let username = username.trim().to_string();
-                        (!username.is_empty()).then_some(username)
-                    }),
+                    new_username,
+                    new_totp: totp_edit,
+                },
+            )
+            .await?;
+        let effects = self.apply_domain_outbox(&committed.outbox);
+        let result = committed.value;
+        let mut changes = Vec::new();
+        if let Some(old) = result.renamed_from.as_deref() {
+            let new_name = &result.meta.name;
+            let rewritten = result.templates_rewritten;
+            changes.push(if rewritten > 0 {
+                format!(
+                    "renamed {old} → {new_name} ({rewritten} template{} rewritten)",
+                    if rewritten == 1 { "" } else { "s" }
                 )
-                .await?;
+            } else {
+                format!("renamed {old} → {new_name}")
+            });
+        }
+        if result.value_replaced {
+            changes.push("value replaced".into());
+        }
+        if result.profile_changed {
             changes.push("sign-in profile updated".into());
         }
-        if let Some(totp) = totp_edit {
-            let removing = totp.is_none();
-            meta = self
-                .store
-                .set_totp_factor(&self.workspace, id, totp)
-                .await?;
-            changes.push(if removing {
+        if result.totp_changed {
+            changes.push(if totp_removing {
                 "2FA secret removed".into()
             } else {
                 "2FA secret set".into()
@@ -960,24 +1093,20 @@ impl Broker {
         if !changes.is_empty() {
             let mut entry = AuditEntry::new(
                 AuditKind::SecretUpdated,
-                format!("Secret updated: {}", meta.name),
+                format!("Secret updated: {}", result.meta.name),
             )
             .detail(changes.join(" · "))
-            .field("value_replaced", value_replaced)
-            .field("closed_sessions", closed_sessions);
-            if let Some((from, to, rewritten)) = rename {
+            .field("value_replaced", result.value_replaced)
+            .field("closed_sessions", effects.closed_sessions);
+            if let Some(from) = result.renamed_from.as_ref() {
                 entry = entry
-                    .field("renamed_from", from)
-                    .field("renamed_to", to)
-                    .field("templates_rewritten", rewritten);
+                    .field("renamed_from", from.as_str())
+                    .field("renamed_to", result.meta.name.clone())
+                    .field("templates_rewritten", result.templates_rewritten);
             }
             self.audit.append(entry);
-            self.events.secrets_changed();
-            if value_replaced {
-                self.publish_agent_surface_change();
-            }
         }
-        Ok(meta)
+        Ok(result.meta)
     }
 
     pub async fn ui_delete_secret(&self, id: &Uuid) -> Result<SecretMeta> {
@@ -989,7 +1118,9 @@ impl Broker {
         }
         // The in-app confirm is the gate: an unused secret grants nothing,
         // so deleting it is destructive to the user's own material only.
-        let meta = self.store.delete_secret(&self.workspace, id).await?;
+        let committed = self.domain.delete_credential(&self.workspace, id).await?;
+        self.apply_domain_outbox(&committed.outbox);
+        let meta = committed.value;
         let detail = if matches!(meta.source, crate::types::SecretSource::Local) {
             "Removed from Keychain"
         } else {
@@ -1002,7 +1133,6 @@ impl Broker {
             )
             .detail(detail),
         );
-        self.events.secrets_changed();
         Ok(meta)
     }
 
@@ -1171,7 +1301,9 @@ impl Broker {
     pub async fn ui_add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
         self.store
             .preflight_add_connection(&self.workspace, &spec)?;
-        let conn = self.store.add_connection(&self.workspace, spec).await?;
+        let committed = self.domain.add_connection(&self.workspace, spec).await?;
+        self.apply_domain_outbox(&committed.outbox);
+        let conn = committed.value;
         let entry = AuditEntry::new(
             AuditKind::ConnectionAdded,
             format!("Tool added: {}", conn.name),
@@ -1181,7 +1313,6 @@ impl Broker {
         .field("kind", conn.kind().as_str())
         .field("target", conn.target());
         self.audit.append(entry);
-        self.publish_agent_surface_change();
         Ok(conn)
     }
 
@@ -1226,15 +1357,16 @@ impl Broker {
     ) -> Result<Connection> {
         self.store
             .preflight_add_connection_with_secret(&self.workspace, secret_name, &spec)?;
-        let (secret, conn) = self
-            .store
+        let committed = self
+            .domain
             .add_connection_with_secret(&self.workspace, secret_name, value, spec)
             .await?;
+        self.apply_domain_outbox(&committed.outbox);
+        let (secret, conn) = committed.value;
         self.audit.append(AuditEntry::new(
             AuditKind::SecretAdded,
             format!("Secret added: {}", secret.name),
         ));
-        self.events.secrets_changed();
         let entry = AuditEntry::new(
             AuditKind::ConnectionAdded,
             format!("Tool added: {}", conn.name),
@@ -1244,7 +1376,6 @@ impl Broker {
         .field("kind", conn.kind().as_str())
         .field("target", conn.target());
         self.audit.append(entry);
-        self.publish_agent_surface_change();
         Ok(conn)
     }
 
@@ -1302,88 +1433,31 @@ impl Broker {
         expected_updated_at: Option<&str>,
         spec: ConnectionSpec,
     ) -> Result<Connection> {
-        let old = self.store.connection_by_id(&self.workspace, id)?;
-        if expected_updated_at.is_some_and(|expected| old.version() != expected) {
-            return Err(CoreError::ConnectionChanged);
-        }
-        let explicit_secrets_changed =
-            old.kind() != ConnectionKind::Api && old.secrets != spec.secrets;
-        let capability_changed = old.config != spec.config || explicit_secrets_changed;
-        let _gate = self.config_gate.lock().await;
-        if self.store.connection_by_id(&self.workspace, id)?.updated_at != old.updated_at {
-            return Err(CoreError::ConnectionChanged);
-        }
-        let (conn, target_changed) = if capability_changed {
-            match expected_updated_at {
-                Some(expected) => {
-                    self.store
-                        .update_connection_if_current(&self.workspace, id, expected, spec)
-                        .await?
-                }
-                None => {
-                    self.store
-                        .update_connection(&self.workspace, id, spec)
-                        .await?
-                }
-            }
-        } else {
-            (
-                match expected_updated_at {
-                    Some(expected) => {
-                        self.store
-                            .rename_connection_if_current(&self.workspace, id, expected, spec.name)
-                            .await?
-                    }
-                    None => {
-                        self.store
-                            .rename_connection(&self.workspace, id, spec.name)
-                            .await?
-                    }
-                },
-                false,
-            )
+        // Even legacy in-process callers get the same compare-and-set
+        // behavior as management clients. The domain implementation checks
+        // this token while holding its transaction lock.
+        let expected_version = match expected_updated_at {
+            Some(expected) => expected.to_string(),
+            None => self.store.connection_by_id(&self.workspace, id)?.version(),
         };
-        // A live session was authenticated with the *old* configuration and
-        // the *old* credential, and it keeps carrying traffic after the user
-        // has changed both. Retargeting is only the loudest case: rebinding a
-        // Postgres tool to a different secret leaves the target untouched, and
-        // repinning an MCP path changes what the session may reach without
-        // changing where it dials. Close on any capability change — the
-        // agent's next call redials under the settings the user just chose.
-        let mut closed_sessions = 0;
-        if capability_changed {
-            closed_sessions = self
-                .data_plane
-                .close_connection_sessions(id, "connection_changed");
-        }
-        let mut endpoints_revoked = false;
-        if target_changed {
-            // Direct endpoints grant standing access to the old destination —
-            // an already-pasted DSN must not silently point at the new one —
-            // so they die with the retarget. The enabled/disabled flag and
-            // any curated MCP tool subset name the *tool* and survive: stale
-            // tool names simply stop matching, which only narrows access.
-            let endpoints = self
-                .endpoints
-                .remove_for_connection(&self.workspace, id)
-                .await?;
-            self.teardown_endpoints(&endpoints, "connection_changed");
-            endpoints_revoked = !endpoints.is_empty();
-            if endpoints_revoked {
-                self.events.wirings_changed();
-            }
-            // An open approval window was permission for traffic to the old
-            // destination; the new one has never been shown to the user.
-            self.approvals.revoke(id);
-            // A parked elicitation asked about the old destination; its answer
-            // no longer maps to anything, so cancel it too.
-            self.elicitations.revoke(id);
-            // A health result for the old destination says nothing about
-            // the new one.
-            self.health.forget(id);
-            // Nor do the old destination's advertised tools.
-            self.forget_mcp_tools_cache(id);
-        }
+        let committed = self
+            .domain
+            .update_connection(
+                &self.workspace,
+                ConnectionUpdate {
+                    id: *id,
+                    expected_version: Some(expected_version),
+                    spec,
+                },
+            )
+            .await?;
+        let effects = self.apply_domain_outbox(&committed.outbox);
+        let result = committed.value;
+        let old = result.previous;
+        let conn = result.connection;
+        let capability_changed = result.capability_changed;
+        let target_changed = result.target_changed;
+        let endpoints_revoked = effects.endpoints_removed > 0;
         let mut entry = AuditEntry::new(
             AuditKind::ConnectionUpdated,
             format!(
@@ -1409,14 +1483,13 @@ impl Broker {
         .field("target_changed", target_changed)
         .field("capability_changed", capability_changed)
         .field("endpoints_revoked", endpoints_revoked)
-        .field("closed_sessions", closed_sessions);
+        .field("closed_sessions", effects.closed_sessions);
         if old.name != conn.name {
             entry = entry
                 .field("renamed_from", old.name.clone())
                 .field("renamed_to", conn.name.clone());
         }
         self.audit.append(entry);
-        self.publish_agent_surface_change();
         Ok(conn)
     }
 
@@ -1425,42 +1498,21 @@ impl Broker {
     /// confirmation is the gate — no native prompt.
     pub async fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let conn = self.store.connection_by_id(&self.workspace, id)?;
-        let _gate = self.config_gate.lock().await;
-        if self.store.connection_by_id(&self.workspace, id)?.updated_at != conn.updated_at {
-            return Err(CoreError::ApprovalConnectionChanged);
-        }
-        let conn = self.store.delete_connection(&self.workspace, id).await?;
-        self.health.forget(id);
-        self.forget_mcp_tools_cache(id);
-        self.approvals.revoke(id);
-        self.elicitations.revoke(id);
-        let dropped = self
-            .access
-            .remove_for_connection(&self.workspace, id)
+        let expected_version = conn.version();
+        let committed = self
+            .domain
+            .delete_connection(&self.workspace, id, &expected_version)
             .await?;
-        let endpoints = self
-            .endpoints
-            .remove_for_connection(&self.workspace, id)
-            .await?;
-        self.teardown_endpoints(&endpoints, "connection_deleted");
-        // The connection is gone, so nothing it authorized may keep running:
-        // invalidate its tickets and close its live sessions, ticket-served
-        // ones included.
-        let closed_sessions = self
-            .data_plane
-            .close_connection_sessions(id, "connection_deleted");
-        if dropped || !endpoints.is_empty() {
-            self.events.wirings_changed();
-        }
+        let effects = self.apply_domain_outbox(&committed.outbox);
+        let conn = committed.value.connection;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::ConnectionDeleted,
                 format!("Tool deleted: {}", conn.name),
             )
             .connection(conn.name.clone())
-            .field("closed_sessions", closed_sessions),
+            .field("closed_sessions", effects.closed_sessions),
         );
-        self.publish_agent_surface_change();
         Ok(conn)
     }
 
@@ -1802,8 +1854,8 @@ impl Broker {
             ManageOAuthPlan::Connect {
                 secret_name, spec, ..
             } => {
-                let (_, conn) = self
-                    .store
+                let committed = self
+                    .domain
                     .add_connection_with_secret(
                         &self.workspace,
                         &secret_name,
@@ -1811,6 +1863,8 @@ impl Broker {
                         *spec,
                     )
                     .await?;
+                self.apply_domain_outbox(&committed.outbox);
+                let (_, conn) = committed.value;
                 self.health.record(
                     &conn.id,
                     crate::types::HealthStatus::Ok,
@@ -1827,8 +1881,6 @@ impl Broker {
                     .field("target", conn.target())
                     .field("oauth", true),
                 );
-                publish_oauth_change(self.events.as_ref());
-                self.publish_agent_surface_change();
             }
             ManageOAuthPlan::Reconnect {
                 connection_id,
@@ -1838,9 +1890,21 @@ impl Broker {
                 let conn = self
                     .store
                     .connection_by_id(&self.workspace, &connection_id)?;
-                self.store
-                    .replace_secret_value(&self.workspace, &secret_id, tokens.to_secret_value())
+                let committed = self
+                    .domain
+                    .edit_credential(
+                        &self.workspace,
+                        CredentialEdit {
+                            id: secret_id,
+                            new_name: None,
+                            new_value: Some(tokens.to_secret_value()),
+                            new_site: None,
+                            new_username: None,
+                            new_totp: None,
+                        },
+                    )
                     .await?;
+                self.apply_domain_outbox(&committed.outbox);
                 self.health.record(
                     &conn.id,
                     crate::types::HealthStatus::Ok,
@@ -1854,7 +1918,7 @@ impl Broker {
                     .connection(conn.name.clone())
                     .field("oauth", true),
                 );
-                publish_oauth_change(self.events.as_ref());
+                self.events.connections_changed();
             }
         }
         Ok(())
@@ -1901,8 +1965,8 @@ impl Broker {
         let tokens = crate::oauth::finish(pending, &oauth_spec, client_secret, &self.http_client)
             .await
             .map_err(CoreError::OAuth)?;
-        let (_, conn) = self
-            .store
+        let committed = self
+            .domain
             .add_connection_with_secret(
                 &self.workspace,
                 secret_name,
@@ -1910,6 +1974,8 @@ impl Broker {
                 spec,
             )
             .await?;
+        self.apply_domain_outbox(&committed.outbox);
+        let (_, conn) = committed.value;
         self.health.record(
             &conn.id,
             crate::types::HealthStatus::Ok,
@@ -1926,8 +1992,6 @@ impl Broker {
             .field("target", conn.target())
             .field("oauth", true),
         );
-        publish_oauth_change(self.events.as_ref());
-        self.publish_agent_surface_change();
         Ok(conn)
     }
 
@@ -1972,9 +2036,21 @@ impl Broker {
         let tokens = crate::oauth::finish(pending, &oauth_spec, client_secret, &self.http_client)
             .await
             .map_err(CoreError::OAuth)?;
-        self.store
-            .replace_secret_value(&self.workspace, &secret_id, tokens.to_secret_value())
+        let committed = self
+            .domain
+            .edit_credential(
+                &self.workspace,
+                CredentialEdit {
+                    id: secret_id,
+                    new_name: None,
+                    new_value: Some(tokens.to_secret_value()),
+                    new_site: None,
+                    new_username: None,
+                    new_totp: None,
+                },
+            )
             .await?;
+        self.apply_domain_outbox(&committed.outbox);
         self.health.record(
             &conn.id,
             crate::types::HealthStatus::Ok,
@@ -1988,7 +2064,7 @@ impl Broker {
             .connection(conn.name.clone())
             .field("oauth", true),
         );
-        publish_oauth_change(self.events.as_ref());
+        self.events.connections_changed();
         Ok(conn)
     }
 
@@ -2900,19 +2976,55 @@ impl Broker {
     /// sessions it was serving, so a revoked endpoint stops working at once —
     /// unlike a ticket, its access is standing and cannot be left to expire.
     fn teardown_endpoints(&self, removed: &[DirectEndpoint], reason: &'static str) {
-        for endpoint in removed {
-            if let Some(handle) = self.endpoint_listeners.lock().unwrap().remove(&endpoint.id) {
+        let ids: Vec<Uuid> = removed.iter().map(|endpoint| endpoint.id).collect();
+        self.teardown_endpoint_ids(&ids, reason);
+    }
+
+    fn teardown_endpoint_ids(&self, removed: &[Uuid], reason: &'static str) {
+        for endpoint_id in removed {
+            if let Some(handle) = self.endpoint_listeners.lock().unwrap().remove(endpoint_id) {
                 handle.stop();
             }
-            self.data_plane
-                .close_endpoint_sessions(&endpoint.id, reason);
-            let dir = self.paths.endpoint_dir(&endpoint.id);
+            self.data_plane.close_endpoint_sessions(endpoint_id, reason);
+            let dir = self.paths.endpoint_dir(endpoint_id);
             if let Err(error) = std::fs::remove_dir_all(&dir) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!("could not remove endpoint dir {}: {error}", dir.display());
                 }
             }
         }
+    }
+
+    fn policy_update(&self, connection_id: &Uuid, change: PolicyChange) -> Result<PolicyUpdate> {
+        let connection = self
+            .store
+            .connection_by_id(&self.workspace, connection_id)?;
+        let expected = match &change {
+            PolicyChange::Enabled(_) => {
+                PolicyChange::Enabled(self.access.allows(&self.workspace, connection_id))
+            }
+            PolicyChange::Confirm(_) => {
+                PolicyChange::Confirm(self.access.confirm_mode(&self.workspace, connection_id))
+            }
+            PolicyChange::ExposeResponseCredentials(_) => PolicyChange::ExposeResponseCredentials(
+                self.access
+                    .expose_response_credentials(&self.workspace, connection_id),
+            ),
+            PolicyChange::AllowedTools(_) => PolicyChange::AllowedTools(
+                self.access.allowed_tools(&self.workspace, connection_id),
+            ),
+            PolicyChange::AuditStatements(_) => PolicyChange::AuditStatements(
+                self.access
+                    .entry(&self.workspace, connection_id)
+                    .and_then(|entry| entry.audit_statements),
+            ),
+        };
+        Ok(PolicyUpdate {
+            connection_id: *connection_id,
+            expected_connection_version: Some(connection.version()),
+            expected: Some(expected),
+            change,
+        })
     }
 
     /// Enable or disable agent access for a connection from the app.
@@ -2924,21 +3036,13 @@ impl Broker {
     /// connection alive for an hour after the user revoked it. The issued
     /// endpoint itself remains available for later re-enabling.
     pub async fn ui_set_tool_access(&self, connection_id: &Uuid, enabled: bool) -> Result<bool> {
-        let connection = self
-            .store
-            .connection_by_id(&self.workspace, connection_id)?;
-        let _gate = self.config_gate.lock().await;
-        let changed = self
-            .access
-            .set_enabled(&self.workspace, *connection_id, enabled)
-            .await?;
+        let update = self.policy_update(connection_id, PolicyChange::Enabled(enabled))?;
+        let committed = self.domain.update_policy(&self.workspace, update).await?;
+        let effects = self.apply_domain_outbox(&committed.outbox);
+        let result = committed.value;
+        let connection = result.connection;
+        let changed = result.changed;
         if changed {
-            let closed_sessions = if enabled {
-                0
-            } else {
-                self.data_plane
-                    .close_connection_sessions(connection_id, "access_disabled")
-            };
             self.audit.append(
                 AuditEntry::new(
                     if enabled {
@@ -2953,10 +3057,8 @@ impl Broker {
                     ),
                 )
                 .connection(connection.name.clone())
-                .field("closed_sessions", closed_sessions),
+                .field("closed_sessions", effects.closed_sessions),
             );
-            self.events.wirings_changed();
-            self.publish_agent_surface_change();
         }
         if !enabled {
             // Nothing is authorized here any more, so an open window and a
@@ -2990,30 +3092,12 @@ impl Broker {
         confirm: ConfirmMode,
         release_resolution: crate::request_history::RequestResolution,
     ) -> Result<bool> {
-        let connection = self
-            .store
-            .connection_by_id(&self.workspace, connection_id)?;
-        let old_mode = self.access.confirm_mode(&self.workspace, connection_id);
-        let _gate = self.config_gate.lock().await;
-        let current = self
-            .store
-            .connection_by_id(&self.workspace, connection_id)?;
-        if current.updated_at != connection.updated_at {
-            return Err(CoreError::ApprovalConnectionChanged);
-        }
-        let current_mode = self.access.confirm_mode(&self.workspace, connection_id);
-        if current_mode == confirm {
-            return Ok(false);
-        }
-        // Do not overwrite a change made by another window while this call
-        // was waiting for the mutation gate.
-        if current_mode != old_mode {
-            return Err(CoreError::ApprovalConnectionChanged);
-        }
-        let changed = self
-            .access
-            .set_confirm_mode(&self.workspace, *connection_id, confirm)
-            .await?;
+        let update = self.policy_update(connection_id, PolicyChange::Confirm(confirm))?;
+        let committed = self.domain.update_policy(&self.workspace, update).await?;
+        self.apply_domain_outbox(&committed.outbox);
+        let result = committed.value;
+        let connection = result.connection;
+        let changed = result.changed;
         if changed {
             if !confirm.is_on() {
                 // The user just said this traffic needs no asking: release
@@ -3035,7 +3119,6 @@ impl Broker {
             .connection(connection.name.clone())
             .field("confirm", confirm.is_on());
             self.audit.append(entry);
-            self.events.wirings_changed();
         }
         Ok(changed)
     }
@@ -3144,14 +3227,15 @@ impl Broker {
         connection_id: &Uuid,
         audit_statements: Option<bool>,
     ) -> Result<bool> {
-        let _gate = self.config_gate.lock().await;
-        let connection = self
-            .store
-            .connection_by_id(&self.workspace, connection_id)?;
-        let changed = self
-            .access
-            .set_audit_statements(&self.workspace, *connection_id, audit_statements)
-            .await?;
+        let update = self.policy_update(
+            connection_id,
+            PolicyChange::AuditStatements(audit_statements),
+        )?;
+        let committed = self.domain.update_policy(&self.workspace, update).await?;
+        self.apply_domain_outbox(&committed.outbox);
+        let result = committed.value;
+        let connection = result.connection;
+        let changed = result.changed;
         if changed {
             let effective = self.access.audit_statements(
                 &self.workspace,
@@ -3178,7 +3262,6 @@ impl Broker {
                 )
                 .field("effective", effective),
             );
-            self.events.wirings_changed();
         }
         Ok(changed)
     }
@@ -3190,34 +3273,15 @@ impl Broker {
         connection_id: &Uuid,
         expose: bool,
     ) -> Result<bool> {
-        let connection = self
-            .store
-            .connection_by_id(&self.workspace, connection_id)?;
-        if connection.kind() != ConnectionKind::Api {
-            return Err(CoreError::InvalidSetting(
-                "upstream response credentials apply only to API connections".into(),
-            ));
-        }
-        let old = self
-            .access
-            .expose_response_credentials(&self.workspace, connection_id);
-
-        let _gate = self.config_gate.lock().await;
-        let current = self
-            .store
-            .connection_by_id(&self.workspace, connection_id)?;
-        if current.updated_at != connection.updated_at
-            || self
-                .access
-                .expose_response_credentials(&self.workspace, connection_id)
-                != old
-        {
-            return Err(CoreError::ApprovalConnectionChanged);
-        }
-        let changed = self
-            .access
-            .set_expose_response_credentials(&self.workspace, *connection_id, expose)
-            .await?;
+        let update = self.policy_update(
+            connection_id,
+            PolicyChange::ExposeResponseCredentials(expose),
+        )?;
+        let committed = self.domain.update_policy(&self.workspace, update).await?;
+        self.apply_domain_outbox(&committed.outbox);
+        let result = committed.value;
+        let connection = result.connection;
+        let changed = result.changed;
         if changed {
             let audit = AuditEntry::new(
                 AuditKind::SettingsChanged,
@@ -3231,7 +3295,6 @@ impl Broker {
             .field("setting", "expose_response_credentials")
             .field("new", expose);
             self.audit.append(audit);
-            self.events.wirings_changed();
         }
         Ok(changed)
     }
@@ -3245,10 +3308,6 @@ impl Broker {
         connection_id: &Uuid,
         tools: Option<Vec<String>>,
     ) -> Result<bool> {
-        let _gate = self.config_gate.lock().await;
-        let connection = self
-            .store
-            .connection_by_id(&self.workspace, connection_id)?;
         let detail = match &tools {
             None => "all tools".to_string(),
             Some(list) => format!(
@@ -3257,15 +3316,13 @@ impl Broker {
                 if list.len() == 1 { "" } else { "s" }
             ),
         };
-        let changed = self
-            .access
-            .set_allowed_tools(&self.workspace, *connection_id, tools)
-            .await?;
+        let update = self.policy_update(connection_id, PolicyChange::AllowedTools(tools))?;
+        let committed = self.domain.update_policy(&self.workspace, update).await?;
+        self.apply_domain_outbox(&committed.outbox);
+        let result = committed.value;
+        let connection = result.connection;
+        let changed = result.changed;
         if changed {
-            // A pending prompt or open window was admitted under the old
-            // tool subset. Narrowing must take effect before any parked call
-            // can leave; widening should likewise require a fresh decision.
-            self.approvals.revoke(connection_id);
             self.audit.append(
                 AuditEntry::new(
                     AuditKind::Wired,
@@ -3273,8 +3330,6 @@ impl Broker {
                 )
                 .connection(connection.name.clone()),
             );
-            self.events.wirings_changed();
-            self.publish_agent_surface_change();
         }
         Ok(changed)
     }
@@ -3620,36 +3675,10 @@ async fn reject_legacy_live_socket(paths: &Paths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        publish_oauth_change, remember_connect_request, ssh_endpoint_invocation,
-        MAX_CONNECT_REQUEST_DEBOUNCE_KEYS,
+        remember_connect_request, ssh_endpoint_invocation, MAX_CONNECT_REQUEST_DEBOUNCE_KEYS,
     };
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
-
-    #[derive(Default)]
-    struct OAuthEvents {
-        secrets: AtomicUsize,
-        connections: AtomicUsize,
-    }
-
-    impl crate::events::BrokerEvents for OAuthEvents {
-        fn secrets_changed(&self) {
-            self.secrets.fetch_add(1, Ordering::Relaxed);
-        }
-
-        fn connections_changed(&self) {
-            self.connections.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    #[test]
-    fn oauth_changes_publish_both_mutated_resources() {
-        let events = OAuthEvents::default();
-        publish_oauth_change(&events);
-        assert_eq!(events.secrets.load(Ordering::Relaxed), 1);
-        assert_eq!(events.connections.load(Ordering::Relaxed), 1);
-    }
 
     #[test]
     fn connect_request_debounce_is_hard_bounded() {

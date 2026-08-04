@@ -956,9 +956,6 @@ async fn run_flow(
                 .map_err(|error| {
                     FlowFailure::plain(format!("could not save “{name_for_error}”: {error}"))
                 })?;
-            // This creation happened outside a UI command round-trip, so
-            // push the refresh to every window.
-            broker.events.connections_changed();
             (connection.id, connection.name)
         }
         CompletionPlan::Reauth {
@@ -969,16 +966,22 @@ async fn run_flow(
                 .store
                 .connection_by_id(&broker.workspace, &connection_id)
                 .map_err(|e| FlowFailure::plain(e.to_string()))?;
-            broker
-                .store
-                .replace_secret_value(
+            let committed = broker
+                .domain
+                .edit_credential(
                     &broker.workspace,
-                    &secret_id,
-                    Zeroizing::new(tokens.access_token.to_string()),
+                    crate::domain::CredentialEdit {
+                        id: secret_id,
+                        new_name: None,
+                        new_value: Some(Zeroizing::new(tokens.access_token.to_string())),
+                        new_site: None,
+                        new_username: None,
+                        new_totp: None,
+                    },
                 )
                 .await
                 .map_err(|e| FlowFailure::plain(format!("could not store the new token: {e}")))?;
-            broker.publish_agent_surface_change();
+            broker.apply_domain_outbox(&committed.outbox);
             broker.events.connections_changed();
             (connection.id, connection.name)
         }
