@@ -1114,15 +1114,6 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
         <button className="btn sm" data-act="confirm-cancel">OK</button>
       </div></td></tr>;
     }
-    if (state.confirm && state.confirm.kind === 'del-secret' && state.confirm.id === s.id) {
-      return <tr key={s.id} className="confirm-row"><td colSpan={4}><div className="confirm-inline">
-        <span>{s.source?.kind === 'one_password'
-          ? `Unlink “${s.name}” from Multitool? The 1Password item won’t be changed.`
-          : `Delete “${s.name}” from the macOS Keychain?`}</span>
-        <button className="btn sm" data-act="confirm-cancel">Cancel</button>
-        <button className="btn sm danger" data-act="del-secret-confirm" data-id={s.id}>Delete</button>
-      </div></td></tr>;
-    }
     // The eye reveals only a short prefix (the full value never
     // enters the webview).
     const revealed = state.reveal[s.id];
@@ -3938,6 +3929,29 @@ function DeleteOnePasswordConfirm(): ReactNode {
   </>;
 }
 
+// Unlink / delete a free credential asks in a centered dialog so the longer
+// 1Password copy is not truncated inside a table row.
+function DeleteSecretConfirm(): ReactNode {
+  const confirm = state.confirm;
+  if (!confirm || confirm.kind !== 'del-secret') return null;
+  const secret = state.secrets.find((candidate) => candidate.id === confirm.id);
+  const name = secret?.name ?? 'this credential';
+  const linked = secret?.source?.kind === 'one_password';
+  return (
+    <>
+      <h3 id="del-secret-title">{linked ? `Unlink ${name}?` : `Delete ${name}?`}</h3>
+      <p>{linked
+        ? 'Multitool will stop using this 1Password field. The item in 1Password won’t be changed.'
+        : 'This credential will be removed from the macOS Keychain.'}</p>
+      <div className="sheet-actions">
+        <button className="btn" data-act="confirm-cancel">Cancel</button>
+        <button className="btn danger" data-act="del-secret-confirm"
+          data-id={String(confirm.id ?? '')}>{linked ? 'Unlink' : 'Delete'}</button>
+      </div>
+    </>
+  );
+}
+
 function RotateKeyConfirm(): ReactNode {
   if (state.confirm?.kind !== 'rotate-key') return null;
   const subject = state.broker.mode === 'local' ? 'this computer’s' : 'the broker’s';
@@ -3977,6 +3991,14 @@ function ConfirmSheet(): ReactNode {
       <Sheet titleId="del-onepassword-title" className="wide confirm-sheet"
         backdropAction="confirm-cancel">
         <DeleteOnePasswordConfirm />
+      </Sheet>
+    );
+  }
+  if (kind === 'del-secret') {
+    return (
+      <Sheet titleId="del-secret-title" className="wide confirm-sheet"
+        backdropAction="confirm-cancel">
+        <DeleteSecretConfirm />
       </Sheet>
     );
   }
