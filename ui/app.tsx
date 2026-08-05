@@ -3473,10 +3473,11 @@ function SecretsView(): ReactNode {
     : category === 'passwords' ? 'No passwords yet.'
     : category === 'secrets' ? 'No secrets yet.'
     : 'No saved credentials yet.';
-  // Passwords lead the page unlabelled — they are the page. The secrets
-  // group gets one page-register header; the tray keeps its flat list.
+  // Both typed groups carry a page-register header; the tray keeps its
+  // flat list.
   const listBody = grouped
     ? <>
+        <h2 className="creds-sec-h">Passwords</h2>
         {passwords.length
           ? rowCard(passwords)
           : <div className="cred-rows"><div className="muted-note">

@@ -1852,11 +1852,14 @@
 .cred-tile-count { color: var(--muted); font-size: 0.84375rem; font-weight: 700; }
 .cred-tile.on .cred-tile-label, .cred-tile.on .cred-tile-count { color: #fff; }
 
-/* Both credential groups stay visible even when one is empty: passwords
-   lead the page unlabelled, and the secrets card sits under one header in
-   the page register (same type as the "Credentials" head above). */
+/* Both credential groups stay visible even when one is empty, each under
+   a header in the page register (same type as the "Credentials" head
+   above). */
 .credential-group { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
 .creds-sec-h { margin: 14px 2px 4px; font-size: 1.0625rem; }
+/* The leading header borrows the category tiles' own 8px bottom margin,
+   so its breathing room matches the 14px between later sections. */
+.cred-tiles + .creds-sec-h { margin-top: 6px; }
 /* The tray's quiet add link under its list. */
 .credential-group-add {
   margin-left: auto; padding: 1px 2px; border: 0; background: transparent;

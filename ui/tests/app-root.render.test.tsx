@@ -143,10 +143,9 @@ test('the credential library always groups passwords apart from secrets', async 
     const cards = document.querySelectorAll('.cred-rows');
     assert.equal(cards.length, 2, 'both typed groups are always visible');
   });
-  // Passwords lead the page unlabelled; only the secrets card is headed,
-  // in the same register as the page title.
+  // Both typed groups are headed, in the same register as the page title.
   const sectionHeads = [...document.querySelectorAll<HTMLElement>('.creds-sec-h')];
-  assert.deepEqual(sectionHeads.map((head) => head.textContent), ['Secrets']);
+  assert.deepEqual(sectionHeads.map((head) => head.textContent), ['Passwords', 'Secrets']);
   assert.equal(document.querySelector('.secrets-group-h'), null);
   assert.equal(document.querySelector('.credential-group-add'), null,
     'the per-group add links are gone from the desktop listing');
