@@ -2051,6 +2051,13 @@ label.show-value-check {
 .credential-advanced { margin-top: 1px; }
 .label-note { margin-left: 4px; color: var(--muted-2); font-weight: 400; }
 .field-hint { margin-top: 4px; color: var(--muted); font-size: 0.71875rem; line-height: 1.45; }
+/* The QR-image picker under the 2FA input: a hidden real <input type=file>
+   supplies the native chooser; the styled button forwards its click. Its
+   own block keeps it off the remove-checkbox's line. */
+.totp-qr-row { margin-top: 7px; }
+.totp-qr-input { display: none; }
+.totp-qr-btn { display: inline-flex; align-items: center; gap: 6px; }
+.totp-qr-btn svg { color: var(--muted); }
 label.totp-remove-check {
   display: inline-flex; align-items: center; gap: 7px; margin-top: 7px;
   color: var(--muted); font-size: 0.78125rem; font-weight: 400; cursor: pointer;

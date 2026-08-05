@@ -85,6 +85,7 @@ import { anchorEndpointExpiries } from '/src/endpoint-expiry';
 import { APP_VERSION } from '/src/version';
 import { virtualListWindow } from '/src/virtual-list';
 import { placeAnchoredMenu } from '/src/menu-position';
+import { decodeQrImage } from '/src/qr-image';
 import type {
   ActivityEntry,
   ActivityPage,
@@ -5532,15 +5533,39 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
                       value={d.totp ?? ''}
                       onChange={(e) => {
                         state.draft.removeTotp = false;
+                        state.draft.totpFromQrImage = false;
                         setDraftField('totp', 'totp', e.currentTarget.value);
                       }} />
                     <FieldError k="totp" />
+                    {d.totpFromQrImage
+                      ? <div className="field-hint">Scanned from the QR code image</div>
+                      : null}
+                    <div className="totp-qr-row">
+                      {/* The picker input stays in the tree (not created on
+                          demand) so WebKit accepts the button's forwarded
+                          click as a user gesture. */}
+                      <input id="f-totp-qr" className="totp-qr-input" type="file"
+                        accept="image/*" tabIndex={-1} aria-hidden="true"
+                        onChange={(e) => {
+                          const file = e.currentTarget.files?.[0];
+                          e.currentTarget.value = '';
+                          if (file) void fillTotpFromQrImage(file);
+                        }} />
+                      <button type="button" className="btn sm totp-qr-btn"
+                        data-act="totp-qr-image">
+                        <Icon markup={ICONS.qrCode} />
+                        <span>Choose QR Code Image…</span>
+                      </button>
+                    </div>
                     {secret?.totp
                       ? <label className="totp-remove-check">
                           <input type="checkbox" checked={Boolean(d.removeTotp)}
                             onChange={(e) => {
                               state.draft.removeTotp = e.currentTarget.checked;
-                              if (e.currentTarget.checked) state.draft.totp = '';
+                              if (e.currentTarget.checked) {
+                                state.draft.totp = '';
+                                state.draft.totpFromQrImage = false;
+                              }
                               delete state.sheetErrors.totp;
                               render();
                             }} />
@@ -7049,6 +7074,33 @@ function fillGeneratedPassword(format: PasswordGenerationFormat): void {
   render();
 }
 
+/** Fill the 2FA field from a chosen QR-code image. The decoded text lands
+ * in the draft exactly as if it were pasted — the broker still parses and
+ * validates it on save, so a QR code that isn't a 2FA seed fails there
+ * with the same messages a bad paste would. */
+async function fillTotpFromQrImage(file: File): Promise<void> {
+  const sheet = state.sheet;
+  let decoded: string | null = null;
+  let failure: string | null = null;
+  try {
+    decoded = await decodeQrImage(file);
+    if (!decoded) failure = 'No QR code found in that image';
+  } catch {
+    failure = 'That image could not be read';
+  }
+  if (state.sheet !== sheet) return;
+  if (failure !== null) {
+    state.draft.totpFromQrImage = false;
+    state.sheetErrors = { ...state.sheetErrors, totp: failure };
+  } else {
+    state.draft.totp = decoded ?? '';
+    state.draft.totpFromQrImage = true;
+    state.draft.removeTotp = false;
+    delete state.sheetErrors.totp;
+  }
+  render();
+}
+
 
 /* --------------------------------- actions ------------------------------- */
 function errorMessage(error: unknown): string {
@@ -8547,6 +8599,9 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     }
     case 'generate-password':
       fillGeneratedPassword(state.draft.passwordGenerationFormat ?? 'strong');
+      break;
+    case 'totp-qr-image':
+      document.getElementById('f-totp-qr')?.click();
       break;
     case 'copy-totp': {
       const epoch = brokerEpoch;

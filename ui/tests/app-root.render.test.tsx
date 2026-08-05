@@ -288,9 +288,24 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   testingLibrary.fireEvent.click(
     testingLibrary.getByRole(dialog, 'button', { name: 'Advanced' }),
   );
+  testingLibrary.getByRole(dialog, 'button', { name: 'Choose QR Code Image…' });
+  const qrInput = dialog.querySelector<HTMLInputElement>('#f-totp-qr')!;
+  assert.equal(qrInput.getAttribute('accept'), 'image/*');
+  // jsdom decodes no images, so any chosen file takes the unreadable path;
+  // that still proves the picker wires through to the field's error slot.
+  testingLibrary.fireEvent.change(qrInput, {
+    target: {
+      files: [new dom.window.File(['not an image'], 'qr.png', { type: 'image/png' })],
+    },
+  });
+  await testingLibrary.findByText(dialog, 'That image could not be read');
   testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#f-totp')!, {
     target: { value: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ' },
   });
+  assert.equal(
+    testingLibrary.queryByText(dialog, 'That image could not be read'), null,
+    'hand-editing the 2FA field clears the scan error',
+  );
   testingLibrary.fireEvent.click(
     dialog.querySelector<HTMLButtonElement>('button[data-act="save-secret"]')!,
   );
@@ -326,6 +341,7 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   testingLibrary.fireEvent.click(
     testingLibrary.getByRole(editDialog, 'button', { name: 'Advanced' }),
   );
+  testingLibrary.getByRole(editDialog, 'button', { name: 'Choose QR Code Image…' });
   const removeTotp = editDialog.querySelector<HTMLInputElement>('.totp-remove-check input');
   assert.ok(removeTotp, 'stored 2FA factors use the remove checkbox');
   assert.equal(removeTotp.checked, false);

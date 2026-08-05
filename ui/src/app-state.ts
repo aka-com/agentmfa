@@ -106,6 +106,9 @@ export interface ConnectionDraft {
   username?: string;
   /** Raw 2FA seed input (write-only, like value). */
   totp?: string;
+  /** Whether the masked 2FA input was filled by decoding a QR-code image
+   * (the input stays masked, so this backs the only visible confirmation). */
+  totpFromQrImage?: boolean;
   /** The edit sheet's explicit "remove 2FA" choice. */
   removeTotp?: boolean;
   importWarnings?: string[];
