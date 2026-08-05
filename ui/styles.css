@@ -2856,28 +2856,57 @@ label.totp-remove-check {
 .lock-takeover{
   position: fixed; inset: 0; z-index: 40;
   display: flex; align-items: center; justify-content: center;
-  background: var(--surface);
+  /* The sidebar's tone (wash over surface), not the bare surface: the lock
+     reads as the app's chrome, a shade lighter than the content pane. */
+  background: linear-gradient(var(--wash), var(--wash)) var(--surface);
   -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px);
 }
   .dropdown-surface ~ .lock-takeover{ border-radius: var(--dropdown-radius); }
   .lock-card{
     display: flex; flex-direction: column; align-items: center;
-    gap: 8px; padding: 24px; max-width: 320px; text-align: center;
+    gap: 8px; padding: 24px; max-width: 340px; text-align: center;
   }
-  .lock-icon{ width: 72px; height: 72px; line-height: 0; margin-bottom: 4px; }
-  .lock-icon svg{ width: 100%; height: 100%; }
-  .lock-title{ font-size: 1.0625rem; font-weight: 700; color: var(--ink); }
-  .lock-sub{ font-size: 0.8125rem; color: var(--muted); line-height: 1.45; }
+  /* The app icon as a macOS icon tile (same gradient as the sidebar brand
+     mark), with the Touch ID control badged over its corner. */
+  .lock-icon-wrap{ position: relative; margin-bottom: 14px; }
+  .lock-icon{
+    width: 84px; height: 84px; border-radius: 19px; line-height: 0;
+    background: linear-gradient(160deg, #4a4a52, #26262c); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: var(--shadow-sm);
+  }
+  .lock-icon svg{ width: 42px; height: 42px; stroke-width: 1.7; }
   /* The hole the native LAAuthenticationView is parented over. Sized, not
      filled: the control is drawn by AppKit on top of this box, so anything
-     rendered inside would peek out around it. */
-  .lock-sensor-slot{ width: 64px; height: 64px; margin: 6px 0 2px; }
-  .lock-unlock{ margin-top: 6px; min-width: 148px; }
+     rendered inside would peek out around it. Anchored to the icon's
+     bottom-right so the sensor overlaps the tile like a badge. */
+  .lock-sensor-slot{
+    position: absolute; right: -24px; bottom: -14px;
+    width: 56px; height: 56px;
+  }
+  .lock-title{ font-size: 1.25rem; font-weight: 700; color: var(--ink); }
+  .lock-sub{ font-size: 0.8125rem; color: var(--muted); line-height: 1.5; }
+  .lock-unlock{ margin-top: 10px; min-width: 148px; }
+  /* The embedded path's password fallback, drawn as the focused field on the
+     system lock screens. It is still a button (the password UI itself is the
+     system sheet), so the ring is on :focus — it holds autofocus while the
+     card is up and the ring marks Return's target. */
+  .lock-unlock.lock-pw-btn{
+    min-width: 220px; padding: 7px 12px; border-radius: 9px;
+    background: var(--field-bg); border-color: var(--line-field);
+    color: var(--muted); font-size: 0.8125rem; font-weight: 400;
+    box-shadow: none;
+  }
+  .lock-unlock.lock-pw-btn:hover{ background: var(--field-bg); }
+  .lock-unlock.lock-pw-btn:focus{
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-wash-2);
+  }
   .lock-error{ font-size: 0.75rem; color: var(--danger-ink); }
   /* The scope disclaimer is deliberately on the lock screen itself: this gate
      covers the windows, not the broker, and the moment to say so is while
      someone is looking at a screen that says "Locked". */
   .lock-note{
-    margin-top: 10px; font-size: 0.6875rem; color: var(--muted-2);
-    line-height: 1.4; border-top: 1px solid var(--line-soft); padding-top: 10px;
+    margin-top: 14px; font-size: 0.6875rem; color: var(--muted-2);
+    line-height: 1.4;
   }

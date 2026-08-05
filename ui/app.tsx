@@ -4605,22 +4605,26 @@ function LockOverlay(): ReactNode {
     <div className="lock-takeover" role="dialog" aria-modal="true"
       aria-label="Multitool is locked">
       <div className="lock-card">
-        <div className="lock-icon"><Icon markup={ICONS.appIcon} /></div>
+        <div className="lock-icon-wrap">
+          <div className="lock-icon"><Icon markup={ICONS.appIcon} /></div>
+          {embedded
+            // Deliberately empty: the native control is drawn over this box,
+            // and anything rendered inside it would show through around the
+            // edges if the two ever disagreed about size. It sits over the
+            // icon's corner, the way the system lock screens badge Touch ID
+            // onto the app icon.
+            ? <div ref={slotRef} className="lock-sensor-slot" aria-hidden="true" />
+            : null}
+        </div>
         <h2 className="lock-title">Multitool Is Locked</h2>
         <p className="lock-sub">{prompt}</p>
-        {embedded
-          // Deliberately empty: the native control is drawn over this box, and
-          // anything rendered inside it would show through around the edges if
-          // the two ever disagreed about size.
-          ? <div ref={slotRef} className="lock-sensor-slot" aria-hidden="true" />
-          : null}
         {lock.embeddedError
           ? <p className="lock-error" role="alert">
               {lock.embeddedError}{' '}
               <button className="cd-live-link" data-act="retry-embedded-unlock">Try again</button>
             </p>
           : null}
-        <button ref={inputRef} className={`btn lock-unlock ${embedded ? '' : 'primary'}`}
+        <button ref={inputRef} className={`btn lock-unlock ${embedded ? 'lock-pw-btn' : 'primary'}`}
           data-act="unlock-app" disabled={state.unlocking}>
           {state.unlocking ? 'Waiting for authentication…'
             : embedded ? 'Enter password…' : 'Unlock'}
