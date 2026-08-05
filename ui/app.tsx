@@ -921,12 +921,12 @@ function LiveSessions({ extraClass = '' }: { extraClass?: string }): ReactNode {
   );
 }
 
-function GlobalSections({ embeddedInStart = false }: { embeddedInStart?: boolean }): ReactNode {
+/** The waiting-requests banner: a compact route to the Request Inbox from
+ * every other screen. The desktop master–detail pages seat it atop their
+ * list column; other surfaces wrap it in the page band (GlobalSections). */
+function RequestsBanner(): ReactNode {
   const requestCount = activeRequestCount(state.approvals, state.elicitations);
-  const showRequests = requestCount > 0 && state.tab !== 'inbox';
-  if (!showRequests) return null;
-  const requests = activeRequests(state.approvals, state.elicitations);
-  const next = requests[0];
+  if (!requestCount || state.tab === 'inbox') return null;
   const label = requestCount === 1 ? '1 request needs attention'
     : `${requestCount} requests need attention`;
   const kinds = [
@@ -934,21 +934,30 @@ function GlobalSections({ embeddedInStart = false }: { embeddedInStart?: boolean
       ? `${state.approvals.length} approval${state.approvals.length === 1 ? '' : 's'}`
       : '',
     state.elicitations.length
-      ? `${state.elicitations.length} input request${state.elicitations.length === 1 ? '' : 's'}`
+      ? `${state.elicitations.length} question${state.elicitations.length === 1 ? '' : 's'}`
       : '',
-  ].filter(Boolean).join(' · ');
+  ].filter(Boolean).join(', ');
+  return (
+    <button className="request-banner" data-act="open-inbox"
+      aria-label={`${label}. Open the Request Inbox.`}>
+      <span className="request-banner-ico">
+        <Icon markup={state.approvals.length ? ICONS.shieldAlert : ICONS.bell} />
+      </span>
+      <span className="request-banner-copy"><b>{label}</b>
+        <span>{kinds} waiting for you</span></span>
+      <span className="request-banner-cta">Open Inbox</span>
+    </button>
+  );
+}
+
+function GlobalSections({ embeddedInStart = false }: { embeddedInStart?: boolean }): ReactNode {
+  const requestCount = activeRequestCount(state.approvals, state.elicitations);
+  const showRequests = requestCount > 0 && state.tab !== 'inbox';
+  if (!showRequests) return null;
   return (
     <div className={`dd-global ${embeddedInStart ? 'start-global' : ''}${
       !embeddedInStart && state.tab === 'secrets' ? ' is-wide' : ''} request-route-only`}>
-      <button className="request-banner" data-act="open-inbox"
-        aria-label={`${label}. Open the Request Inbox.`}>
-        <span className="request-banner-ico">
-          <Icon markup={state.approvals.length ? ICONS.shieldAlert : ICONS.bell} />
-        </span>
-        <span className="request-banner-copy"><b>{label}</b>
-          <span>{kinds} · next expires {timeLeft(next.expiresAt)}</span></span>
-        <span className="request-banner-cta">Open Inbox</span>
-      </button>
+      <RequestsBanner />
     </div>
   );
 }
@@ -3284,6 +3293,9 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
     <div className={`catalog ${state.connDetailOpen ? 'detail-open' : ''}`}>
       <div className="tools-split">
         <div className="tools-list">
+          {/* The tray keeps the banner in its page band above the tabs'
+              content; the desktop split seats it atop this column. */}
+          {mode !== 'dropdown' ? <RequestsBanner /> : null}
           {mode !== 'dropdown' ? <SamplesCard /> : null}
           {state.connections.length
             ? <div className="cat-section">
@@ -3514,6 +3526,7 @@ function SecretsView(): ReactNode {
             render();
             focusField(`cred-row-${next.id}`);
           }}>
+          <RequestsBanner />
           {typed ? <CredentialCategoryTiles /> : null}
           {listBody}
         </div>
@@ -4411,7 +4424,9 @@ function MainWindow(): ReactNode {
                       {pageAction}
                     </div>
                   )}
-                  {state.tab === 'start' ? null : <GlobalSections />}
+                  {/* The split pages seat the requests banner inside their
+                      list column instead of the page band. */}
+                  {state.tab === 'start' || splitHead ? null : <GlobalSections />}
                   <LoadFailureBand />
                   <div className="content"><TabContent /></div>
                   {state.tab === 'secrets' ? <SecretsStatusBar /> : null}

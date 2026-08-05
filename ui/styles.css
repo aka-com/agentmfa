@@ -521,6 +521,10 @@
   /* A compact route to the dedicated Inbox from every other screen. */
   .request-banner{
   width: 100%; display: flex; align-items: center; gap: 10px; margin: 8px 0;
+}
+  /* Seated in a list column, the column's own gap carries the spacing. */
+  .tools-list > .request-banner, .creds-list-col > .request-banner{
+  margin: 0;
   padding: 9px 11px; border: 1px solid var(--amber-border); border-radius: 9px;
   background: var(--amber-wash); color: var(--ink); text-align: left;
   font: inherit; cursor: pointer;
