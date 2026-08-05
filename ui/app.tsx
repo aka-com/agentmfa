@@ -257,6 +257,7 @@ function clearBrokerOwnedState(): void {
   state.secretDetailOpen = false;
   state.totpVisible = null;
   state.dropdownSecretOpen = null;
+  state.detailEdit = null;
   state.connectionReady = null;
   state.connTests = {};
   state.draftTest = null;
@@ -1431,22 +1432,89 @@ function CredentialRow({ secret, selected }: {
  * shape. Values stay write-only; the mask copies, and a reveal (asked for
  * by name through the right-click menu, confirmed there) lands on its own
  * full-width line under the mask. */
+/** An inspector identity field (user name or website) that edits in place:
+ * type, then Enter or focus-out commits through the broker; Escape drops
+ * the change. */
+function DetailIdentityInput({ secret, field }: {
+  secret: SecretSummary;
+  field: 'username' | 'site';
+}): ReactNode {
+  const edit = state.detailEdit;
+  const editing = edit?.id === secret.id && edit.field === field;
+  const stored = (field === 'site' ? secret.site : secret.username) ?? '';
+  return (
+    <input className="cdet-edit" value={editing ? edit.value : stored}
+      placeholder={field === 'site' ? 'example.com' : 'No username'}
+      autoComplete="off" spellCheck={false} dir={field === 'username' ? 'auto' : undefined}
+      aria-label={`${field === 'site' ? 'Website' : 'User name'} for ${credentialDisplayName(secret)}`}
+      onChange={(e) => {
+        state.detailEdit = { id: secret.id, field, value: e.currentTarget.value };
+        render();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        else if (e.key === 'Escape') { state.detailEdit = null; render(); }
+      }}
+      onBlur={() => { void commitDetailEdit(); }} />
+  );
+}
+
+/** Commit the inspector's pending in-place identity edit, if any. */
+async function commitDetailEdit(): Promise<void> {
+  const edit = state.detailEdit;
+  if (!edit) return;
+  state.detailEdit = null;
+  const secret = state.secrets.find((candidate) => candidate.id === edit.id);
+  if (!secret) { render(); return; }
+  const next = edit.value.trim();
+  const current = (edit.field === 'site' ? secret.site : secret.username) ?? '';
+  if (next === current) { render(); return; }
+  if (edit.field === 'site' && !next) {
+    toast('⚠ A password needs its website');
+    render();
+    return;
+  }
+  const epoch = brokerEpoch;
+  try {
+    await invoke('edit_secret', edit.field === 'site'
+      ? { id: secret.id, newSite: next }
+      // An empty string clears the username (the broker's remove marker).
+      : { id: secret.id, newUsername: next });
+  } catch (error) {
+    if (brokerEpochIsCurrent(epoch)) toast('⚠ ' + errorMessage(error));
+    render();
+    return;
+  }
+  if (!brokerEpochIsCurrent(epoch)) return;
+  toast(edit.field === 'site' ? '✏️ Website updated' : '✏️ Username updated');
+  await refresh('secrets');
+}
+
 function CredentialDetail({ secret }: { secret: SecretSummary }): ReactNode {
   const password = secret.kind === 'password';
   const displayName = credentialDisplayName(secret);
   const noun = credentialNoun(secret);
   const revealed = state.reveal[secret.id];
   const linked = secret.source?.kind === 'one_password' ? secret.source : null;
+  // Passwords edit in place, Passwords-style: identity fields commit on
+  // blur, the value and 2FA factor change through focused sheets, and
+  // Delete sits red in its own bottom group. Secrets (and linked fields)
+  // keep the toolbar and the full edit sheet.
+  const editInPlace = password && !linked;
   return (
     <div className="cdet" data-secret-row={secret.id}>
-      <div className="cdet-toolbar">
+      <div className={`cdet-toolbar ${editInPlace ? 'is-quiet' : ''}`}>
         <button className="btn sm cdet-back" data-act="close-cred-detail">
           <Icon markup={ICONS.chevronLeft} /> Back
         </button>
-        <button className="btn sm" data-act="edit-secret" data-id={secret.id}
-          aria-label={`Edit ${noun} ${displayName}`}>Edit</button>
-        <button className="btn sm" data-act="del-secret-ask" data-id={secret.id}
-          aria-label={`Delete ${noun} ${displayName}`}>Delete</button>
+        {editInPlace
+          ? null
+          : <>
+              <button className="btn sm" data-act="edit-secret" data-id={secret.id}
+                aria-label={`Edit ${noun} ${displayName}`}>Edit</button>
+              <button className="btn sm" data-act="del-secret-ask" data-id={secret.id}
+                aria-label={`Delete ${noun} ${displayName}`}>Delete</button>
+            </>}
       </div>
       <div className="cdet-hero">
         <span className="cdet-mono" aria-hidden="true">{credentialInitial(secret)}</span>
@@ -1455,19 +1523,56 @@ function CredentialDetail({ secret }: { secret: SecretSummary }): ReactNode {
       <div className="cdet-card">
         {password
           ? <div className="cdet-row"><span className="cdet-lbl">User name</span>
-              <span className="cdet-val"><UsernameCopy secret={secret} /></span></div>
+              <span className="cdet-val">{editInPlace
+                ? <span className="val-wrap cdet-edit-wrap">
+                    <DetailIdentityInput secret={secret} field="username" />
+                    {!secret.username ? null
+                      : state.copied === `user:${secret.id}`
+                      ? <span className="copied-badge"><Icon markup={ICONS.check} /><span>Copied</span></span>
+                      : <button className="ghost-copy" title="Copy user name" data-act="copy-user"
+                          data-id={secret.id} data-text={secret.username}>
+                          <Icon markup={ICONS.copy} /><span>Copy</span>
+                        </button>}
+                  </span>
+                : <UsernameCopy secret={secret} />}</span></div>
           : null}
         <div className="cdet-row"><span className="cdet-lbl">{password ? 'Password' : 'Value'}</span>
           <span className="cdet-val"><MaskedValueCopy secret={secret} /></span></div>
         {revealed === undefined
           ? null
           : <div className="cdet-reveal"><code className="sec-reveal-value">{revealed}</code></div>}
+        {editInPlace
+          ? <div className="cdet-card-actions">
+              <button className="btn sm" data-act="change-password" data-id={secret.id}
+                aria-label={`Change password for ${displayName}`}>Change Password…</button>
+            </div>
+          : null}
       </div>
-      {secret.totp
+      {editInPlace
+        ? <div className="cdet-card">
+            <div className="cdet-row">
+              <span className="cdet-lbl">Verification code</span>
+              {/* Codes are issued (and audited) on request, not by browsing:
+                  the live code mounts only after Show code asks for it. */}
+              <span className="cdet-val">{!secret.totp
+                ? <span className="cdet-muted">None</span>
+                : state.totpVisible === secret.id
+                ? <LiveTotpCode id={secret.id} site={displayName} />
+                : <button className="btn sm" data-act="show-totp" data-id={secret.id}
+                    aria-label={`Show the current 2FA code for ${displayName}`}>
+                    Show code
+                  </button>}</span>
+            </div>
+            <div className="cdet-card-actions">
+              <button className="btn sm" data-act="setup-code" data-id={secret.id}
+                aria-label={`${secret.totp ? 'Change' : 'Set up'} the 2FA code for ${displayName}`}>
+                {secret.totp ? 'Change Code…' : 'Set Up Code…'}
+              </button>
+            </div>
+          </div>
+        : secret.totp
         ? <div className="cdet-card"><div className="cdet-row">
             <span className="cdet-lbl">Verification code</span>
-            {/* Codes are issued (and audited) on request, not by browsing:
-                the live code mounts only after Show code asks for it. */}
             <span className="cdet-val">{state.totpVisible === secret.id
               ? <LiveTotpCode id={secret.id} site={displayName} />
               : <button className="btn sm" data-act="show-totp" data-id={secret.id}
@@ -1477,9 +1582,11 @@ function CredentialDetail({ secret }: { secret: SecretSummary }): ReactNode {
           </div></div>
         : null}
       <div className="cdet-card">
-        {password && secret.site
+        {password && (secret.site || editInPlace)
           ? <div className="cdet-row"><span className="cdet-lbl">Website</span>
-              <span className="cdet-val">{secret.site}</span></div>
+              <span className="cdet-val">{editInPlace
+                ? <DetailIdentityInput secret={secret} field="site" />
+                : secret.site}</span></div>
           : null}
         <div className="cdet-row"><span className="cdet-lbl">Used by</span>
           <span className="cdet-val"><UsedByLinks secret={secret} /></span></div>
@@ -1493,6 +1600,12 @@ function CredentialDetail({ secret }: { secret: SecretSummary }): ReactNode {
               <Icon markup={ICONS.onepassword} /></span>
             <span className="cdet-source-tx"><b>Stored in 1Password</b>
               <small>{linked.integration_label} › {linked.vault_label} › {linked.item_label} › {linked.field_label}</small></span>
+          </div></div>
+        : null}
+      {editInPlace
+        ? <div className="cdet-card"><div className="cdet-card-actions is-lone">
+            <button className="btn sm destructive" data-act="del-secret-ask" data-id={secret.id}
+              aria-label={`Delete ${noun} ${displayName}`}>Delete Password…</button>
           </div></div>
         : null}
     </div>
@@ -5483,8 +5596,13 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
     : null;
   const linked = secret?.source?.kind === 'one_password' ? secret.source : null;
   const password = sheetSecretKind(editing, secret) === 'password';
+  // The password inspector's per-field flows reuse this sheet narrowed to
+  // the one row they change; everything else about editing is identical.
+  const focus = editing && password ? state.sheet?.focus : undefined;
   const storedSite = password ? normalizedSitePreview(d.site ?? '') : null;
   const title = linked ? 'Edit linked credential'
+    : focus === 'value' ? 'Change password'
+    : focus === 'totp' ? (secret?.totp ? 'Change 2FA code' : 'Set up 2FA code')
     : editing ? (password ? 'Edit password' : 'Edit secret')
     : supportsTypedCredentials(state.broker) ? 'Add credential' : 'Add secret';
   const showValue = Boolean(d.showCredentialValue);
@@ -5542,27 +5660,29 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
         : null}
       {password
         ? <div className="sf-group">
-            <div className="sf-row">
-              <div className="sf-line">
-                <label className="sf-lbl" htmlFor="f-site">Website</label>
-                <input id="f-site" className={fieldCls('site')} placeholder="e.g. github.com"
-                  autoComplete="off" spellCheck={false}
-                  value={d.site ?? ''}
-                  onChange={(e) => setDraftField('site', 'site', e.currentTarget.value)} />
+            {focus ? null : <>
+              <div className="sf-row">
+                <div className="sf-line">
+                  <label className="sf-lbl" htmlFor="f-site">Website</label>
+                  <input id="f-site" className={fieldCls('site')} placeholder="e.g. github.com"
+                    autoComplete="off" spellCheck={false}
+                    value={d.site ?? ''}
+                    onChange={(e) => setDraftField('site', 'site', e.currentTarget.value)} />
+                </div>
+                <FieldError k="site" />
+                {storedSite ? <div className="field-hint">Stored as {storedSite}</div> : null}
               </div>
-              <FieldError k="site" />
-              {storedSite ? <div className="field-hint">Stored as {storedSite}</div> : null}
-            </div>
-            <div className="sf-row">
-              <div className="sf-line">
-                <label className="sf-lbl" htmlFor="f-username">Username</label>
-                <input id="f-username" placeholder="you@example.com"
-                  autoComplete="off" spellCheck={false} dir="auto"
-                  value={d.username ?? ''}
-                  onChange={(e) => setDraftField('username', 'username', e.currentTarget.value)} />
+              <div className="sf-row">
+                <div className="sf-line">
+                  <label className="sf-lbl" htmlFor="f-username">Username</label>
+                  <input id="f-username" placeholder="you@example.com"
+                    autoComplete="off" spellCheck={false} dir="auto"
+                    value={d.username ?? ''}
+                    onChange={(e) => setDraftField('username', 'username', e.currentTarget.value)} />
+                </div>
               </div>
-            </div>
-            <div className="sf-row">
+            </>}
+            {focus === 'totp' ? null : <div className="sf-row">
               <div className="sf-line">
                 <label className="sf-lbl" htmlFor="f-value">{editing ? 'New password' : 'Password'}</label>
                 {valueField('Password', editing ? EDIT_SECRET_MASK : 'Saved in Keychain')}
@@ -5602,10 +5722,10 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
                 </div>
               </div>
               <FieldError k="value" />
-            </div>
+            </div>}
             {/* 2FA is a first-class row (Passwords' "Code" section), no longer
                 folded behind an Advanced disclosure. */}
-            <div className="sf-row">
+            {focus === 'value' ? null : <div className="sf-row">
               <div className="sf-line">
                 <label className="sf-lbl" htmlFor="f-totp">Code</label>
                 <input id="f-totp" className={fieldCls('totp')} type="password"
@@ -5657,7 +5777,7 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
                     <span>Remove 2FA secret</span>
                   </label>
                 : null}
-            </div>
+            </div>}
           </div>
         : <>
             <div className="sf-group">
@@ -7534,6 +7654,14 @@ async function saveSecret(): Promise<void> {
   const errs = password
     ? validatePasswordForm({ adding, site, value, valueModified })
     : validateSecretForm({ adding, name, value, valueModified });
+  // The focused variants exist to change exactly one field; saving them
+  // untouched is a missing input, not a no-op update.
+  if (!adding && sheet.focus === 'value' && !(valueModified && value)) {
+    errs.value = 'Enter a new password';
+  }
+  if (!adding && sheet.focus === 'totp' && !totp && !state.draft.removeTotp) {
+    errs.totp = 'Paste a Base32 2FA secret or otpauth:// URI';
+  }
   if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
   if (adding) {
     try {
@@ -8660,11 +8788,17 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.confirm = { kind: 'del-conn', id };
       render();
       break;
-    case 'edit-secret': {
+    case 'edit-secret':
+    case 'change-password':
+    case 'setup-code': {
       if (!await holdDropdownFormOpen()) break;
       state.secretMenuOpen = null;
       state.secretMenuPoint = null;
-      setSheet({ kind: 'edit-secret', id });
+      // The inspector's per-field flows are the same edit sheet narrowed to
+      // the one row they change.
+      const focus = act === 'change-password' ? 'value' as const
+        : act === 'setup-code' ? 'totp' as const : undefined;
+      setSheet({ kind: 'edit-secret', id, focus });
       // Controlled fields read the draft, so seed the public identity fields
       // only. The credential value and 2FA seed remain write-only; the value
       // input renders its mask as a placeholder until a confirmed reveal.
@@ -8678,8 +8812,9 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       };
       state.sheetErrors = {};
       render();
-      if (secret?.kind === 'password') focusField('f-site');
-      else focusField('f-value');
+      if (focus === 'totp') focusField('f-totp');
+      else if (focus === 'value' || secret?.kind !== 'password') focusField('f-value');
+      else focusField('f-site');
       break;
     }
     case 'open-add-secret': {

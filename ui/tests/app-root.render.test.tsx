@@ -183,7 +183,9 @@ test('the credential library always groups passwords apart from secrets', async 
     return button;
   });
   assert.equal(liveTotp.getAttribute('aria-label'), 'Copy the current 2FA code for x.com');
-  assert.ok(testingLibrary.getByRole(xDetail, 'button', { name: 'Edit password x.com' }));
+  // Passwords edit in place: per-field flows instead of a toolbar Edit.
+  assert.ok(testingLibrary.getByRole(xDetail, 'button', { name: 'Change password for x.com' }));
+  assert.ok(testingLibrary.getByRole(xDetail, 'button', { name: 'Change the 2FA code for x.com' }));
   const deletePassword = testingLibrary.getByRole(xDetail, 'button', {
     name: 'Delete password x.com',
   });
@@ -384,10 +386,10 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   assert.match(document.querySelector('.sb-count')?.textContent ?? '', /10 credentials/);
 
   testingLibrary.fireEvent.click(
-    newDetail.querySelector<HTMLButtonElement>('button[data-act="edit-secret"]')!,
+    newDetail.querySelector<HTMLButtonElement>('button[data-act="setup-code"]')!,
   );
   const editDialog = await testingLibrary.findByRole(document.body, 'dialog', {
-    name: 'Edit password',
+    name: 'Change 2FA code',
   });
   testingLibrary.getByRole(editDialog, 'button', { name: 'Choose QR Code Image…' });
   const removeTotp = editDialog.querySelector<HTMLInputElement>('.totp-remove-check input');
@@ -430,10 +432,10 @@ test('credential value visibility is direct on add and confirmed on edit', async
 
   const xDetail = await openCredentialDetail('x.com');
   testingLibrary.fireEvent.click(
-    testingLibrary.getByRole(xDetail, 'button', { name: 'Edit password x.com' }),
+    testingLibrary.getByRole(xDetail, 'button', { name: 'Change password for x.com' }),
   );
   let editDialog = await testingLibrary.findByRole(document.body, 'dialog', {
-    name: 'Edit password',
+    name: 'Change password',
   });
   let editValue = editDialog.querySelector<HTMLInputElement>('#f-value')!;
   let editShow = testingLibrary.getByRole<HTMLInputElement>(editDialog, 'checkbox', { name: 'Show password' });
@@ -448,7 +450,7 @@ test('credential value visibility is direct on add and confirmed on edit', async
     testingLibrary.getByRole(passwordConfirm, 'button', { name: 'Show password' }),
   );
   await testingLibrary.waitFor(() => {
-    editDialog = testingLibrary.getByRole(document.body, 'dialog', { name: 'Edit password' });
+    editDialog = testingLibrary.getByRole(document.body, 'dialog', { name: 'Change password' });
     editValue = editDialog.querySelector<HTMLInputElement>('#f-value')!;
     editShow = testingLibrary.getByRole<HTMLInputElement>(editDialog, 'checkbox', { name: 'Show password' });
     assert.equal(editValue.value, 'demo-pw-x');

@@ -48,6 +48,10 @@ export interface SheetState {
     | 'clear-activity' | 'elicitation' | 'approval' | 'mcp-auth' | 'wiring-tools'
     | 'endpoint-issued' | 'onepassword';
   id?: string;
+  /** A focused edit-secret variant: the password detail pane's Change
+   * Password… and Set Up Code… flows open the same sheet narrowed to that
+   * one field, Passwords-style. */
+  focus?: 'value' | 'totp';
   expectedUpdatedAt?: string;
   endpoint?: IssuedEndpoint;
 }
@@ -305,6 +309,10 @@ export interface AppState {
   totpVisible: string | null;
   /** Menu-bar tray: credential row expanded to its inline copy actions. */
   dropdownSecretOpen: string | null;
+  /** The desktop inspector's in-place identity edit (username or website):
+   * which credential and field, and the text as typed. Committed on blur or
+   * Enter, dropped on Escape. */
+  detailEdit: { id: string; field: 'username' | 'site'; value: string } | null;
   catalogActionMenuOpen: string | null;
   /** The Secrets status bar's vault popover is open. */
   vaultsPanelOpen: boolean;
@@ -450,6 +458,7 @@ function createInitialState(): AppState {
     secretDetailOpen: false,
     totpVisible: null,
     dropdownSecretOpen: null,
+    detailEdit: null,
     catalogActionMenuOpen: null,
     vaultsPanelOpen: false,
     vaultMenuOpen: null,

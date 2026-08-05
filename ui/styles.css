@@ -1907,7 +1907,29 @@
   border-style: dashed; background: transparent; box-shadow: none;
 }
 .cdet-toolbar { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 12px; }
+/* A password inspector edits in place, so its toolbar holds only the
+   narrow-layout Back affordance; drop the reserved space when that hides. */
+.cdet-toolbar.is-quiet { margin-bottom: 0; }
 .cdet-back { display: none; margin-right: auto; }
+/* Per-group actions (Change Password…, Set Up Code…, Delete) rule off from
+   the rows above them, like the reference app's edit surface. */
+.cdet-card-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 8px 12px; border-top: 1px solid var(--line-soft);
+}
+.cdet-card-actions.is-lone { border-top: 0; }
+.btn.destructive { color: var(--danger-ink); }
+/* In-place identity fields: borderless, right-aligned like their read-only
+   ancestors; the row tint on focus is the editing affordance. */
+.cdet-edit {
+  flex: 1; min-width: 0; padding: 0; border: 0; outline: none;
+  background: transparent; color: var(--ink-2); font: inherit;
+  font-size: 0.8125rem; text-align: right;
+}
+.cdet-edit::placeholder { color: var(--muted-2); }
+.cdet-row:focus-within { background: var(--hover); }
+.cdet-edit-wrap { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.cdet-edit-wrap .cdet-edit { flex: 1; }
 .cdet-hero { padding: 0 0 12px; text-align: center; }
 .cdet-mono {
   display: flex; align-items: center; justify-content: center;
