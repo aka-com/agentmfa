@@ -1932,18 +1932,24 @@
 .cred-detail-pane.is-empty {
   border-style: dashed; background: transparent; box-shadow: none;
 }
-/* The toolbar holds only the slide-over's Back button, so while the panes
-   sit side by side it leaves the flow entirely — no blank strip over the
-   hero (the narrow media query below shows it again). */
-.cdet-toolbar { display: none; margin-bottom: 12px; }
-.cdet-back { display: inline-flex; align-items: center; }
-/* Per-group actions (Change Password…, Set Up Code…, Delete) rule off from
-   the rows above them, like the reference app's edit surface. */
+/* The toolbar holds only the narrow-layout Back affordance, so it spends
+   no space while that hides in the wide split. */
+.cdet-toolbar { display: flex; justify-content: flex-end; gap: 8px; }
+.cdet-back { display: none; margin-right: auto; }
+/* Per-group actions (Change Password…, Set Up Code…, Edit, Delete) rule
+   off from the rows above them, like the reference app's edit surface.
+   They read as part of the card, not page-level chrome: a soft wash fill
+   instead of the raised button border and shadow. */
 .cdet-card-actions {
   display: flex; justify-content: flex-end; gap: 8px;
   padding: 8px 12px; border-top: 1px solid var(--line-soft);
 }
 .cdet-card-actions.is-lone { border-top: 0; }
+.cdet-card-actions .btn {
+  border: 0; box-shadow: none; background: var(--chip-bg);
+  color: var(--ink-2); font-weight: 500;
+}
+.cdet-card-actions .btn:hover { background: var(--hover-2); }
 .btn.destructive { color: var(--danger-ink); }
 /* In-place identity fields: borderless, right-aligned like their read-only
    ancestors; the row tint on focus is the editing affordance. */
@@ -2002,18 +2008,6 @@
 .cdet-source-tx { min-width: 0; }
 .cdet-source-tx b { display: block; font-size: 0.78125rem; }
 .cdet-source-tx small { color: var(--muted); font-size: 0.71875rem; overflow-wrap: anywhere; }
-/* Edit/Delete close the inspector, under the last detail card. They read
-   as quiet text controls rather than raised chrome — the cards above hold
-   the page's weight — and Delete shows its danger only on approach. */
-.cdet-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
-.cdet-actions .btn {
-  border-color: transparent; background: transparent; box-shadow: none;
-  color: var(--muted);
-}
-.cdet-actions .btn:hover { background: var(--hover); color: var(--ink-2); }
-.cdet-actions .btn[data-act="del-secret-ask"]:hover {
-  background: var(--danger-wash); color: var(--danger-ink);
-}
 
 .cred-detail-backdrop { display: none; }
 @media (max-width: 720px) {
@@ -2040,8 +2034,9 @@
   .dw-titlebar + .dw-body .cred-detail-col { top: var(--titlebar-h); }
   .dw-titlebar + .dw-body .creds.detail-open .cred-detail-backdrop { top: var(--titlebar-h); }
   /* The drawer's way back to the list, hidden while the panes sit side
-     by side. */
-  .cdet-toolbar { display: flex; }
+     by side. With Back visible the toolbar earns its spacing again. */
+  .cdet-back { display: inline-flex; }
+  .cdet-toolbar { margin-bottom: 10px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .creds.detail-open .cred-detail-col { animation: none; }

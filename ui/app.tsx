@@ -1504,7 +1504,7 @@ function CredentialDetail({ secret }: { secret: SecretSummary }): ReactNode {
   const editInPlace = password && !linked;
   return (
     <div className="cdet" data-secret-row={secret.id}>
-      <div className="cdet-toolbar is-quiet">
+      <div className="cdet-toolbar">
         <button className="btn sm cdet-back" data-act="close-cred-detail">
           <Icon markup={ICONS.chevronLeft} /> Back
         </button>
