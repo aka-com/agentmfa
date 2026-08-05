@@ -252,7 +252,7 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   const showPassword = testingLibrary.getByRole<HTMLInputElement>(dialog, 'checkbox', { name: 'Show password' });
   assert.equal(passwordInput.type, 'password');
   assert.equal(showPassword.checked, false);
-  assert.equal(dialog.querySelector('#f-totp'), null, '2FA stays folded under Advanced');
+  assert.ok(dialog.querySelector('#f-totp'), '2FA is a first-class Code row, no Advanced fold');
   assert.equal(dialog.textContent?.includes('the code it offers for manual entry'), false);
   testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#f-site')!, {
     target: { value: 'https://WWW.Example.com/login' },
@@ -285,9 +285,6 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   assert.match(passwordInput.value, /^[A-Za-z0-9]{20}$/);
   assert.equal(showPassword.checked, true);
 
-  testingLibrary.fireEvent.click(
-    testingLibrary.getByRole(dialog, 'button', { name: 'Advanced' }),
-  );
   testingLibrary.getByRole(dialog, 'button', { name: 'Choose QR Code Image…' });
   const qrInput = dialog.querySelector<HTMLInputElement>('#f-totp-qr')!;
   assert.equal(qrInput.getAttribute('accept'), 'image/*');
@@ -392,9 +389,6 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   const editDialog = await testingLibrary.findByRole(document.body, 'dialog', {
     name: 'Edit password',
   });
-  testingLibrary.fireEvent.click(
-    testingLibrary.getByRole(editDialog, 'button', { name: 'Advanced' }),
-  );
   testingLibrary.getByRole(editDialog, 'button', { name: 'Choose QR Code Image…' });
   const removeTotp = editDialog.querySelector<HTMLInputElement>('.totp-remove-check input');
   assert.ok(removeTotp, 'stored 2FA factors use the remove checkbox');

@@ -1989,14 +1989,28 @@
 
 /* The tray: the same monogram rows, expanding in place to copy actions. */
 .dd-creds { display: flex; flex-direction: column; gap: 6px; }
+.dd-cred-sec-h {
+  margin: 2px 2px -2px; color: var(--muted);
+  font-size: 0.65625rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+}
 .dd-cred-list {
   display: flex; flex-direction: column; padding: 4px;
   border: 1px solid var(--line); border-radius: 12px;
   background: var(--card-bg); box-shadow: var(--shadow-sm);
 }
-.dd-cred.open > .cred-row { background: var(--hover); }
-.dd-cred-chev { display: inline-flex; color: var(--muted-2); transition: transform .15s ease; }
-.dd-cred.open .dd-cred-chev { transform: rotate(180deg); }
+.dd-cred-head { display: flex; align-items: center; gap: 2px; }
+.dd-cred-head .dd-cred-toggle { flex: 1; min-width: 0; }
+.dd-cred.open .dd-cred-toggle { background: var(--hover); }
+.dd-cred-chev { display: inline-flex; color: var(--muted-2); }
+/* The open row's trailing slot swaps its chevron for the ⋯ action menu. */
+.dd-cred-menu-btn {
+  flex: 0 0 auto; width: 26px; height: 26px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 7px; background: transparent;
+  color: var(--muted-2); cursor: pointer;
+}
+.dd-cred-menu-btn:hover { background: var(--hover-2); color: var(--ink-2); }
+.dd-cred-menu-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .dropdown-surface .cred-mono { width: 26px; height: 26px; border-radius: 7px; font-size: 0.8125rem; }
 .dropdown-surface .cred-row-tx b { font-size: 0.78125rem; }
 .dd-cred-exp {
@@ -2005,10 +2019,6 @@
   background: var(--wash-2); overflow: hidden;
 }
 .dd-cred-exp .cdet-lbl { width: 5.5rem; }
-.dd-cred-actions {
-  display: flex; justify-content: flex-end; gap: 8px;
-  padding: 8px 10px; border-top: 1px solid var(--line-soft);
-}
 .dd-creds > .credential-group-add { align-self: flex-end; }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
@@ -2036,9 +2046,35 @@
    the breathing room under the tabs outranks `.seg.in-form`'s margin: 0. */
 .seg.in-form.secret-kind-seg { margin-bottom: 4px; }
 .secret-kind-seg .seg-btn { flex: 1; }
-.gen-row { display: flex; align-items: stretch; gap: 6px; }
-.gen-row input { flex: 1; min-width: 0; }
-.gen-row .btn { flex: 0 0 auto; }
+/* The credential form is one Passwords-style inset group: hairline rows,
+   label left, borderless value right. Errors and hints hang under their row
+   inside the group, so a message never detaches from its field. */
+.sf-group {
+  margin-top: 8px; border: 1px solid var(--line-soft); border-radius: 10px;
+  background: var(--wash-2); overflow: hidden;
+}
+.sf-row { padding: 5px 12px; }
+.sf-row + .sf-row { border-top: 1px solid var(--line-soft); }
+.sf-row:focus-within { background: var(--hover); }
+/* :has needs no fallback beyond the error text itself. */
+.sf-row:has(input.err) { background: var(--danger-wash); }
+.sf-line { display: flex; align-items: center; gap: 10px; min-height: 28px; }
+.sf-lbl { flex: 0 0 auto; width: 6.5rem; color: var(--muted); font-size: 0.78125rem; }
+.sf-line input {
+  flex: 1; min-width: 0; padding: 0; border: 0; outline: none;
+  background: transparent; color: var(--ink); font: inherit;
+  font-size: 0.8125rem; text-align: right;
+}
+.sf-row .field-error, .sf-row .field-hint { margin: 0 0 4px; padding-left: calc(6.5rem + 10px); }
+.sf-eye {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border-radius: 6px; color: var(--muted-2); cursor: pointer;
+}
+.sf-eye:hover { background: var(--hover-2); color: var(--ink-3); }
+.sf-eye:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sf-row .totp-remove-check { margin: 0 0 6px; padding-left: calc(6.5rem + 10px); }
+/* The footer rules itself off from the group, like the reference dialog. */
+.sheet-actions.secret-sheet-actions { border-top: 1px solid var(--line-soft); padding-top: 12px; }
 .password-generator { flex: 0 0 auto; }
 .password-generator-group { display: inline-flex; align-items: stretch; height: 100%; }
 .password-generator-main { border-radius: 7px 0 0 7px; }
@@ -2050,14 +2086,6 @@
 .password-generator-menu-trigger svg { width: 12px; height: 12px; }
 .password-generator-menu-trigger[aria-expanded="true"] { border-color: var(--accent); z-index: 1; }
 .password-format-menu { min-width: 210px; }
-/* label.* so these outrank `.f-row label`'s display: block — losing the
-   inline-flex left the checkbox jammed against its text. */
-label.show-value-check {
-  display: inline-flex; align-items: center; gap: 7px; margin-top: 7px;
-  color: var(--muted); font-size: 0.78125rem; font-weight: 400; cursor: pointer;
-}
-.show-value-check input { margin: 0; accent-color: var(--accent); }
-.credential-advanced { margin-top: 1px; }
 .label-note { margin-left: 4px; color: var(--muted-2); font-weight: 400; }
 .field-hint { margin-top: 4px; color: var(--muted); font-size: 0.71875rem; line-height: 1.45; }
 /* The QR-image picker under the 2FA input: a hidden real <input type=file>

@@ -129,6 +129,7 @@ import {
 import { ConnectedToolsList } from '/src/features/connected-tools-list';
 import { CredentialRowsList } from '/src/features/credential-rows';
 import { StartViewPage, startBlankId } from '/src/features/connect-agents-view';
+import { localSecretUse, noteSecretUsed } from '/src/recent-secrets';
 import { Sheet } from '/src/sheet';
 
 const EDIT_SECRET_MASK = '••••••••••••';
@@ -1311,6 +1312,44 @@ function credentialSubtitle(secret: SecretSummary): string {
     : 'Not in use';
 }
 
+/** The tray's Recent scope: the newest use per credential, merging direct UI
+ * use (client-side stamps) with brokered activity attributed through the
+ * connections that hold each credential. */
+function recentSecretUses(limit: number): Array<{ secret: SecretSummary; at: string }> {
+  const local = localSecretUse();
+  const byConnection = new Map<string, number>();
+  for (const entry of state.activity) {
+    if (!entry.connection || !entry.at) continue;
+    const at = Date.parse(entry.at);
+    if (Number.isNaN(at)) continue;
+    const seen = byConnection.get(entry.connection);
+    if (seen === undefined || at > seen) byConnection.set(entry.connection, at);
+  }
+  const stamped: Array<{ secret: SecretSummary; at: number }> = [];
+  for (const secret of state.secrets) {
+    let at = Date.parse(local[secret.id] ?? '');
+    if (Number.isNaN(at)) at = -1;
+    for (const name of secret.used_by_names) {
+      const used = byConnection.get(name);
+      if (used !== undefined && used > at) at = used;
+    }
+    if (at >= 0) stamped.push({ secret, at });
+  }
+  return stamped
+    .sort((a, b) => b.at - a.at)
+    .slice(0, limit)
+    .map(({ secret, at }) => ({ secret, at: new Date(at).toISOString() }));
+}
+
+/** Recent rows say when, not what: "Used 2h ago" whichever way the
+ * credential was used (copied here, or brokered through a tool). */
+function usedHint(at: string): string {
+  const rel = relTime(at);
+  if (!rel) return 'Used recently';
+  if (rel === 'just now') return 'Used just now';
+  return /^\d+[mh]$/.test(rel) ? `Used ${rel} ago` : `Used ${rel}`;
+}
+
 /** The masked-value copy affordance shared by the inspector and the tray
  * expansion: the copy button and the post-copy "Copied" status both overlay
  * the mask, centered — never beside it (the placeholder dims behind). */
@@ -1461,33 +1500,53 @@ function CredentialDetail({ secret }: { secret: SecretSummary }): ReactNode {
 }
 
 /** A tray row expands in place to its copy actions — the dropdown keeps
- * find-and-copy fast and hands everything else to the main window. The 2FA
- * code copies without ever rendering (codes display only on the desktop). */
-function DropdownCredentialRow({ secret }: { secret: SecretSummary }): ReactNode {
-  const open = state.dropdownSecretOpen === secret.id;
+ * find-and-copy fast and hands everything else to the main window: every
+ * expanded line copies, and management actions sit behind the ⋯ menu on the
+ * open row's header. The 2FA code copies without ever rendering (codes
+ * display only on the desktop). */
+function DropdownCredentialRow({ secret, subtitle, scope }: {
+  secret: SecretSummary;
+  subtitle?: string;
+  /** Which tray listing the row sits in. A credential shown under both
+   * Recent and the full list expands only where it was clicked. */
+  scope?: 'recent';
+}): ReactNode {
+  const openKey = scope === 'recent' ? `recent:${secret.id}` : secret.id;
+  const open = state.dropdownSecretOpen === openKey;
   const password = secret.kind === 'password';
   const displayName = credentialDisplayName(secret);
   const noun = credentialNoun(secret);
   const revealed = state.reveal[secret.id];
   return (
     <div className={`dd-cred ${open ? 'open' : ''}`} data-secret-row={secret.id}>
-      <button className="cred-row dd-cred-toggle" data-act="toggle-dd-secret" data-id={secret.id}
-        aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${noun} ${displayName}`}>
-        <span className="cred-mono" aria-hidden="true">{credentialInitial(secret)}</span>
-        <span className="cred-row-tx">
-          <b className={password ? 'site-host' : 's-name'} title={displayName}>{displayName}</b>
-          <small dir="auto">{credentialSubtitle(secret)}</small>
-        </span>
-        <span className="cred-row-badges">
-          {secret.totp ? <span className="cred-chip" title="Has a 2FA code">2FA</span> : null}
-          {secret.source?.kind === 'one_password'
-            ? <span className="s-source-icon" title={`Stored in ${secret.source.integration_label}`}>
-                <Icon markup={ICONS.onepassword} />
-              </span>
-            : null}
-          <span className="dd-cred-chev" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>
-        </span>
-      </button>
+      <div className="dd-cred-head">
+        <button className="cred-row dd-cred-toggle" data-act="toggle-dd-secret" data-id={secret.id}
+          data-scope={scope}
+          aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${noun} ${displayName}`}>
+          <span className="cred-mono" aria-hidden="true">{credentialInitial(secret)}</span>
+          <span className="cred-row-tx">
+            <b className={password ? 'site-host' : 's-name'} title={displayName}>{displayName}</b>
+            <small dir="auto">{subtitle ?? credentialSubtitle(secret)}</small>
+          </span>
+          <span className="cred-row-badges">
+            {secret.totp ? <span className="cred-chip" title="Has a 2FA code">2FA</span> : null}
+            {secret.source?.kind === 'one_password'
+              ? <span className="s-source-icon" title={`Stored in ${secret.source.integration_label}`}>
+                  <Icon markup={ICONS.onepassword} />
+                </span>
+              : null}
+            {open ? null
+              : <span className="dd-cred-chev" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>}
+          </span>
+        </button>
+        {open
+          ? <button className="dd-cred-menu-btn" data-act="secret-row-menu" data-id={secret.id}
+              title="More actions"
+              aria-label={`More actions for ${noun} ${displayName}`}>
+              <Icon markup={ICONS.ellipsis} />
+            </button>
+          : null}
+      </div>
       {open
         ? <div className="dd-cred-exp">
             {password
@@ -1506,12 +1565,6 @@ function DropdownCredentialRow({ secret }: { secret: SecretSummary }): ReactNode
                     aria-label={`Copy the current 2FA code for ${displayName}`}>Copy code</button>
                   </span></div>
               : null}
-            <div className="dd-cred-actions">
-              <button className="btn sm" data-act="edit-secret" data-id={secret.id}
-                aria-label={`Edit ${noun} ${displayName}`}>Edit</button>
-              <button className="btn sm" data-act="del-secret-ask" data-id={secret.id}
-                aria-label={`Delete ${noun} ${displayName}`}>Delete</button>
-            </div>
           </div>
         : null}
     </div>
@@ -3255,11 +3308,28 @@ function SecretsView(): ReactNode {
       ...matching.filter((secret) => secret.kind === 'password'),
       ...matching.filter((secret) => secret.kind !== 'password'),
     ];
+    // The tray is where the same credential gets grabbed every day: a short
+    // Recent group rides above the inventory. A search speaks for itself, so
+    // the sections yield to plain matches while a needle is active.
+    const recent = needle ? [] : recentSecretUses(3);
     return (
       <div className="dd-creds">
+        {recent.length
+          ? <>
+              <div className="dd-cred-sec-h">Recent</div>
+              <div className="dd-cred-list">
+                {recent.map(({ secret, at }) => (
+                  <DropdownCredentialRow key={`recent-${secret.id}`} secret={secret}
+                    scope="recent" subtitle={usedHint(at)} />
+                ))}
+              </div>
+              <div className="dd-cred-sec-h">All credentials</div>
+            </>
+          : null}
         {ordered.length
           ? <CredentialRowsList className="dd-cred-list" secrets={ordered} rowEstimate={40}
-              keepMountedId={state.dropdownSecretOpen}
+              keepMountedId={state.dropdownSecretOpen?.startsWith('recent:')
+                ? null : state.dropdownSecretOpen}
               renderRow={(secret) => <DropdownCredentialRow key={secret.id} secret={secret} />} />
           : <div className="muted-note">
               {state.secrets.length
@@ -4303,9 +4373,11 @@ function ConnectionContextMenu(): ReactNode {
   );
 }
 
-/** A credential row's right-click menu, portaled and pointer-anchored like
- * the tool rows'. It carries the reveal, which has no other affordance: a
- * value only goes on screen when it is asked for by name and confirmed. */
+/** A credential row's action menu, portaled and pointer-anchored like the
+ * tool rows'. Right-click opens it on both listings; the tray's expanded row
+ * also offers it behind a ⋯ trigger. It carries the reveal, which has no
+ * other affordance — a value only goes on screen when it is asked for by
+ * name and confirmed — plus the management actions the tray rows shed. */
 function SecretContextMenu(): ReactNode {
   const secret = state.secretMenuPoint && state.secretMenuOpen
     ? state.secrets.find((candidate) => candidate.id === state.secretMenuOpen)
@@ -4324,6 +4396,13 @@ function SecretContextMenu(): ReactNode {
           : <button className="menu-item" data-act="reveal-secret-ask" data-id={secret.id}>
               <Icon markup={ICONS.eye} /> Reveal {noun}…
             </button>}
+        <div className="cred-menu-divider" role="separator"></div>
+        <button className="menu-item" data-act="edit-secret" data-id={secret.id}>
+          <Icon markup={ICONS.pencil} /> Edit {noun}…
+        </button>
+        <button className="menu-item" data-act="del-secret-ask" data-id={secret.id}>
+          <Icon markup={ICONS.trash} /> Delete {noun}…
+        </button>
       </div>
     </div>,
     document.body,
@@ -5439,11 +5518,15 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
         setDraftField('value', 'value', e.currentTarget.value);
       }} aria-label={label} />
   );
+  // The eye is a styled checkbox, not a button, so the visibility state keeps
+  // checkbox semantics for assistive tech (and the reveal-confirm flow can
+  // decline the check without faking a pressed state).
   const visibilityControl = (
-    <label className="show-value-check">
-      <input type="checkbox" checked={showValue}
+    <label className="sf-eye" title={`${showValue ? 'Hide' : 'Show'} ${password ? 'password' : 'secret'}`}>
+      <input type="checkbox" className="sr-only" checked={showValue}
+        aria-label={password ? 'Show password' : 'Show secret'}
         onChange={(e) => toggleValueVisibility(e.currentTarget.checked)} />
-      <span>{password ? 'Show password' : 'Show secret'}</span>
+      <Icon markup={showValue ? ICONS.eyeOff : ICONS.eye} />
     </label>
   );
   return (
@@ -5458,33 +5541,38 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
           </div>
         : null}
       {password
-        ? <>
-            <div className="f-row">
-              <label htmlFor="f-site">Website</label>
-              <input id="f-site" className={fieldCls('site')} placeholder="e.g. github.com"
-                autoComplete="off" spellCheck={false}
-                value={d.site ?? ''}
-                onChange={(e) => setDraftField('site', 'site', e.currentTarget.value)} />
+        ? <div className="sf-group">
+            <div className="sf-row">
+              <div className="sf-line">
+                <label className="sf-lbl" htmlFor="f-site">Website</label>
+                <input id="f-site" className={fieldCls('site')} placeholder="e.g. github.com"
+                  autoComplete="off" spellCheck={false}
+                  value={d.site ?? ''}
+                  onChange={(e) => setDraftField('site', 'site', e.currentTarget.value)} />
+              </div>
               <FieldError k="site" />
               {storedSite ? <div className="field-hint">Stored as {storedSite}</div> : null}
             </div>
-            <div className="f-row">
-              <label htmlFor="f-username">Username</label>
-              <input id="f-username" placeholder="you@example.com"
-                autoComplete="off" spellCheck={false} dir="auto"
-                value={d.username ?? ''}
-                onChange={(e) => setDraftField('username', 'username', e.currentTarget.value)} />
+            <div className="sf-row">
+              <div className="sf-line">
+                <label className="sf-lbl" htmlFor="f-username">Username</label>
+                <input id="f-username" placeholder="you@example.com"
+                  autoComplete="off" spellCheck={false} dir="auto"
+                  value={d.username ?? ''}
+                  onChange={(e) => setDraftField('username', 'username', e.currentTarget.value)} />
+              </div>
             </div>
-            <div className="f-row">
-              <label htmlFor="f-value">{editing ? 'New password (saved to macOS Keychain)' : 'Password'}</label>
-              <div className="gen-row">
+            <div className="sf-row">
+              <div className="sf-line">
+                <label className="sf-lbl" htmlFor="f-value">{editing ? 'New password' : 'Password'}</label>
                 {valueField('Password', editing ? EDIT_SECRET_MASK : 'Saved in Keychain')}
+                {visibilityControl}
                 <div className="password-generator cred-select">
                   <div className="password-generator-group">
-                    <button type="button" className="btn password-generator-main"
+                    <button type="button" className="btn sm password-generator-main"
                       data-act="generate-password" title="Fill in a generated password">Generate</button>
                     <button type="button" id="password-generator-menu"
-                      className="btn password-generator-menu-trigger"
+                      className="btn sm password-generator-menu-trigger"
                       data-act="generate-password-menu" title="Password format"
                       aria-label="Choose password format" aria-haspopup="listbox"
                       aria-expanded={generatorMenuOpen}>
@@ -5514,91 +5602,91 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
                 </div>
               </div>
               <FieldError k="value" />
-              {visibilityControl}
             </div>
-            <div className="adv-collapse credential-advanced">
-              <button type="button" className="adv-toggle" data-act="credential-advanced"
-                aria-expanded={Boolean(d.credentialAdvancedOpen)}>
-                <span className="adv-toggle-icon" aria-hidden="true">
-                  <Icon markup={ICONS.chevronDown} />
-                </span>Advanced</button>
-              {d.credentialAdvancedOpen
-                ? <div className="f-row">
-                    <label htmlFor="f-totp">2FA secret <span className="label-note">optional</span></label>
-                    <input id="f-totp" className={fieldCls('totp')} type="password"
-                      placeholder={secret?.totp
-                        ? '•••••••• (set; paste to replace)'
-                        : 'Base32 secret or otpauth:// URI'}
-                      autoComplete="off" spellCheck={false}
-                      value={d.totp ?? ''}
+            {/* 2FA is a first-class row (Passwords' "Code" section), no longer
+                folded behind an Advanced disclosure. */}
+            <div className="sf-row">
+              <div className="sf-line">
+                <label className="sf-lbl" htmlFor="f-totp">Code</label>
+                <input id="f-totp" className={fieldCls('totp')} type="password"
+                  placeholder={secret?.totp
+                    ? '•••••••• (set; paste to replace)'
+                    : 'Base32 secret or otpauth:// URI'}
+                  autoComplete="off" spellCheck={false}
+                  value={d.totp ?? ''}
+                  onChange={(e) => {
+                    supersedeTotpQrImageScan();
+                    state.draft.removeTotp = false;
+                    state.draft.totpFromQrImage = false;
+                    setDraftField('totp', 'totp', e.currentTarget.value);
+                  }} />
+              </div>
+              <FieldError k="totp" />
+              {d.totpFromQrImage
+                ? <div className="field-hint">Scanned from the QR code image</div>
+                : null}
+              <div className="totp-qr-row">
+                {/* The picker input stays in the tree (not created on demand)
+                    so WebKit accepts the button's click as a user gesture. */}
+                <input id="f-totp-qr" className="totp-qr-input" type="file"
+                  accept="image/*" tabIndex={-1} aria-hidden="true"
+                  onChange={(e) => {
+                    const file = e.currentTarget.files?.[0];
+                    e.currentTarget.value = '';
+                    if (file) void fillTotpFromQrImage(file);
+                  }} />
+                <button type="button" className="btn sm totp-qr-btn"
+                  data-act="totp-qr-image" disabled={Boolean(d.totpQrImageScanning)}>
+                  <Icon markup={ICONS.qrCode} />
+                  <span>{d.totpQrImageScanning ? 'Scanning…' : 'Choose QR Code Image…'}</span>
+                </button>
+              </div>
+              {secret?.totp
+                ? <label className="totp-remove-check">
+                    <input type="checkbox" checked={Boolean(d.removeTotp)}
                       onChange={(e) => {
                         supersedeTotpQrImageScan();
-                        state.draft.removeTotp = false;
-                        state.draft.totpFromQrImage = false;
-                        setDraftField('totp', 'totp', e.currentTarget.value);
+                        state.draft.removeTotp = e.currentTarget.checked;
+                        if (e.currentTarget.checked) {
+                          state.draft.totp = '';
+                          state.draft.totpFromQrImage = false;
+                        }
+                        delete state.sheetErrors.totp;
+                        render();
                       }} />
-                    <FieldError k="totp" />
-                    {d.totpFromQrImage
-                      ? <div className="field-hint">Scanned from the QR code image</div>
-                      : null}
-                    <div className="totp-qr-row">
-                      {/* The picker input stays in the tree (not created on
-                          demand) so WebKit accepts the button's forwarded
-                          click as a user gesture. */}
-                      <input id="f-totp-qr" className="totp-qr-input" type="file"
-                        accept="image/*" tabIndex={-1} aria-hidden="true"
-                        onChange={(e) => {
-                          const file = e.currentTarget.files?.[0];
-                          e.currentTarget.value = '';
-                          if (file) void fillTotpFromQrImage(file);
-                        }} />
-                      <button type="button" className="btn sm totp-qr-btn"
-                        data-act="totp-qr-image" disabled={Boolean(d.totpQrImageScanning)}>
-                        <Icon markup={ICONS.qrCode} />
-                        <span>{d.totpQrImageScanning ? 'Scanning…' : 'Choose QR Code Image…'}</span>
-                      </button>
-                    </div>
-                    {secret?.totp
-                      ? <label className="totp-remove-check">
-                          <input type="checkbox" checked={Boolean(d.removeTotp)}
-                            onChange={(e) => {
-                              supersedeTotpQrImageScan();
-                              state.draft.removeTotp = e.currentTarget.checked;
-                              if (e.currentTarget.checked) {
-                                state.draft.totp = '';
-                                state.draft.totpFromQrImage = false;
-                              }
-                              delete state.sheetErrors.totp;
-                              render();
-                            }} />
-                          <span>Remove 2FA secret</span>
-                        </label>
-                      : null}
-                  </div>
+                    <span>Remove 2FA secret</span>
+                  </label>
                 : null}
             </div>
-          </>
+          </div>
         : <>
-            <div className="f-row">
-              <label htmlFor="f-name">Name</label>
-              <input id="f-name" className={fieldCls('name')} placeholder="e.g. STRIPE_API_KEY"
-                value={d.name ?? ''}
-                onChange={(e) => setDraftField('name', 'name', e.currentTarget.value)} />
-              <FieldError k="name" />
+            <div className="sf-group">
+              <div className="sf-row">
+                <div className="sf-line">
+                  <label className="sf-lbl" htmlFor="f-name">Name</label>
+                  <input id="f-name" className={fieldCls('name')} placeholder="e.g. STRIPE_API_KEY"
+                    value={d.name ?? ''}
+                    onChange={(e) => setDraftField('name', 'name', e.currentTarget.value)} />
+                </div>
+                <FieldError k="name" />
+              </div>
+              {linked ? null : <div className="sf-row">
+                <div className="sf-line">
+                  <label className="sf-lbl" htmlFor="f-value">{editing ? 'New value' : 'Value'}</label>
+                  {valueField('Value', editing ? EDIT_SECRET_MASK : 'Your secret (saved in Keychain)')}
+                  {visibilityControl}
+                </div>
+                <FieldError k="value" />
+              </div>}
             </div>
             {linked ? <div className="linked-secret-source">
               <span><Icon markup={ICONS.onepassword} /></span>
               <div><b>{linked.integration_label}</b>
                 <small>{linked.vault_label} › {linked.item_label} › {linked.field_label}</small></div>
-            </div> : <div className="f-row">
-              <label htmlFor="f-value">{editing ? 'New value (saved to macOS Keychain)' : 'Value'}</label>
-              {valueField('Value', editing ? EDIT_SECRET_MASK : 'Your secret (saved in Keychain)')}
-              <FieldError k="value" />
-              {visibilityControl}
-            </div>}
+            </div> : null}
           </>}
       <FormGlobalError />
-      <div className="sheet-actions">
+      <div className="sheet-actions secret-sheet-actions">
         <button className="btn" data-act="sheet-cancel">Cancel</button>
         <button className="btn primary" data-act="save-secret"
           disabled={Boolean(d.totpQrImageScanning)}>Save</button>
@@ -7056,9 +7144,6 @@ function showFormError(error: unknown): void {
     return;
   }
   state.sheetErrors = { ...state.sheetErrors, [inline.field]: inline.message };
-  if (inline.field === 'totp' && state.sheet?.kind.includes('secret')) {
-    state.draft.credentialAdvancedOpen = true;
-  }
   render();
   const defaultNameId = state.sheet && state.sheet.kind.includes('secret') ? 'f-name' : 'f-cname';
   const inputId = inline.field === 'name'
@@ -8483,6 +8568,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
     case 'copy-secret':
       if (await run(() => invoke('copy_secret', { id }))) {
+        noteSecretUsed(id);
         toast('📋 Copied for 30s');
         flashCopied(id);
       }
@@ -8494,6 +8580,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       if (!text) break;
       try {
         await navigator.clipboard.writeText(text);
+        noteSecretUsed(id);
         flashCopied(`user:${id}`);
       } catch {
         toast('⚠ Could not copy');
@@ -8511,6 +8598,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       render();
       break;
     case 'show-totp':
+      noteSecretUsed(id);
       state.totpVisible = id;
       render();
       break;
@@ -8523,12 +8611,25 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.secretDetailOpen = false;
       render();
       break;
-    case 'toggle-dd-secret':
-      state.dropdownSecretOpen = state.dropdownSecretOpen === id ? null : id;
+    case 'toggle-dd-secret': {
+      const openKey = btn.dataset.scope === 'recent' ? `recent:${id}` : id;
+      state.dropdownSecretOpen = state.dropdownSecretOpen === openKey ? null : openKey;
       render();
       break;
+    }
+    case 'secret-row-menu': {
+      // The ⋯ trigger reuses the right-click menu, anchored under itself;
+      // positionPointerMenu clamps the placement to the viewport.
+      const rect = btn.getBoundingClientRect();
+      state.secretMenuOpen = id;
+      state.secretMenuPoint = { x: rect.left, y: rect.bottom + 4 };
+      render();
+      break;
+    }
     case 'del-secret-ask': {
       const s = state.secrets.find((x) => x.id === id);
+      state.secretMenuOpen = null;
+      state.secretMenuPoint = null;
       state.confirm = { kind: s && s.used_by ? 'del-secret-inuse' : 'del-secret', id };
       render();
       break;
@@ -8561,6 +8662,8 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
     case 'edit-secret': {
       if (!await holdDropdownFormOpen()) break;
+      state.secretMenuOpen = null;
+      state.secretMenuPoint = null;
       setSheet({ kind: 'edit-secret', id });
       // Controlled fields read the draft, so seed the public identity fields
       // only. The credential value and 2FA seed remain write-only; the value
@@ -8601,10 +8704,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       focusField(kind === 'password' ? 'f-site' : 'f-name');
       break;
     }
-    case 'credential-advanced':
-      state.draft.credentialAdvancedOpen = !state.draft.credentialAdvancedOpen;
-      render();
-      break;
     case 'generate-password-menu':
       state.formMenuOpen = state.formMenuOpen === 'password-generator-menu'
         ? null
@@ -8628,6 +8727,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       try {
         const secondsRemaining = await invoke('copy_secret_totp', { id });
         if (!brokerEpochIsCurrent(epoch)) break;
+        noteSecretUsed(id);
         toast(`🔑 2FA code copied · valid ${secondsRemaining}s`);
       } catch (error) {
         if (brokerEpochIsCurrent(epoch)) toast('⚠ ' + errorMessage(error));
