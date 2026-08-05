@@ -980,6 +980,22 @@ test('the app lock takes over both windows and is armed from Settings', async ()
   await testingLibrary.waitFor(() => {
     assert.equal(document.querySelector('.sheet-backdrop'), null);
   });
+
+  // Lock Now is a one-shot action, independent of the automatic-lock
+  // preference. It must work on a fresh install without also arming the
+  // five-minute idle timer.
+  testingLibrary.fireEvent.keyDown(document.body, { key: 'l', metaKey: true });
+  const manualLock = await testingLibrary.findByLabelText(
+    document.body, 'Multitool is locked',
+  );
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(manualLock, 'button', { name: 'Enter password…' }),
+  );
+  for (let tries = 0; tries < 50 && document.querySelector('.lock-takeover'); tries += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(document.querySelector('.lock-takeover'), null);
+
   testingLibrary.fireEvent.click(
     testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }),
   );
@@ -987,7 +1003,7 @@ test('the app lock takes over both windows and is armed from Settings', async ()
     document.querySelector<HTMLButtonElement>('button[data-act="open-settings"]')!,
   );
   const dialog = await testingLibrary.findByRole(document.body, 'dialog', { name: 'Settings' });
-  const toggle = testingLibrary.getByRole(dialog, 'checkbox', { name: 'Lock this window' });
+  const toggle = testingLibrary.getByRole(dialog, 'checkbox', { name: 'Lock automatically' });
   assert.equal(toggle.getAttribute('aria-checked'), 'false');
   // The idle and put-away rows only exist once the lock is armed — an
   // unarmed lock has no schedule to configure.

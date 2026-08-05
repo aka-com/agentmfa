@@ -1162,7 +1162,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       emit('aka://lock-changed', { ...mockLock });
       return { ...mockLock };
     case 'lock_app':
-      if (mockLock.enabled) mockLock = { ...mockLock, locked: true };
+      if (mockLock.available) mockLock = { ...mockLock, locked: true };
       emit('aka://lock-changed', { ...mockLock });
       return { ...mockLock };
     case 'unlock_app':

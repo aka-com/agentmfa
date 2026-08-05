@@ -6800,15 +6800,15 @@ function SettingsSheet(): ReactNode {
   // The lock is this computer's, like the notification rows: it gates these
   // windows, not the broker they are driving.
   const lockRow = <div className="set-row"><div className="set-txt">
-      <div className="st-title">Lock this window</div>
+      <div className="st-title">Lock automatically</div>
       <div className="st-sub">
-        Require Touch ID or your account password to use Multitool's windows.
-        Agents keep working while it is locked — this covers the app, not the
-        broker.
+        Automatically require Touch ID or your account password to use
+        Multitool's windows. Agents keep working while it is locked — this
+        covers the app, not the broker.
       </div></div>
       <button className={`switch ${lock.enabled ? 'on' : ''}`}
         data-act="toggle-app-lock" role="checkbox"
-        aria-label="Lock this window"
+        aria-label="Lock automatically"
         disabled={!lock.available}
         aria-checked={lock.enabled}></button></div>;
   const lockWarning = lock.available ? null
@@ -9618,7 +9618,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
             lockOnHide: state.lock.lockOnHide,
           },
         });
-        toast(enabled ? '🔒 Multitool will lock' : 'Multitool will not lock');
+        toast(enabled ? '🔒 Automatic app lock enabled' : 'Automatic app lock disabled');
       } catch (error) {
         toast('⚠ ' + errorMessage(error));
       }
@@ -9976,11 +9976,9 @@ function handleAppKeyDown(e: KeyboardEvent): void {
   // ⌘L mirrors the File ▸ Lock Now menu item. The native accelerator only
   // fires while a native menu is attached, and the dropdown panel has none.
   if (e.key.toLowerCase() === 'l' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-    if (state.lock.enabled) {
-      e.preventDefault();
-      void invoke('lock_app').then(receiveLockState);
-      return;
-    }
+    e.preventDefault();
+    void invoke('lock_app').then(receiveLockState);
+    return;
   }
   // A focused row moves with Alt+Up/Down — the keyboard-accessible
   // equivalent of dragging it.

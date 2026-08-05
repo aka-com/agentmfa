@@ -208,9 +208,8 @@ pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
         }
     }
 
-    // ⌘L is the platform-conventional lock; the item stays enabled even when
-    // the lock is off so the settings row is discoverable from the menu bar
-    // (choosing it while disabled is a no-op the settings sheet explains).
+    // ⌘L is the platform-conventional one-shot lock. Automatic-lock
+    // preferences do not gate an explicit user request.
     let lock_now = MenuItem::with_id(app, LOCK_MENU_ID, "Lock Now", true, Some("CmdOrCtrl+L"))?;
     for item in menu.items()? {
         if let MenuItemKind::Submenu(submenu) = item {
@@ -232,7 +231,7 @@ pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
         APP_WINDOW_MENU_ID => focus_existing_or_reopen(app),
         LOCK_MENU_ID => {
             if let Some(lock) = app.try_state::<std::sync::Arc<crate::applock::AppLock>>() {
-                lock.lock(app);
+                lock.lock_now(app);
             }
         }
         _ => {}

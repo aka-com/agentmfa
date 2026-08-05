@@ -69,8 +69,8 @@ const ALLOWED_AUTO_LOCK_SECS: [u64; 5] = [0, 60, 300, 900, 3600];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LockSettings {
-    /// Master switch. Off means the lock never engages and "Lock Now" is
-    /// unavailable.
+    /// Automatic-lock switch. Off disables idle, hide, and system-away
+    /// locking; the explicit "Lock Now" action remains available.
     #[serde(default)]
     pub enabled: bool,
     /// Lock after this many seconds without interaction with either window.
@@ -219,13 +219,26 @@ impl AppLock {
         *self.last_active.lock().unwrap() = Instant::now();
     }
 
-    /// Engage the lock. No-op when the lock is disabled or the platform
-    /// cannot authenticate — arming a gate nobody can open would strand the
-    /// user with no way back into their own credentials.
+    /// Engage the lock from an automatic policy. The explicit action uses
+    /// `lock_now`, which deliberately does not depend on this preference.
     pub fn lock(&self, app: &AppHandle) {
-        if !self.settings().enabled || !platform_capability().available {
+        if !lock_request_allowed(self.settings().enabled, false, platform_capability().available) {
             return;
         }
+        self.engage(app);
+    }
+
+    /// Engage the lock for an explicit user request. No-op only when the
+    /// platform cannot authenticate, since that would strand the user with
+    /// no way back into their own credentials.
+    pub fn lock_now(&self, app: &AppHandle) {
+        if !lock_request_allowed(self.settings().enabled, true, platform_capability().available) {
+            return;
+        }
+        self.engage(app);
+    }
+
+    fn engage(&self, app: &AppHandle) {
         if !self.locked.swap(true, Ordering::SeqCst) {
             *self.embedded_error.lock().unwrap() = None;
             self.publish(app);
@@ -271,6 +284,10 @@ impl AppLock {
     fn publish(&self, app: &AppHandle) {
         let _ = app.emit(EVT_LOCK, self.view());
     }
+}
+
+fn lock_request_allowed(automatic_enabled: bool, explicit: bool, platform_available: bool) -> bool {
+    platform_available && (explicit || automatic_enabled)
 }
 
 /// Idle watchdog. One thread for the life of the app; it only ever *takes*
@@ -453,10 +470,10 @@ pub fn set_lock_settings(
     Ok(lock.view())
 }
 
-/// Lock now — the menu item, the ⌘L accelerator, and the settings button.
+/// Lock now — the native menu/accelerator and the webview shortcut fallback.
 #[tauri::command]
 pub fn lock_app(app: AppHandle, lock: tauri::State<'_, Arc<AppLock>>) -> LockStateView {
-    lock.lock(&app);
+    lock.lock_now(&app);
     lock.view()
 }
 
@@ -599,5 +616,12 @@ mod tests {
             lock.locked.store(false, Ordering::SeqCst);
         }
         assert!(!lock.is_locked());
+    }
+
+    #[test]
+    fn explicit_lock_does_not_require_automatic_locking() {
+        assert!(lock_request_allowed(false, true, true));
+        assert!(!lock_request_allowed(false, false, true));
+        assert!(!lock_request_allowed(true, true, false));
     }
 }
