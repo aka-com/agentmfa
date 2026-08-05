@@ -1507,14 +1507,6 @@ function CredentialDetail({ secret }: { secret: SecretSummary }): ReactNode {
         <button className="btn sm cdet-back" data-act="close-cred-detail">
           <Icon markup={ICONS.chevronLeft} /> Back
         </button>
-        {editInPlace
-          ? null
-          : <>
-              <button className="btn sm" data-act="edit-secret" data-id={secret.id}
-                aria-label={`Edit ${noun} ${displayName}`}>Edit</button>
-              <button className="btn sm" data-act="del-secret-ask" data-id={secret.id}
-                aria-label={`Delete ${noun} ${displayName}`}>Delete</button>
-            </>}
       </div>
       <div className="cdet-hero">
         <span className="cdet-mono" aria-hidden="true">{credentialInitial(secret)}</span>
@@ -1607,7 +1599,12 @@ function CredentialDetail({ secret }: { secret: SecretSummary }): ReactNode {
             <button className="btn sm destructive" data-act="del-secret-ask" data-id={secret.id}
               aria-label={`Delete ${noun} ${displayName}`}>Delete Password…</button>
           </div></div>
-        : null}
+        : <div className="cdet-actions">
+            <button className="btn sm" data-act="edit-secret" data-id={secret.id}
+              aria-label={`Edit ${noun} ${displayName}`}>Edit</button>
+            <button className="btn sm" data-act="del-secret-ask" data-id={secret.id}
+              aria-label={`Delete ${noun} ${displayName}`}>Delete</button>
+          </div>}
     </div>
   );
 }
@@ -4303,11 +4300,20 @@ function MainWindow(): ReactNode {
 
   const recheckRunning = state.connections.some((c) =>
     c.mcp_path ? Boolean(state.mcpStatus[c.id]?.running) : Boolean(state.connTests[c.id]?.running));
+  // The master–detail pages split their header like the panes below it:
+  // search rides the left cell so its right edge lands on the list column's
+  // edge; the primary actions fill the right cell over the detail column.
+  const pageSearch = state.tab === 'connections'
+    ? <input id="tool-search" className="cat-search" type="search" placeholder="Search tools…"
+        aria-label="Search tools" value={state.toolSearch}
+        onChange={(e) => { state.toolSearch = e.currentTarget.value; render(); }} />
+    : state.tab === 'secrets'
+      ? <input id="secret-search" className="cat-search" type="search" placeholder="Search credentials…"
+          aria-label="Search credentials" value={state.secretSearch}
+          onChange={(e) => { state.secretSearch = e.currentTarget.value; render(); }} />
+      : null;
   const pageAction = state.tab === 'connections'
     ? <div className="dw-head-actions">
-        <input id="tool-search" className="cat-search" type="search" placeholder="Search tools…"
-          aria-label="Search tools" value={state.toolSearch}
-          onChange={(e) => { state.toolSearch = e.currentTarget.value; render(); }} />
         <button className="btn primary add-tool-btn" data-act="open-add-palette"
           aria-haspopup="dialog">
           <Icon markup={ICONS.plus} /> Add a tool
@@ -4321,9 +4327,6 @@ function MainWindow(): ReactNode {
       </div>
     : state.tab === 'secrets'
       ? <div className="dw-head-actions">
-          <input id="secret-search" className="cat-search" type="search" placeholder="Search credentials…"
-            aria-label="Search credentials" value={state.secretSearch}
-            onChange={(e) => { state.secretSearch = e.currentTarget.value; render(); }} />
           <button className="btn primary add-tool-btn" data-act="open-add-secret">
             <Icon markup={ICONS.plus} /> Add credential
           </button>
@@ -4388,14 +4391,17 @@ function MainWindow(): ReactNode {
                     // column; its header widens with it so search and Add
                     // stay on the pane edge.
                     <div className={`dw-head ${state.tab === 'secrets' ? 'is-wide' : ''}`}>
-                      <div className="dw-head-title">
-                        <h2>{pageTitle}</h2>
-                        {state.tab === 'inbox'
-                          ? <span className={`request-total ${requestCount ? 'has-requests' : ''}`}
-                              aria-live="polite">
-                              {requestCount} pending
-                            </span>
-                          : null}
+                      <div className="dw-head-left">
+                        <div className="dw-head-title">
+                          <h2>{pageTitle}</h2>
+                          {state.tab === 'inbox'
+                            ? <span className={`request-total ${requestCount ? 'has-requests' : ''}`}
+                                aria-live="polite">
+                                {requestCount} pending
+                              </span>
+                            : null}
+                        </div>
+                        {pageSearch}
                       </div>
                       {pageAction}
                     </div>

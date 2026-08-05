@@ -284,9 +284,18 @@
   .dw-head{
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between;
+  /* The cell gap matches .tools-split / .creds-split so the header's two
+     cells sit exactly over the page's two columns. */
+  gap: 14px;
   height: 56px;
   width: 100%; max-width: calc(var(--content-max) + .5rem); margin: 0 auto;
   padding: 12px 16px 12px 24px;
+}
+  /* The left cell tracks the list column below: title on its left edge,
+     search on its right, so the field ends where the list pane ends. */
+  .dw-head-left{
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
 }
   .dw-head-title{ min-width: 0; display: flex; align-items: center; gap: 8px; }
   .dw-head h2{ font-size: 1.0625rem; }/* ---- custom title bar (main window) ---------------------------------- */
@@ -1334,9 +1343,20 @@
     --b-ssh-bg: rgba(80,190,120,.18);   --b-ssh-ink: #96dcae;
     --b-agent-bg: rgba(255,255,255,.10); --b-agent-ink: #b8b8c0;
 }
-  /* The header's trailing controls: search sits beside the primary action. */
-.dw-head-actions { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; }
-.dw-head-actions .cat-search { width: 210px; }
+  /* The header's right cell: the primary actions, sized like the detail
+   column below (keep the basis in step with .conn-detail-col /
+   .cred-detail-col) so the two header cells mirror the split's panes. */
+.dw-head-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 16px;
+  flex: 0 1 clamp(20rem, calc(38% + 2.5rem), 26.25rem); min-width: 0;
+}
+.dw-head .cat-search { width: 210px; flex: 0 0 auto; }
+/* Below the split breakpoint the detail column leaves the flow (it rides
+   over the list as a slide-over), so the right cell stops reserving its
+   width and the header packs like any toolbar. */
+@media (max-width: 720px) {
+  .dw-head-actions { flex: 0 0 auto; }
+}
 .cat-count.is-static { cursor: default; }
 .cat-count.is-static:hover { opacity: 1; }
 
@@ -1976,6 +1996,8 @@
 .cdet-source-tx { min-width: 0; }
 .cdet-source-tx b { display: block; font-size: 0.78125rem; }
 .cdet-source-tx small { color: var(--muted); font-size: 0.71875rem; overflow-wrap: anywhere; }
+/* Edit/Delete close the inspector, under the last detail card. */
+.cdet-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
 .cred-detail-backdrop { display: none; }
 @media (max-width: 720px) {
@@ -2137,7 +2159,9 @@ label.totp-remove-check {
   display: flex; align-items: center; gap: 10px;
   height: 35px; padding: 0 14px 2px;
   border-top: 1px solid var(--line);
-  background: var(--wash); color: var(--muted); font-size: 0.75rem;
+  /* No fill of its own: the bar sits on the same surface as the page
+     content above it, in the main window and the tray alike. */
+  background: transparent; color: var(--muted); font-size: 0.75rem;
 }
 .sb-count { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-spacer { flex: 1; }
