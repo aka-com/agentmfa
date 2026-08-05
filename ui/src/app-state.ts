@@ -35,9 +35,9 @@ import {
 import { readSamplesDismissed } from './samples';
 import { UiStore } from './ui-store';
 
-export const TABS = ['secrets', 'connections', 'start', 'inbox', 'activity'] as const;
+export const TABS = ['secrets', 'connections', 'start', 'activity'] as const;
 export type Tab = typeof TABS[number];
-export const DROPDOWN_TABS = ['secrets', 'connections', 'activity', 'inbox'] as const satisfies readonly Tab[];
+export const DROPDOWN_TABS = ['secrets', 'connections', 'activity'] as const satisfies readonly Tab[];
 
 /** The Credentials page's sidebar-tile filter scopes. The tile presentation
  * (labels, icons, order) lives with the view in app.tsx. */
@@ -356,10 +356,6 @@ export interface AppState {
   /** The activity page's agent picker has its menu open. */
   activityAgentMenuOpen: boolean;
   activityAlertsOnly: boolean;
-  requestQuery: string;
-  requestAgent: string | null;
-  requestAlertsOnly: boolean;
-  expandedRequests: string[];
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -492,10 +488,6 @@ function createInitialState(): AppState {
     activityAgent: null,
     activityAgentMenuOpen: false,
     activityAlertsOnly: false,
-    requestQuery: '',
-    requestAgent: null,
-    requestAlertsOnly: false,
-    expandedRequests: [],
   };
 }
 

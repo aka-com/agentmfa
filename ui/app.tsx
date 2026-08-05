@@ -80,7 +80,7 @@ import {
   suggestedOnePasswordAlias,
 } from '/src/onepassword';
 import { ACTIVITY_PAGE_LIMIT, refreshActivityPages } from '/src/activity-refresh';
-import { activeRequestCount, activeRequests, anchorExpiry, recentRequests } from '/src/requests';
+import { activeRequestCount, activeRequests, anchorExpiry } from '/src/requests';
 import { anchorEndpointExpiries } from '/src/endpoint-expiry';
 import { APP_VERSION } from '/src/version';
 import { virtualListWindow } from '/src/virtual-list';
@@ -276,10 +276,6 @@ function clearBrokerOwnedState(): void {
   state.activityAgent = null;
   state.activityAgentMenuOpen = false;
   state.activityAlertsOnly = false;
-  state.requestQuery = '';
-  state.requestAgent = null;
-  state.requestAlertsOnly = false;
-  state.expandedRequests = [];
   state.toolSearch = '';
   state.secretSearch = '';
   state.sectionsExpanded = [];
@@ -364,9 +360,10 @@ function clearSensitivePresentation(): boolean {
   return changed;
 }
 
+/** Bring the waiting requests forward: they live atop the Activity log. */
 function showRequestInbox(): void {
   clearSensitivePresentation();
-  state.tab = 'inbox';
+  state.tab = 'activity';
   state.confirm = null;
   state.menuOpen = false;
   state.startMenuOpen = null;
@@ -790,110 +787,17 @@ function agentLabel(agent: string): string {
     : `Agent reported as “${agent}”`;
 }
 
+/** The compact request cards use the bare self-reported agent name in
+ * their context line; the review sheets keep the fuller "Agent reported
+ * as …" framing. */
+function shortAgent(agent: string): string {
+  return agent === 'endpoint' ? 'endpoint client' : agent;
+}
+
 /** A broker that predates the `required` flag omits it entirely, and the UI
  * it shipped against required every field — so absence stays required, and
  * only an explicit `false` marks a field optional. */
 const elicitFieldRequired = (field: { required?: boolean }): boolean => field.required !== false;
-
-function requestOutcome(record: RequestRecord): {
-  label: string;
-  detail: string;
-  icon: IconDefinition;
-  tone: string;
-} {
-  const minutes = Math.max(1, Math.round((record.window_secs ?? 900) / 60));
-  switch (record.resolution) {
-    case 'approved_for_window':
-      return {
-        label: 'Approved',
-        detail: `Allowed for ${minutes} minute${minutes === 1 ? '' : 's'}`,
-        icon: ICONS.circleCheck,
-        tone: 'success',
-      };
-    case 'approved_all':
-    case 'confirmation_disabled':
-      return {
-        label: 'Approved',
-        detail: 'Allowed and traffic confirmation turned off',
-        icon: ICONS.circleCheck,
-        tone: 'success',
-      };
-    case 'denied':
-      return {
-        label: 'Denied',
-        detail: 'Refused by the user',
-        icon: ICONS.circleX,
-        tone: 'danger',
-      };
-    case 'timed_out':
-      return {
-        label: 'Expired',
-        detail: 'No answer before the deadline',
-        icon: ICONS.clockAlert,
-        tone: 'muted',
-      };
-    case 'policy_changed':
-      return {
-        label: 'Revoked',
-        detail: 'Access, destination, or broker authority changed',
-        icon: ICONS.circleX,
-        tone: 'danger',
-      };
-    case 'no_surface':
-      return {
-        label: 'Unavailable',
-        detail: 'No connected surface could ask',
-        icon: ICONS.clockAlert,
-        tone: 'muted',
-      };
-    case 'waived':
-      return {
-        label: 'Approved',
-        detail: 'Allowed by the attached confirmation surface',
-        icon: ICONS.circleCheck,
-        tone: 'success',
-      };
-    case 'caller_disconnected':
-      return {
-        label: 'Abandoned',
-        detail: 'The caller disconnected before an answer',
-        icon: ICONS.clockAlert,
-        tone: 'muted',
-      };
-    case 'input_provided':
-      return {
-        label: 'Provided',
-        detail: 'Input provided; the paused call resumed',
-        icon: ICONS.circleCheck,
-        tone: 'success',
-      };
-    case 'input_refused':
-      return {
-        label: 'Refused',
-        detail: 'Input refused; the paused call was told no',
-        icon: ICONS.circleX,
-        tone: 'danger',
-      };
-    default: {
-      const fallback = ({
-        approved: ['Approved', ICONS.circleCheck, 'success'],
-        denied: ['Denied', ICONS.circleX, 'danger'],
-        expired: ['Expired', ICONS.clockAlert, 'muted'],
-        revoked: ['Revoked', ICONS.circleX, 'danger'],
-        unavailable: ['Unavailable', ICONS.clockAlert, 'muted'],
-        abandoned: ['Abandoned', ICONS.clockAlert, 'muted'],
-        pending: ['Pending', ICONS.clockAlert, 'muted'],
-      } as Record<string, [string, IconDefinition, string]>)[record.status]
-        ?? ['Completed', ICONS.circleCheck, 'muted'];
-      return {
-        label: fallback[0],
-        detail: fallback[0],
-        icon: fallback[1],
-        tone: fallback[2],
-      };
-    }
-  }
-}
 
 function LiveSessions({ extraClass = '' }: { extraClass?: string }): ReactNode {
   return (
@@ -921,12 +825,13 @@ function LiveSessions({ extraClass = '' }: { extraClass?: string }): ReactNode {
   );
 }
 
-/** The waiting-requests banner: a compact route to the Request Inbox from
- * every other screen. The desktop master–detail pages seat it atop their
- * list column; other surfaces wrap it in the page band (GlobalSections). */
+/** The waiting-requests banner: a compact route to the requests waiting
+ * atop the Activity log, from every other screen. The desktop master–detail
+ * pages seat it atop their list column; other surfaces wrap it in the page
+ * band (GlobalSections). */
 function RequestsBanner(): ReactNode {
   const requestCount = activeRequestCount(state.approvals, state.elicitations);
-  if (!requestCount || state.tab === 'inbox') return null;
+  if (!requestCount || state.tab === 'activity') return null;
   const label = requestCount === 1 ? '1 request needs attention'
     : `${requestCount} requests need attention`;
   const kinds = [
@@ -939,20 +844,20 @@ function RequestsBanner(): ReactNode {
   ].filter(Boolean).join(', ');
   return (
     <button className="request-banner" data-act="open-inbox"
-      aria-label={`${label}. Open the Request Inbox.`}>
+      aria-label={`${label}. Review them in Activity.`}>
       <span className="request-banner-ico">
         <Icon markup={state.approvals.length ? ICONS.shieldAlert : ICONS.bell} />
       </span>
       <span className="request-banner-copy"><b>{label}</b>
         <span>{kinds} waiting for you</span></span>
-      <span className="request-banner-cta">Open Inbox</span>
+      <span className="request-banner-cta">Review</span>
     </button>
   );
 }
 
 function GlobalSections({ embeddedInStart = false }: { embeddedInStart?: boolean }): ReactNode {
   const requestCount = activeRequestCount(state.approvals, state.elicitations);
-  const showRequests = requestCount > 0 && state.tab !== 'inbox';
+  const showRequests = requestCount > 0 && state.tab !== 'activity';
   if (!showRequests) return null;
   return (
     <div className={`dd-global ${embeddedInStart ? 'start-global' : ''}${
@@ -962,236 +867,106 @@ function GlobalSections({ embeddedInStart = false }: { embeddedInStart?: boolean
   );
 }
 
-function RequestInbox(): ReactNode {
-  const active = activeRequests(state.approvals, state.elicitations);
-  const activeIds = new Set(active.map((request) => request.id));
-  const allRecent = recentRequests(state.requests, activeIds);
-  const requestAgentCounts = countAgents(allRecent.map((record) => record.agent));
-  const needle = state.requestQuery.trim().toLowerCase();
-  const recent = allRecent.filter((record) => {
-    if (state.requestAgent && record.agent !== state.requestAgent) return false;
-    if (state.requestAlertsOnly && requestOutcome(record).tone === 'success') return false;
-    if (!needle) return true;
-    return record.summary.toLowerCase().includes(needle)
-      || (record.detail || '').toLowerCase().includes(needle)
-      || (record.credential_names || []).some((name) => name.toLowerCase().includes(needle))
-      || (record.method || '').toLowerCase().includes(needle)
-      || (record.path || '').toLowerCase().includes(needle)
-      || (record.host_key_fingerprint || '').toLowerCase().includes(needle)
-      || record.agent.toLowerCase().includes(needle)
-      || record.connection.toLowerCase().includes(needle)
-      || (record.target || '').toLowerCase().includes(needle);
-  });
-  const count = active.length;
-  const empty = count === 0 && allRecent.length === 0;
+/** The refused-confirmations advisory: traffic that was turned away because
+ * no approval surface was attached to ask. */
+function RequestSurfaceWarning(): ReactNode {
   const unavailableRefusals = state.requests.filter((record) =>
     record.kind === 'approval'
     && (record.status === 'unavailable' || record.resolution === 'unavailable')).length;
+  if (!unavailableRefusals) return null;
   return (
-    <div className="request-inbox">
-      {unavailableRefusals > 0
-        ? <div className="request-surface-warning" role="status">
-            <b>{unavailableRefusals} traffic confirmation
-              {unavailableRefusals === 1 ? ' was' : 's were'} refused</b>
-            <span>
-              No approval surface was attached. This count comes from structured request outcomes.
-            </span>
-          </div>
-        : null}
-      {empty
-        ? <div className="empty request-empty">
-            <div className="empty-ico"><Icon markup={ICONS.bell} /></div>
-            <h3>No requests yet</h3>
-            <p>Requests that need attention and outcomes from this broker session will appear here.</p>
-          </div>
-        : <>
-            <section className="request-section" aria-labelledby="request-active-title">
-              <div className="request-section-head">
-                <h3 id="request-active-title">Needs attention</h3>
-                <span className={`request-total ${count ? 'has-requests' : ''}`}>{count}</span>
-              </div>
-              {count === 0
-                ? <div className="request-section-empty">Nothing is waiting on you.</div>
-                : <div className="request-list">
-                    {active.map((item) => {
-                      if (item.kind === 'approval') {
-                        const approval = item.approval;
-                        const riders = approval.waiting > 1
-                          ? `${approval.waiting} calls are waiting on this answer`
-                          : '1 call is waiting on this answer';
-                        return (
-                          <button key={`approval:${approval.id}`}
-                            className="request-card request-card-approval"
-                            data-act="approval-open" data-id={approval.id}>
-                            <span className="request-card-ico"><Icon markup={ICONS.shieldAlert} /></span>
-                            <span className="request-card-body">
-                              <span className="request-card-top">
-                                <span className="request-kind">Approval</span>
-                              </span>
-                              <b className="untrusted-identity" dir="auto">
-                                {agentLabel(approval.agent)} {approvalUnit(approval)}
-                              </b>
-                              <span className="request-context untrusted-identity" dir="auto">
-                                {approval.connection} · {approval.target}
-                              </span>
-                              <code className="request-summary untrusted-identity" dir="auto">
-                                {approval.summary}
-                              </code>
-                              <span className="request-foot">{riders}</span>
-                            </span>
-                            <span className="request-card-side">
-                              <span className="request-when" title={absTime(approval.requested_at)}>
-                                {relTime(approval.requested_at)} · expires in {timeLeft(approval.expires_at)}
-                              </span>
-                              <span className="request-card-action">Review</span>
-                            </span>
-                          </button>
-                        );
-                      }
-                      const request = item.elicitation;
-                      return (
-                        <button key={`elicitation:${request.id}`}
-                          className="request-card request-card-elicitation"
-                          data-act="elicit-open" data-id={request.id}>
-                          <span className="request-card-ico"><Icon markup={ICONS.bell} /></span>
-                          <span className="request-card-body">
-                            <span className="request-card-top">
-                              <span className="request-kind">Input request</span>
-                            </span>
-                            <b className="untrusted-identity" dir="auto">
-                              {agentLabel(request.agent)} says {request.connection} asked for input
-                            </b>
-                            <span className="request-context untrusted-identity" dir="auto">
-                              {request.agent} is paused · {request.tool}
-                            </span>
-                            <span className="request-prompt untrusted-identity" dir="auto">
-                              {request.prompt}
-                            </span>
-                          </span>
-                          <span className="request-card-side">
-                            <span className="request-when" title={absTime(request.requested_at)}>
-                              {relTime(request.requested_at)} · expires in {timeLeft(request.expires_at)}
-                            </span>
-                            <span className="request-card-action">Answer</span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>}
-            </section>
-            <section className="request-section" aria-labelledby="request-recent-title">
-              <div className="request-section-head">
-                <h3 id="request-recent-title">Recent (this broker session)</h3>
-                <span className="request-total">{allRecent.length}</span>
-              </div>
-              {allRecent.length > 0
-                ? <div className="act-filters request-filters">
-                    <input id="request-search" className="cat-search act-search" type="search"
-                      placeholder="Filter requests…" aria-label="Filter request history"
-                      value={state.requestQuery}
-                      onChange={(e) => { state.requestQuery = e.currentTarget.value; render(); }} />
-                    <button className={`seg-btn act-filter ${state.requestAlertsOnly ? 'on' : ''}`}
-                      data-act="request-filter-alerts" aria-pressed={state.requestAlertsOnly}
-                      title="Only show requests that were denied, failed, or expired">Alerts</button>
-                    <AgentFilterChips counts={requestAgentCounts} selected={state.requestAgent}
-                      act="request-filter-agent" noun="requests"
-                      onSelect={(agent) => { state.requestAgent = agent; render(); }} />
-                  </div>
-                : null}
-              {recent.length === 0
-                ? <div className="request-section-empty">
-                    {allRecent.length
-                      ? 'Nothing matches these filters.'
-                      : 'Resolved requests from this broker session will appear here.'}
-                  </div>
-                : <div className="request-list request-history-list">
-                    {recent.map((record) => {
-                      const outcome = requestOutcome(record);
-                      const at = record.resolved_at ?? record.requested_at;
-                      const key = `${record.kind}:${record.id}`;
-                      const expanded = state.expandedRequests.includes(key);
-                      const connectionAvailable = record.connection_id
-                        && state.connections.some((connection) => connection.id === record.connection_id);
-                      const context = [
-                        agentLabel(record.agent),
-                        record.connection,
-                        record.target,
-                      ].filter(Boolean).join(' · ');
-                      return (
-                        <article key={`${record.kind}:${record.id}`}
-                          className={`request-card request-card-history ${outcome.tone}`}>
-                          <button className="request-history-toggle"
-                            data-act="request-history-toggle" data-id={key}
-                            aria-expanded={expanded}>
-                            <span className="request-card-ico"><Icon markup={outcome.icon} /></span>
-                            <span className="request-card-body">
-                              <span className="request-card-top">
-                                <span className="request-kind">
-                                  {record.kind === 'elicitation' ? 'Input request'
-                                    : record.kind === 'approval' ? 'Approval' : 'Request'}
-                                </span>
-                                <span className="request-outcome">{outcome.label}</span>
-                              </span>
-                              <b>{outcome.detail}</b>
-                              <span className="request-context untrusted-identity" dir="auto">
-                                {context}
-                              </span>
-                              <code className="request-summary untrusted-identity" dir="auto">
-                                {record.summary}
-                              </code>
-                              {record.waiting > 1
-                                ? <span className="request-foot">
-                                    {record.waiting} calls shared this decision
-                                  </span>
-                                : null}
-                            </span>
-                            <span className="request-card-side">
-                              <span className="request-when" title={absTime(at)}>{relTime(at)}</span>
-                              <span className="request-card-action">
-                                {expanded ? 'Hide details' : 'Details'}
-                              </span>
-                            </span>
-                          </button>
-                          {expanded
-                            ? <div className="request-history-detail">
-                                {record.kind === 'approval'
-                                  ? <dl className="approval-facts">
-                                      <div>
-                                        <dt>{record.credential_names?.length === 1
-                                          ? 'Credential' : 'Credentials'}</dt>
-                                        <dd className="untrusted-identity" dir="auto">
-                                          {record.credential_names?.length
-                                            ? record.credential_names.join(', ') : 'None'}
-                                        </dd>
-                                      </div>
-                                      {record.method
-                                        ? <div><dt>Method</dt><dd><code>{record.method}</code></dd></div>
-                                        : null}
-                                      {record.path
-                                        ? <div><dt>Path</dt><dd><code>{record.path}</code></dd></div>
-                                        : null}
-                                      {record.host_key_fingerprint
-                                        ? <div><dt>Host key</dt>
-                                            <dd><code>{record.host_key_fingerprint}</code></dd></div>
-                                        : null}
-                                    </dl>
-                                  : null}
-                                <pre className="approval-detail untrusted-identity" dir="auto">
-                                  {record.detail || record.summary}
-                                </pre>
-                                {connectionAvailable
-                                  ? <button className="btn sm" data-act="request-open-connection"
-                                      data-id={record.connection_id}>Open tool</button>
-                                  : null}
-                              </div>
-                            : null}
-                        </article>
-                      );
-                    })}
-                  </div>}
-            </section>
-          </>}
+    <div className="request-surface-warning" role="status">
+      <b>{unavailableRefusals} traffic confirmation
+        {unavailableRefusals === 1 ? ' was' : 's were'} refused</b>
+      <span>
+        No approval surface was attached. This count comes from structured request outcomes.
+      </span>
     </div>
+  );
+}
+
+/** Deadlines stay quiet until they are about to matter: the card countdown
+ * appears only inside the last 30 seconds (the one-second ticker keeps it
+ * honest once it shows). */
+function expiryCountdown(expiresAt: string): string | null {
+  const secs = Math.round((Date.parse(expiresAt) - Date.now()) / 1000);
+  if (!Number.isFinite(secs) || secs >= 30) return null;
+  return timeLeft(expiresAt);
+}
+
+/** The activity stream's attention layer: every request waiting on the user,
+ * as actionable cards above the log. Outcomes are not repeated here — they
+ * land in the log like every other broker event. */
+function WaitingRequests(): ReactNode {
+  const active = activeRequests(state.approvals, state.elicitations);
+  if (!active.length) return null;
+  return (
+    <section className="request-section waiting-requests" aria-labelledby="request-active-title">
+      <div className="request-section-head">
+        <h3 id="request-active-title">Needs attention</h3>
+        <span className="request-total has-requests">{active.length}</span>
+      </div>
+      <div className="request-list">
+        {active.map((item) => {
+          // The ask leads; everything else compresses into one muted context
+          // line, and the kind icon speaks for itself (with a screen-reader
+          // prefix standing in for the old eyebrow).
+          if (item.kind === 'approval') {
+            const approval = item.approval;
+            const soon = expiryCountdown(approval.expires_at);
+            return (
+              <button key={`approval:${approval.id}`}
+                className="request-card request-card-approval"
+                data-act="approval-open" data-id={approval.id}>
+                <span className="request-card-ico"><Icon markup={ICONS.shieldAlert} /></span>
+                <span className="request-card-body">
+                  <span className="sr-only">Approval: </span>
+                  <b className="request-ask untrusted-identity" dir="auto">{approval.summary}</b>
+                  <span className="request-context untrusted-identity" dir="auto"
+                    title="Agent names are self-reported">
+                    {shortAgent(approval.agent)} → {approval.connection} · {approval.target}
+                    {approval.waiting > 1 ? ` · ${approval.waiting} calls waiting` : null}
+                  </span>
+                </span>
+                <span className="request-card-side">
+                  {soon
+                    ? <span className="request-when" title={absTime(approval.requested_at)}>
+                        {soon}
+                      </span>
+                    : null}
+                  <span className="request-card-action">Review</span>
+                </span>
+              </button>
+            );
+          }
+          const request = item.elicitation;
+          const soon = expiryCountdown(request.expires_at);
+          return (
+            <button key={`elicitation:${request.id}`}
+              className="request-card request-card-elicitation"
+              data-act="elicit-open" data-id={request.id}>
+              <span className="request-card-ico"><Icon markup={ICONS.bell} /></span>
+              <span className="request-card-body">
+                <span className="sr-only">Question: </span>
+                <b className="request-ask untrusted-identity" dir="auto">{request.prompt}</b>
+                <span className="request-context untrusted-identity" dir="auto"
+                  title="Agent names are self-reported">
+                  {shortAgent(request.agent)} → {request.connection} · paused on {request.tool}
+                </span>
+              </span>
+              <span className="request-card-side">
+                {soon
+                  ? <span className="request-when" title={absTime(request.requested_at)}>
+                      {soon}
+                    </span>
+                  : null}
+                <span className="request-card-action">Answer</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -3881,51 +3656,6 @@ function countAgents(agents: Array<string | null | undefined>): Map<string, numb
   return counts;
 }
 
-/** One filter chip per agent, most active first. Chips beat a dropdown at
- * small scale, but the row must not grow unbounded: past AGENT_CHIP_LIMIT
- * the tail collapses into a native "+N more" select, and an agent chosen
- * there is promoted to a visible pressed chip on the next render. */
-function AgentFilterChips({ counts, selected, act, noun, onSelect }: {
-  counts: Map<string, number>;
-  selected: string | null;
-  act: string;
-  noun: 'activity' | 'requests';
-  onSelect: (agent: string) => void;
-}): ReactNode {
-  const agents = [...counts.keys()].sort((a, b) =>
-    ((counts.get(b) ?? 0) - (counts.get(a) ?? 0)) || a.localeCompare(b));
-  let visible = agents;
-  let overflow: string[] = [];
-  if (agents.length > AGENT_CHIP_LIMIT) {
-    visible = agents.slice(0, AGENT_CHIP_LIMIT);
-    if (selected && !visible.includes(selected)) visible = [...visible, selected];
-    overflow = agents.filter((agent) => !visible.includes(agent));
-  }
-  return (
-    <>
-      {visible.map((agent) => (
-        <button key={agent} className={`seg-btn act-filter ${selected === agent ? 'on' : ''}`}
-          data-act={act} data-value={agent}
-          aria-pressed={selected === agent}
-          title={`Only show ${noun} from agent “${agent}” (self-reported label)`}>
-          <span className="act-filter-key">agent:</span>
-          <span className="untrusted-identity" dir="auto">{agent}</span>
-        </button>
-      ))}
-      {overflow.length > 0
-        ? <select className="act-filter-more" value=""
-            aria-label={`Filter ${noun} by another agent`}
-            onChange={(e) => { if (e.currentTarget.value) onSelect(e.currentTarget.value); }}>
-            <option value="" disabled>+{overflow.length} more…</option>
-            {overflow.map((agent) => (
-              <option key={agent} value={agent} dir="auto">{agent}</option>
-            ))}
-          </select>
-        : null}
-    </>
-  );
-}
-
 /** The activity entries the current filters keep. */
 function filteredActivity(): ActivityEntry[] {
   const needle = state.activityQuery.trim().toLowerCase();
@@ -4019,12 +3749,15 @@ function ActivityAgentFilter({ agents }: { agents: string[] }): ReactNode {
 }
 
 function ActivityView(): ReactNode {
+  // Requests waiting on the user lead the merged stream; the log follows.
+  const attention = <><RequestSurfaceWarning /><WaitingRequests /></>;
   const liveSessions = state.sessions.length
     ? <LiveSessions extraClass="activity-live-sessions" />
     : null;
   if (!state.activity.length) {
     return (
       <>
+        {attention}
         {liveSessions}
         <div className="muted-note">
           No activity yet.
@@ -4039,6 +3772,7 @@ function ActivityView(): ReactNode {
   const hasOlder = state.activityNextBefore !== null;
   return (
     <>
+      {attention}
       {liveSessions}
       <div className="act-filters">
         <input id="activity-search" className="cat-search act-search" type="search"
@@ -4112,7 +3846,6 @@ function DropdownCatalogSearch({ kind }: { kind: 'tool' | 'secret' }): ReactNode
 }
 
 function TabContent(): ReactNode {
-  if (state.tab === 'inbox') return <RequestInbox />;
   if (state.tab === 'activity') return <ActivityView />;
   if (state.tab === 'start') {
     return <StartViewPage globalSections={<GlobalSections embeddedInStart />} />;
@@ -4283,8 +4016,8 @@ function viewLoadKeys(tab: Tab): LoadKey[] {
     case 'start': return ['connections', 'identity', 'settings'];
     case 'connections': return ['connections'];
     case 'secrets': return ['secrets'];
-    case 'activity': return ['activity', 'sessions'];
-    case 'inbox': return ['approvals', 'elicitations', 'requests'];
+    // Activity is also the requests surface, so it owns their loads too.
+    case 'activity': return ['activity', 'sessions', 'approvals', 'elicitations', 'requests'];
   }
 }
 
@@ -4307,7 +4040,6 @@ function MainWindow(): ReactNode {
   const requestCount = activeRequestCount(state.approvals, state.elicitations);
   const pageTitle = state.tab === 'connections' ? 'Tools'
     : state.tab === 'secrets' ? 'Credentials'
-    : state.tab === 'inbox' ? 'Request inbox'
     // The sidebar keeps the tab's title-case label; the page header speaks
     // sentence case.
     : state.tab === 'activity' ? 'Activity log'
@@ -4370,7 +4102,7 @@ function MainWindow(): ReactNode {
                 <button key={tab} className={`nav-item ${state.tab === tab ? 'on' : ''}`}
                   data-act="tab" data-tab={tab} disabled={Boolean(takeover)}>
                   <span className="nav-tab-label">{tabLabel(tab)}</span>
-                  {tab === 'inbox' && requestCount > 0
+                  {tab === 'activity' && requestCount > 0
                     ? <span className="nav-count" aria-label={`${requestCount} pending requests`}>
                         {requestCount}
                       </span>
@@ -4414,7 +4146,7 @@ function MainWindow(): ReactNode {
                           </div>
                         : <div className="dw-head-title">
                             <h2>{pageTitle}</h2>
-                            {state.tab === 'inbox'
+                            {state.tab === 'activity'
                               ? <span className={`request-total ${requestCount ? 'has-requests' : ''}`}
                                   aria-live="polite">
                                   {requestCount} pending
@@ -4476,7 +4208,7 @@ function DropdownWindow(): ReactNode {
             <button key={tab} className={`seg-btn ${state.tab === tab ? 'on' : ''}`}
               data-act="tab" data-tab={tab}>
               <span>{tabLabel(tab)}</span>
-              {tab === 'inbox' && requestCount > 0
+              {tab === 'activity' && requestCount > 0
                 ? <span className="seg-count">{requestCount}</span>
                 : null}
             </button>
@@ -4706,11 +4438,13 @@ function AppRoot(): ReactNode {
   useUiRevision(uiStore);
   useBrokerQueryRevision();
   useExternalAppEvents();
-  const inboxVisible = booted && state.tab === 'inbox'
+  // Waiting requests render on the Activity tab, so that is when the core
+  // may treat them as "on screen" for notification purposes.
+  const requestsVisible = booted && state.tab === 'activity'
     && !brokerTakeover(state.broker, state.remoteSetup.open);
   useEffect(() => {
-    void invoke('ui_set_request_inbox_visible', { visible: inboxVisible });
-  }, [inboxVisible]);
+    void invoke('ui_set_request_inbox_visible', { visible: requestsVisible });
+  }, [requestsVisible]);
   if (!booted) {
     // Mounting React replaced index.html's placeholder; keep the same
     // splash up until boot() has real data, instead of flashing a fully
@@ -5716,9 +5450,14 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
               <div className="sf-line">
                 <label className="sf-lbl" htmlFor="f-value">{editing ? 'New password' : 'Password'}</label>
                 {/* Short enough to survive the tray-width sheet beside the
-                    eye and Generate controls. */}
-                {valueField('Password', editing ? EDIT_SECRET_MASK : 'In Keychain')}
+                    eye. */}
+                {valueField('Password', editing ? EDIT_SECRET_MASK : 'Stored in keychain')}
                 {visibilityControl}
+              </div>
+              <FieldError k="value" />
+              {/* Generate rides its own line under the value, like the QR
+                  picker under the Code row, so the input keeps the full row. */}
+              <div className="password-generator-row">
                 <div className="password-generator cred-select">
                   <div className="password-generator-group">
                     <button type="button" className="btn sm password-generator-main"
@@ -5753,7 +5492,6 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
                     : null}
                 </div>
               </div>
-              <FieldError k="value" />
             </div>}
             {/* 2FA is a first-class row (Passwords' "Code" section), no longer
                 folded behind an Advanced disclosure. */}
@@ -6987,7 +6725,7 @@ function SettingsSheet(): ReactNode {
   );
   const notificationRow = <div className="set-row notification-setting"><div className="set-txt">
       <div className="st-title">Request notifications</div>
-      <div className="st-sub">Native notifications are delivered by this computer and never include request details. Window only still brings the Inbox forward.</div></div>
+      <div className="st-sub">Native notifications are delivered by this computer and never include request details. Window only still brings the waiting requests forward.</div></div>
       <div className="seg in-form notification-modes" role="radiogroup" aria-label="Request notifications">
         {notificationModeBtn('off', 'Window only')}
         {notificationModeBtn('when_hidden', 'When away')}
@@ -7031,7 +6769,7 @@ function SettingsSheet(): ReactNode {
   );
   const notificationEscalationRow = notifications.mode === 'off' ? null
     : <div className="set-row"><div className="set-txt"><div className="st-title">Re-alert before the deadline</div>
-      <div className="st-sub">Bring the Inbox forward only while the same request is still waiting. The final in-app fallback remains on when re-alerting is off.</div></div>
+      <div className="st-sub">Bring the requests forward only while the same request is still waiting. The final in-app fallback remains on when re-alerting is off.</div></div>
       <div className="seg in-form" role="radiogroup" aria-label="Re-alert before a waiting request expires">
         {escalationBtn(0, 'Off')}{escalationBtn(15, '15 sec')}
         {escalationBtn(30, '30 sec')}{escalationBtn(60, '1 min')}
@@ -9461,29 +9199,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'activity-load-older':
       await loadOlderActivity();
       break;
-    case 'request-filter-alerts':
-      state.requestAlertsOnly = !state.requestAlertsOnly;
-      render();
-      break;
-    case 'request-filter-agent': {
-      const value = btn.dataset.value || '';
-      state.requestAgent = state.requestAgent === value ? null : value;
-      render();
-      break;
-    }
-    case 'request-history-toggle':
-      state.expandedRequests = state.expandedRequests.includes(id)
-        ? state.expandedRequests.filter((request) => request !== id)
-        : [...state.expandedRequests, id];
-      render();
-      break;
-    case 'request-open-connection':
-      state.tab = 'connections';
-      state.addPalette = null;
-      state.selectedConn = id;
-      state.connDetailOpen = true;
-      render();
-      break;
     case 'oauth-reconnect': {
       state.connMenuOpen = null;
       state.connMenuPoint = null;
@@ -10503,17 +10218,17 @@ async function boot() {
   // Relative timestamps and approval-window horizons drift; refresh their
   // rendered state every minute while the relevant tab is open.
   setInterval(() => {
-    if ((state.tab === 'activity' || state.tab === 'connections' || state.tab === 'inbox')
+    if ((state.tab === 'activity' || state.tab === 'connections')
         && !state.sheet && !state.menuOpen) render();
   }, 60000);
   // Approval deadlines are measured in seconds; keep the visible countdown
   // honest while the dialog is open instead of freezing at its first paint.
-  // The Inbox's active cards render the same countdowns, so it ticks too
-  // while something is waiting; its terminal history only needs the minute
-  // interval above.
+  // The Activity page's waiting cards render the same countdowns, so it
+  // ticks too while something is waiting; the log itself only needs the
+  // minute interval above.
   setInterval(() => {
     if (state.sheet?.kind === 'approval'
-        || (state.tab === 'inbox' && !state.sheet && !state.menuOpen
+        || (state.tab === 'activity' && !state.sheet && !state.menuOpen
           && activeRequestCount(state.approvals, state.elicitations) > 0)) render();
   }, 1000);
   // Live updates from the core.

@@ -398,12 +398,12 @@ test('detail-pane endpoint menus and other scroll-contained menus portal out', a
   assert.match(styles, /\.anchored-menu-portal/);
 });
 
-test('Inbox and Activity Log sit above the normal sidebar footer', async () => {
+test('the Activity Log sits above the normal sidebar footer', async () => {
   const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
 
   assert.match(
     styles,
-    /@media \(min-width: 721px\) \{[\s\S]*?\.dw-nav \.nav-item\[data-tab="inbox"\]\s*\{\s*margin-top: auto;\s*\}[\s\S]*?\.dw-nav \.nav-item\[data-tab="activity"\]\s*\{\s*margin-bottom: 4px;/,
+    /@media \(min-width: 721px\) \{[\s\S]*?\.dw-nav \.nav-item\[data-tab="activity"\]\s*\{\s*margin-top: auto; margin-bottom: 4px;/,
   );
 });
 
@@ -419,14 +419,14 @@ test('the Activity Log shows live sessions independently of audit filters', asyn
   assert.match(activity, /\{liveSessions\}\s*<div className="act-filters">/);
 });
 
-test('the Inbox ticks its second-level countdowns while requests wait', async () => {
+test('the waiting requests tick their second-level countdowns', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const secondTicker = app.match(
     /setInterval\(\(\) => \{\s*if \(state\.sheet\?\.kind === 'approval'([\s\S]*?)\}, 1000\);/,
   )?.[1];
 
   assert.ok(secondTicker, 'the one-second countdown interval is present');
-  assert.match(secondTicker, /state\.tab === 'inbox'/);
+  assert.match(secondTicker, /state\.tab === 'activity'/);
   assert.match(secondTicker, /activeRequestCount\(state\.approvals, state\.elicitations\) > 0/);
 });
 
@@ -678,7 +678,7 @@ test('request attention policy exposes escalation, onboarding, and autostart con
   assert.match(app, /data-act="toggle-autostart"/);
   assert.match(app, /invoke\('set_autostart'/);
   assert.match(app, /notificationModeBtn\('off', 'Window only'\)/);
-  assert.match(app, /Window only still brings the Inbox forward/);
+  assert.match(app, /Window only still brings the waiting requests forward/);
   assert.match(app, /Your system settings remain in control/);
 });
 
@@ -734,11 +734,11 @@ test('connection detail keeps only Ask before outside its Advanced disclosure', 
   assert.match(app, /Multitool has not connected to this tool yet\. The SSH host key will be pinned on first connection\./);
 });
 
-test('request history and secret dependencies remain actionable', async () => {
+test('waiting requests and secret dependencies remain actionable', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
 
-  assert.match(app, /data-act="request-history-toggle"/);
-  assert.match(app, /data-act="request-open-connection"/);
+  assert.match(app, /data-act="approval-open"/);
+  assert.match(app, /data-act="elicit-open"/);
   assert.match(app, /data-act="show-connection"/);
   assert.match(app, /data-act="delete-using-connection"/);
   assert.match(app, /void runConnectionTest\(connectionId\)/);

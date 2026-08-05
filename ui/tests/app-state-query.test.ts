@@ -13,8 +13,8 @@ test('navigation defaults to the Credentials tab and follows each shell order', 
   const { DROPDOWN_TABS, state, TABS } = await import('../src/app-state');
 
   assert.equal(state.tab, 'secrets');
-  assert.deepEqual(TABS, ['secrets', 'connections', 'start', 'inbox', 'activity']);
-  assert.deepEqual(DROPDOWN_TABS, ['secrets', 'connections', 'activity', 'inbox']);
+  assert.deepEqual(TABS, ['secrets', 'connections', 'start', 'activity']);
+  assert.deepEqual(DROPDOWN_TABS, ['secrets', 'connections', 'activity']);
 });
 
 test('query-backed state follows the active broker scope', async () => {

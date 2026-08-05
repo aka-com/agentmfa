@@ -248,13 +248,12 @@
   border-radius: 999px; background: var(--amber-wash); color: var(--amber-strong);
   font-size: 0.6875rem; font-weight: 700; line-height: 1;
 }
-  /* Keep the reactive destinations (waiting requests, history) beside the
-     sidebar controls they relate to, while the primary setup/navigation
-     destinations stay grouped at the top. The compact vertical rail keeps
-     its existing uninterrupted tab order. */
+  /* Keep the reactive destination (waiting requests atop the activity
+     log) beside the sidebar controls it relates to, while the primary
+     setup/navigation destinations stay grouped at the top. The compact
+     vertical rail keeps its existing uninterrupted tab order. */
   @media (min-width: 721px) {
-    .dw-nav .nav-item[data-tab="inbox"]{ margin-top: auto; }
-    .dw-nav .nav-item[data-tab="activity"]{ margin-bottom: 4px; }
+    .dw-nav .nav-item[data-tab="activity"]{ margin-top: auto; margin-bottom: 4px; }
   }
   /* Below the narrow breakpoint (keep in step with NARROW_LAYOUT in app.tsx)
      the left bar turns sideways: it collapses to a slim rail and each menu
@@ -539,24 +538,19 @@
   .request-banner-cta{ flex: 0 0 auto; color: var(--accent-text); font-size: 0.75rem; font-weight: 650; }
 
   /* ---- Request Inbox --------------------------------------------------- */
-  .request-inbox{ padding: 4px 0 24px; }
   .request-surface-warning{
   display: flex; flex-direction: column; gap: 2px; margin: 0 0 14px; padding: 10px 12px;
   border: 1px solid var(--danger-border); border-radius: 10px;
   background: var(--danger-wash); color: var(--danger-text); font-size: 0.78125rem;
 }
   .request-surface-warning span{ color: var(--muted); }
-  .request-section + .request-section{ margin-top: 20px; }
+  .waiting-requests{ margin: 8px 0 14px; }
   .request-section-head{
   display: flex; align-items: center; justify-content: space-between;
   min-height: 28px; padding: 0 2px 6px;
 }
   .request-section-head h3{
   margin: 0; color: var(--muted); font-size: 0.78125rem; font-weight: 650;
-}
-  .request-section-empty{
-  padding: 13px 12px; border: 1px dashed var(--line); border-radius: 10px;
-  color: var(--muted); font-size: 0.78125rem; text-align: center;
 }
   .request-total{
   flex: 0 0 auto; padding: 3px 8px; border-radius: 999px;
@@ -568,8 +562,10 @@
   border: 1px solid var(--line); border-radius: 11px;
   background: var(--card-bg); box-shadow: var(--shadow-sm);
 }
+  /* Two lines per card: the ask leads, one muted context line follows,
+     and the amber icon alone carries the kind. */
   .request-card{
-  width: 100%; display: flex; align-items: stretch; gap: 11px; padding: 12px;
+  width: 100%; display: flex; align-items: center; gap: 11px; padding: 10px 12px;
   border: 0; border-radius: 0; background: transparent;
   color: var(--ink); text-align: left; font: inherit; cursor: pointer;
 }
@@ -577,92 +573,35 @@
   .request-card:hover{ background: var(--field-bg); }
   .request-card:focus-visible{ outline: 2px solid var(--accent); outline-offset: -2px; }
   .request-card-ico{
-  flex: 0 0 auto; align-self: flex-start; width: 34px; height: 34px;
+  flex: 0 0 auto; width: 28px; height: 28px;
   display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 9px; background: var(--amber-wash); color: var(--amber-strong);
+  border-radius: 8px; background: var(--amber-wash); color: var(--amber-strong);
   border: 1px solid var(--amber-border);
 }
-  .request-card-ico svg{ width: 17px; height: 17px; }
-  .request-card-body{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-  .request-card-top{ display: flex; align-items: center; gap: 10px; }
-  .request-kind{
-  color: var(--amber-strong); font-size: 0.65625rem; font-weight: 750;
-  letter-spacing: .06em; text-transform: uppercase;
-}
-  .request-outcome{
-  padding: 1px 6px; border-radius: 999px; background: var(--chip-bg);
-  color: var(--muted); font-size: 0.65625rem; font-weight: 650;
-}
+  .request-card-ico svg{ width: 15px; height: 15px; }
+  .request-card-body{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .request-when{ color: var(--muted); font-size: 0.6875rem; white-space: nowrap; }
-  .request-card-body > b{ font-size: 0.84375rem; font-weight: 650; overflow-wrap: anywhere; }
-  .request-context{ color: var(--muted); font-size: 0.71875rem; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; }
-  .request-summary{
-  align-self: flex-start; max-width: 100%; margin-top: 2px; color: var(--ink-2);
-  font-size: 0.71875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-  .request-prompt{
-  margin-top: 2px; color: var(--ink-2); font-size: 0.75rem; line-height: 1.4;
+  /* The lead line clamps at two lines so a long question stays a card, not
+     an essay. */
+  .request-ask{
+  font-size: 0.8125rem; font-weight: 650; line-height: 1.35; overflow-wrap: anywhere;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-  .request-foot{ margin-top: 1px; color: var(--faint); font-size: 0.6875rem; }
+  .request-context{ color: var(--muted); font-size: 0.71875rem; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
   .request-card-side{
-  flex: 0 0 auto; min-width: max-content; display: flex; flex-direction: column;
-  align-items: flex-end; justify-content: space-between; gap: 8px; padding: 1px 0;
+  flex: 0 0 auto; min-width: max-content; display: flex; align-items: center;
+  gap: 10px;
 }
   .request-card-action{
   flex: 0 0 auto; color: var(--accent-text); font-size: 0.75rem; font-weight: 650;
 }
-  .request-card-history{ display: block; padding: 0; cursor: default; }
-  .request-card-history:hover{ background: transparent; }
-  .request-history-toggle{
-  width: 100%; display: flex; align-items: stretch; gap: 11px; padding: 12px;
-  border: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer;
-}
-  .request-history-toggle:hover{ background: var(--field-bg); }
-  .request-history-toggle:focus-visible{ outline: 2px solid var(--accent); outline-offset: -2px; }
-  .request-history-detail{
-  display: flex; align-items: flex-end; gap: 10px; padding: 0 12px 12px 57px;
-  border-top: 1px solid var(--line-soft);
-}
-  .request-history-detail .approval-detail{ flex: 1; min-width: 0; max-height: 180px; }
-  .request-history-detail .btn{ flex: 0 0 auto; }
-  .request-card-history.success .request-card-ico{
-  color: var(--ok-ink); background: var(--ok-wash); border-color: var(--ok-border);
-}
-  .request-card-history.success .request-outcome{
-  color: var(--ok-ink); background: var(--ok-wash);
-}
-  .request-card-history.danger .request-card-ico{
-  color: var(--danger-ink); background: var(--danger-wash); border-color: var(--danger-border);
-}
-  .request-card-history.danger .request-outcome{
-  color: var(--danger-ink); background: var(--danger-wash);
-}
-  .request-card-history.muted .request-card-ico{
-  color: var(--muted-2); background: var(--chip-bg); border-color: var(--line);
-}
-  .request-card-history.muted .request-outcome{ color: var(--muted); }
-  .request-empty{ padding-block: 48px; border: 1px dashed var(--line); border-radius: 11px; }
-  .dropdown-surface .request-inbox{ padding-top: 0; }
   .dropdown-surface .request-card{ padding: 10px; gap: 9px; }
-  .dropdown-surface .request-card-ico{ width: 30px; height: 30px; }
-  /* History rows wrap their content in an inner toggle button that carries
-     the padding; the card rule above outranks the base .request-card-history
-     reset, so re-scope it (and the toggle/detail metrics) to the dropdown. */
-  .dropdown-surface .request-card-history{ padding: 0; }
-  .dropdown-surface .request-history-toggle{ padding: 10px; gap: 9px; }
-  .dropdown-surface .request-history-detail{ padding: 0 10px 10px 49px; }
   @media (max-width: 520px) {
-    .request-card{ display: grid; grid-template-columns: 30px minmax(0, 1fr); }
-    .request-card-history{ display: block; }
-    .request-history-toggle{ display: grid; grid-template-columns: 30px minmax(0, 1fr); }
+    .request-card{ display: grid; grid-template-columns: 28px minmax(0, 1fr); }
     .request-card-ico{ grid-row: 1 / span 2; }
-    .request-card-side{
-      grid-column: 2; min-width: 0; flex-direction: row; align-items: center;
-    }
+    .request-card-side{ grid-column: 2; justify-content: flex-start; }
     .request-when{ white-space: normal; }
-    .request-history-detail{ padding-left: 12px; flex-direction: column; align-items: stretch; }
   }
   /* ---- elicitation (SEP-2322 request queue and dialog) ----------------- */
   /* The queue carries only a one-line notification; clicking it opens the
@@ -2131,6 +2070,9 @@
 }
 .sf-line input::placeholder { text-overflow: ellipsis; }
 .sf-row .field-error, .sf-row .field-hint { margin: 0 0 4px; padding-left: calc(6.5rem + 10px); }
+/* A hint annotates the value, not the label, so it hangs off the right edge
+   under the input it describes. */
+.sf-row .field-hint { text-align: right; }
 .sf-eye {
   flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
   width: 24px; height: 24px; border-radius: 6px; color: var(--muted-2); cursor: pointer;
@@ -2140,8 +2082,11 @@
 .sf-row .totp-remove-check { margin: 0 0 6px; padding-left: calc(6.5rem + 10px); }
 /* The footer rules itself off from the group, like the reference dialog. */
 .sheet-actions.secret-sheet-actions { border-top: 1px solid var(--line-soft); padding-top: 12px; }
+/* Generate sits on its own line beneath the value input, right aligned like
+   the QR picker under the Code row. */
+.password-generator-row { display: flex; justify-content: flex-end; margin-top: 5px; }
 .password-generator { flex: 0 0 auto; }
-.password-generator-group { display: inline-flex; align-items: stretch; height: 100%; }
+.password-generator-group { display: inline-flex; align-items: stretch; }
 .password-generator-main { border-radius: 7px 0 0 7px; }
 .password-generator-menu-trigger {
   width: 29px; margin-left: -1px; padding: 0;
@@ -2692,7 +2637,6 @@ label.totp-remove-check {
   padding: 14px 8px 4px; color: var(--muted); font-size: 0.75rem; text-align: center;
 }
 .activity-page-error { color: var(--danger); }
-.request-filters { padding-top: 2px; }
 .host-key-check { display: flex; align-items: center; gap: 9px; margin-top: 3px; }
 .host-key-check .rule-note { margin: 0; }
 .host-key-candidates { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
