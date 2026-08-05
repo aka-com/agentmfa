@@ -1926,11 +1926,11 @@
 .cred-detail-pane.is-empty {
   border-style: dashed; background: transparent; box-shadow: none;
 }
-.cdet-toolbar { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 12px; }
-/* A password inspector edits in place, so its toolbar holds only the
-   narrow-layout Back affordance; drop the reserved space when that hides. */
-.cdet-toolbar.is-quiet { margin-bottom: 0; }
-.cdet-back { display: none; margin-right: auto; }
+/* The toolbar holds only the slide-over's Back button, so while the panes
+   sit side by side it leaves the flow entirely — no blank strip over the
+   hero (the narrow media query below shows it again). */
+.cdet-toolbar { display: none; margin-bottom: 12px; }
+.cdet-back { display: inline-flex; align-items: center; }
 /* Per-group actions (Change Password…, Set Up Code…, Delete) rule off from
    the rows above them, like the reference app's edit surface. */
 .cdet-card-actions {
@@ -1996,8 +1996,18 @@
 .cdet-source-tx { min-width: 0; }
 .cdet-source-tx b { display: block; font-size: 0.78125rem; }
 .cdet-source-tx small { color: var(--muted); font-size: 0.71875rem; overflow-wrap: anywhere; }
-/* Edit/Delete close the inspector, under the last detail card. */
-.cdet-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+/* Edit/Delete close the inspector, under the last detail card. They read
+   as quiet text controls rather than raised chrome — the cards above hold
+   the page's weight — and Delete shows its danger only on approach. */
+.cdet-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
+.cdet-actions .btn {
+  border-color: transparent; background: transparent; box-shadow: none;
+  color: var(--muted);
+}
+.cdet-actions .btn:hover { background: var(--hover); color: var(--ink-2); }
+.cdet-actions .btn[data-act="del-secret-ask"]:hover {
+  background: var(--danger-wash); color: var(--danger-ink);
+}
 
 .cred-detail-backdrop { display: none; }
 @media (max-width: 720px) {
@@ -2025,7 +2035,7 @@
   .dw-titlebar + .dw-body .creds.detail-open .cred-detail-backdrop { top: var(--titlebar-h); }
   /* The drawer's way back to the list, hidden while the panes sit side
      by side. */
-  .cdet-back { display: inline-flex; }
+  .cdet-toolbar { display: flex; }
 }
 @media (prefers-reduced-motion: reduce) {
   .creds.detail-open .cred-detail-col { animation: none; }
