@@ -5527,11 +5527,12 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
                     <label htmlFor="f-totp">2FA secret <span className="label-note">optional</span></label>
                     <input id="f-totp" className={fieldCls('totp')} type="password"
                       placeholder={secret?.totp
-                        ? '•••••••• (set) — paste to replace'
+                        ? '•••••••• (set; paste to replace)'
                         : 'Base32 secret or otpauth:// URI'}
                       autoComplete="off" spellCheck={false}
                       value={d.totp ?? ''}
                       onChange={(e) => {
+                        supersedeTotpQrImageScan();
                         state.draft.removeTotp = false;
                         state.draft.totpFromQrImage = false;
                         setDraftField('totp', 'totp', e.currentTarget.value);
@@ -5552,15 +5553,16 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
                           if (file) void fillTotpFromQrImage(file);
                         }} />
                       <button type="button" className="btn sm totp-qr-btn"
-                        data-act="totp-qr-image">
+                        data-act="totp-qr-image" disabled={Boolean(d.totpQrImageScanning)}>
                         <Icon markup={ICONS.qrCode} />
-                        <span>Choose QR Code Image…</span>
+                        <span>{d.totpQrImageScanning ? 'Scanning…' : 'Choose QR Code Image…'}</span>
                       </button>
                     </div>
                     {secret?.totp
                       ? <label className="totp-remove-check">
                           <input type="checkbox" checked={Boolean(d.removeTotp)}
                             onChange={(e) => {
+                              supersedeTotpQrImageScan();
                               state.draft.removeTotp = e.currentTarget.checked;
                               if (e.currentTarget.checked) {
                                 state.draft.totp = '';
@@ -5598,7 +5600,8 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
       <FormGlobalError />
       <div className="sheet-actions">
         <button className="btn" data-act="sheet-cancel">Cancel</button>
-        <button className="btn primary" data-act="save-secret">Save</button>
+        <button className="btn primary" data-act="save-secret"
+          disabled={Boolean(d.totpQrImageScanning)}>Save</button>
       </div>
     </>
   );
@@ -7078,8 +7081,20 @@ function fillGeneratedPassword(format: PasswordGenerationFormat): void {
  * in the draft exactly as if it were pasted — the broker still parses and
  * validates it on save, so a QR code that isn't a 2FA seed fails there
  * with the same messages a bad paste would. */
+let totpQrImageScanGeneration = 0;
+
+/** A field edit is authoritative over an image decode already in flight. */
+function supersedeTotpQrImageScan(): void {
+  totpQrImageScanGeneration += 1;
+  state.draft.totpQrImageScanning = false;
+}
+
 async function fillTotpFromQrImage(file: File): Promise<void> {
   const sheet = state.sheet;
+  const generation = ++totpQrImageScanGeneration;
+  state.draft.totpQrImageScanning = true;
+  delete state.sheetErrors.totp;
+  render();
   let decoded: string | null = null;
   let failure: string | null = null;
   try {
@@ -7088,7 +7103,8 @@ async function fillTotpFromQrImage(file: File): Promise<void> {
   } catch {
     failure = 'That image could not be read';
   }
-  if (state.sheet !== sheet) return;
+  if (state.sheet !== sheet || generation !== totpQrImageScanGeneration) return;
+  state.draft.totpQrImageScanning = false;
   if (failure !== null) {
     state.draft.totpFromQrImage = false;
     state.sheetErrors = { ...state.sheetErrors, totp: failure };
@@ -7414,6 +7430,9 @@ async function connectSampleTool(sampleId: string): Promise<void> {
 async function saveSecret(): Promise<void> {
   const sheet = state.sheet;
   if (!sheet || (sheet.kind !== 'add-secret' && sheet.kind !== 'edit-secret')) return;
+  // A pending decode has not populated the controlled field yet. Do not let
+  // Enter submit the previous/empty value while the Save button is disabled.
+  if (state.draft.totpQrImageScanning) return;
   const epoch = brokerEpoch;
   const adding = sheet.kind === 'add-secret';
   const editingSecret = adding
@@ -8575,6 +8594,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'secret-kind': {
       const kind = btn.dataset.kind === 'password' ? 'password' as const : 'secret' as const;
       if (state.draft.secretKind === kind) break;
+      supersedeTotpQrImageScan();
       state.draft.secretKind = kind;
       state.sheetErrors = {};
       render();

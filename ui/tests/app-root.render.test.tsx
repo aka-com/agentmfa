@@ -299,16 +299,70 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
     },
   });
   await testingLibrary.findByText(dialog, 'That image could not be read');
-  testingLibrary.fireEvent.change(dialog.querySelector<HTMLInputElement>('#f-totp')!, {
-    target: { value: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ' },
-  });
-  assert.equal(
-    testingLibrary.queryByText(dialog, 'That image could not be read'), null,
-    'hand-editing the 2FA field clears the scan error',
+  const save = dialog.querySelector<HTMLButtonElement>('button[data-act="save-secret"]')!;
+
+  // A hand edit made after a slow image decode starts must win. Before the
+  // fix, the eventual decoder result could overwrite this controlled field
+  // (and likewise reverse the edit sheet's explicit Remove choice).
+  let resolveBitmap: ((bitmap: ImageBitmap) => void) | undefined;
+  let bitmapClosed = false;
+  const totpInput = dialog.querySelector<HTMLInputElement>('#f-totp')!;
+  const createImageBitmapDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis, 'createImageBitmap',
   );
-  testingLibrary.fireEvent.click(
-    dialog.querySelector<HTMLButtonElement>('button[data-act="save-secret"]')!,
-  );
+  const canvas = dom.window.HTMLCanvasElement.prototype;
+  const getContextDescriptor = Object.getOwnPropertyDescriptor(canvas, 'getContext')!;
+  try {
+    Object.defineProperty(globalThis, 'createImageBitmap', {
+      configurable: true,
+      value: () => new Promise<ImageBitmap>((resolve) => { resolveBitmap = resolve; }),
+    });
+    // The stale scan need only reach its failure path; avoid jsdom's noisy
+    // "canvas not implemented" diagnostic while exercising it.
+    Object.defineProperty(canvas, 'getContext', {
+      configurable: true,
+      value: () => null,
+    });
+    testingLibrary.fireEvent.change(qrInput, {
+      target: {
+        files: [new dom.window.File(['slow image'], 'slow.png', { type: 'image/png' })],
+      },
+    });
+    assert.ok(resolveBitmap, 'the image decode is in flight');
+    assert.equal(
+      testingLibrary.getByRole<HTMLButtonElement>(dialog, 'button', { name: 'Scanning…' }).disabled,
+      true,
+    );
+    assert.equal(save.disabled, true, 'saving waits for the chosen image decode');
+    testingLibrary.fireEvent.keyDown(totpInput, { key: 'Enter' });
+    assert.equal(dialog.isConnected, true, 'Enter cannot bypass the pending-scan guard');
+
+    testingLibrary.fireEvent.change(totpInput, {
+      target: { value: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ' },
+    });
+    assert.equal(save.disabled, false, 'editing the field supersedes the pending scan');
+    assert.equal(
+      testingLibrary.queryByText(dialog, 'That image could not be read'), null,
+      'hand-editing the 2FA field clears the scan error',
+    );
+    resolveBitmap({
+      width: 100,
+      height: 100,
+      close: () => { bitmapClosed = true; },
+    } as ImageBitmap);
+    await testingLibrary.waitFor(() => assert.equal(bitmapClosed, true));
+    assert.equal(totpInput.value, 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ');
+    assert.equal(testingLibrary.queryByText(dialog, 'That image could not be read'), null);
+  } finally {
+    if (createImageBitmapDescriptor) {
+      Object.defineProperty(globalThis, 'createImageBitmap', createImageBitmapDescriptor);
+    } else {
+      Reflect.deleteProperty(globalThis, 'createImageBitmap');
+    }
+    Object.defineProperty(canvas, 'getContext', getContextDescriptor);
+  }
+
+  testingLibrary.fireEvent.click(save);
   // React Testing Library's waitFor act()-wrapper live-locks while this
   // save's command promise is pending, so settle natively — the same
   // reasoning as the 1Password save's deliberate nativeSetTimeout below.

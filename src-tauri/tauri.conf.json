@@ -51,7 +51,7 @@
       "tooltip": "Multitool"
     },
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; script-src 'self'"
     }
   },
   "bundle": {

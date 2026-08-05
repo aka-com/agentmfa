@@ -109,6 +109,8 @@ export interface ConnectionDraft {
   /** Whether the masked 2FA input was filled by decoding a QR-code image
    * (the input stays masked, so this backs the only visible confirmation). */
   totpFromQrImage?: boolean;
+  /** Whether a chosen QR-code image is still being decoded. */
+  totpQrImageScanning?: boolean;
   /** The edit sheet's explicit "remove 2FA" choice. */
   removeTotp?: boolean;
   importWarnings?: string[];

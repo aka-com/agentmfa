@@ -1,5 +1,3 @@
-import jsQR from 'jsqr';
-
 /** A decoded image ready to draw, plus how to release what backs it. */
 interface Drawable {
   width: number;
@@ -63,6 +61,9 @@ export async function decodeQrImage(file: Blob): Promise<string | null> {
   const drawable = await loadDrawable(file);
   try {
     if (!drawable.width || !drawable.height) throw new Error('empty image');
+    // Scanning is an occasional action; keep the sizeable decoder out of the
+    // application startup bundle and load it only after the user picks a file.
+    const { default: jsQR } = await import('jsqr');
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d', { willReadFrequently: true });
     if (!context) throw new Error('canvas is unavailable here');
@@ -70,6 +71,11 @@ export async function decodeQrImage(file: Blob): Promise<string | null> {
       const scale = Math.min(1, dimension / Math.max(drawable.width, drawable.height));
       canvas.width = Math.max(1, Math.round(drawable.width * scale));
       canvas.height = Math.max(1, Math.round(drawable.height * scale));
+      // jsQR reads RGB only and ignores alpha. Without an opaque backdrop,
+      // the transparent pixels in a common black-on-transparent QR export
+      // have zeroed RGB and become indistinguishable from its black modules.
+      context.fillStyle = '#fff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
       context.drawImage(drawable.source, 0, 0, canvas.width, canvas.height);
       const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
       const code = jsQR(pixels.data, pixels.width, pixels.height, {
