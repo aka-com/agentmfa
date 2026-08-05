@@ -284,18 +284,9 @@
   .dw-head{
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between;
-  /* The cell gap matches .tools-split / .creds-split so the header's two
-     cells sit exactly over the page's two columns. */
-  gap: 14px;
   height: 56px;
   width: 100%; max-width: calc(var(--content-max) + .5rem); margin: 0 auto;
   padding: 12px 16px 12px 24px;
-}
-  /* The left cell tracks the list column below: title on its left edge,
-     search on its right, so the field ends where the list pane ends. */
-  .dw-head-left{
-  flex: 1 1 auto; min-width: 0;
-  display: flex; align-items: center; justify-content: space-between; gap: 16px;
 }
   .dw-head-title{ min-width: 0; display: flex; align-items: center; gap: 8px; }
   .dw-head h2{ font-size: 1.0625rem; }/* ---- custom title bar (main window) ---------------------------------- */
@@ -1343,19 +1334,27 @@
     --b-ssh-bg: rgba(80,190,120,.18);   --b-ssh-ink: #96dcae;
     --b-agent-bg: rgba(255,255,255,.10); --b-agent-ink: #b8b8c0;
 }
-  /* The header's right cell: the primary actions, sized like the detail
-   column below (keep the basis in step with .conn-detail-col /
-   .cred-detail-col) so the two header cells mirror the split's panes. */
-.dw-head-actions {
-  display: flex; align-items: center; justify-content: flex-end; gap: 16px;
-  flex: 0 1 clamp(20rem, calc(38% + 2.5rem), 26.25rem); min-width: 0;
+  /* The header's trailing controls beside the primary action. */
+.dw-head-actions { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; }
+/* The master–detail pages mirror their content columns in the header: the
+   title-and-search cell shares the list column's flex recipe and the
+   actions cell the detail column's (keep the bases in step with
+   .creds-split / .tools-split), so the search's right edge lands on the
+   list column's right edge and the actions ride the detail pane. */
+.dw-head.is-split { justify-content: flex-start; gap: 14px; }
+.dw-head-list-col {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 16px;
 }
-.dw-head .cat-search { width: 210px; flex: 0 0 auto; }
-/* Below the split breakpoint the detail column leaves the flow (it rides
-   over the list as a slide-over), so the right cell stops reserving its
-   width and the header packs like any toolbar. */
+.dw-head-list-col .cat-search { width: 210px; margin-left: auto; }
+.dw-head.is-split .dw-head-actions {
+  flex: 0 0 clamp(20rem, calc(38% + 2.5rem), 26.25rem);
+  justify-content: flex-end;
+}
 @media (max-width: 720px) {
-  .dw-head-actions { flex: 0 0 auto; }
+  /* Below this width the detail column is a slide-over (NARROW_LAYOUT);
+     the header follows it back to a single packed row. */
+  .dw-head.is-split .dw-head-actions { flex: 0 0 auto; }
 }
 .cat-count.is-static { cursor: default; }
 .cat-count.is-static:hover { opacity: 1; }
@@ -1575,7 +1574,10 @@
    card; the column owns the sticky placement and the viewport height, the
    pane keeps the card chrome and the scroll. */
 .conn-detail-col {
-  flex: 0 1 clamp(20rem, calc(38% + 2.5rem), 26.25rem);
+  /* No shrink: a wide catalog card must not squeeze the pane below its
+     clamp, and the header's actions cell mirrors this exact recipe to
+     keep the two columns aligned (see .dw-head.is-split). */
+  flex: 0 0 clamp(20rem, calc(38% + 2.5rem), 26.25rem);
   min-width: 0;
   position: sticky; top: 0;
   display: flex; flex-direction: column; gap: 10px;
@@ -1911,7 +1913,8 @@
    sticky placement (same recipe as .conn-detail-col); the pane keeps the
    card chrome and the scroll. */
 .cred-detail-col {
-  flex: 0 1 clamp(20rem, calc(38% + 2.5rem), 26.25rem);
+  /* No shrink, for the same header-alignment reason as .conn-detail-col. */
+  flex: 0 0 clamp(20rem, calc(38% + 2.5rem), 26.25rem);
   min-width: 0;
   position: sticky; top: 0;
   display: flex; flex-direction: column;
