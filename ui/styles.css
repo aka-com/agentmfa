@@ -1924,9 +1924,9 @@
 .cdet-edit {
   flex: 1; min-width: 0; padding: 0; border: 0; outline: none;
   background: transparent; color: var(--ink-2); font: inherit;
-  font-size: 0.8125rem; text-align: right;
+  font-size: 0.8125rem; text-align: right; text-overflow: ellipsis;
 }
-.cdet-edit::placeholder { color: var(--muted-2); }
+.cdet-edit::placeholder { color: var(--muted-2); text-overflow: ellipsis; }
 .cdet-row:focus-within { background: var(--hover); }
 .cdet-edit-wrap { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
 .cdet-edit-wrap .cdet-edit { flex: 1; }
@@ -2012,7 +2012,10 @@
 /* The tray: the same monogram rows, expanding in place to copy actions. */
 .dd-creds { display: flex; flex-direction: column; gap: 6px; }
 .dd-cred-sec-h {
-  margin: 2px 2px -2px; color: var(--muted);
+  /* 13px left inset = the card border + its 4px padding + the row's 8px,
+     so the heads sit on the same vertical line as row content and the
+     search field's text. */
+  margin: 2px 13px -2px; color: var(--muted);
   font-size: 0.65625rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
 }
 .dd-cred-list {
@@ -2086,7 +2089,10 @@
   flex: 1; min-width: 0; padding: 0; border: 0; outline: none;
   background: transparent; color: var(--ink); font: inherit;
   font-size: 0.8125rem; text-align: right;
+  /* A too-narrow row trails off instead of hard-clipping mid-glyph. */
+  text-overflow: ellipsis;
 }
+.sf-line input::placeholder { text-overflow: ellipsis; }
 .sf-row .field-error, .sf-row .field-hint { margin: 0 0 4px; padding-left: calc(6.5rem + 10px); }
 .sf-eye {
   flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;

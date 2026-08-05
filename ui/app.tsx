@@ -5685,7 +5685,9 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
             {focus === 'totp' ? null : <div className="sf-row">
               <div className="sf-line">
                 <label className="sf-lbl" htmlFor="f-value">{editing ? 'New password' : 'Password'}</label>
-                {valueField('Password', editing ? EDIT_SECRET_MASK : 'Saved in Keychain')}
+                {/* Short enough to survive the tray-width sheet beside the
+                    eye and Generate controls. */}
+                {valueField('Password', editing ? EDIT_SECRET_MASK : 'In Keychain')}
                 {visibilityControl}
                 <div className="password-generator cred-select">
                   <div className="password-generator-group">
