@@ -38,6 +38,10 @@ export const TABS = ['secrets', 'connections', 'start', 'inbox', 'activity'] as 
 export type Tab = typeof TABS[number];
 export const DROPDOWN_TABS = ['secrets', 'connections', 'activity', 'inbox'] as const satisfies readonly Tab[];
 
+/** The Credentials page's sidebar-tile filter scopes. The tile presentation
+ * (labels, icons, order) lives with the view in app.tsx. */
+export type SecretCategory = 'all' | 'passwords' | 'secrets' | 'codes' | 'onepassword';
+
 export interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings'
     | 'clear-activity' | 'elicitation' | 'approval' | 'mcp-auth' | 'wiring-tools'
@@ -278,6 +282,19 @@ export interface AppState {
   confirm: ConfirmState | null;
   toolSearch: string;
   secretSearch: string;
+  /** The Credentials page's active category tile. */
+  secretCategory: SecretCategory;
+  /** Credential shown in the detail inspector; falls back to the list's
+   * first visible row when unset or filtered out. */
+  selectedSecret: string | null;
+  /** Narrow-layout only: the credential inspector rides over the list. In
+   * the wide layout the flag is inert — the inspector is always visible. */
+  secretDetailOpen: boolean;
+  /** Credential whose live 2FA code is on screen in the inspector. Codes
+   * are issued (and audited) only when asked for, not on selection. */
+  totpVisible: string | null;
+  /** Menu-bar tray: credential row expanded to its inline copy actions. */
+  dropdownSecretOpen: string | null;
   catalogActionMenuOpen: string | null;
   /** The Secrets status bar's vault popover is open. */
   vaultsPanelOpen: boolean;
@@ -405,6 +422,11 @@ function createInitialState(): AppState {
     confirm: null,
     toolSearch: '',
     secretSearch: '',
+    secretCategory: 'all',
+    selectedSecret: null,
+    secretDetailOpen: false,
+    totpVisible: null,
+    dropdownSecretOpen: null,
     catalogActionMenuOpen: null,
     vaultsPanelOpen: false,
     vaultMenuOpen: null,

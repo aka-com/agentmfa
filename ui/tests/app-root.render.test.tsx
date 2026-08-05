@@ -121,45 +121,72 @@ test('the application root boots against the mock bridge', () => {
   assert.ok(document.body.textContent?.includes('Credentials'));
 });
 
+/** Select a credential row by its title and wait for its inspector pane. */
+async function openCredentialDetail(title: string): Promise<HTMLElement> {
+  const row = [...document.querySelectorAll<HTMLElement>('.cred-row')]
+    .find((candidate) => candidate.querySelector('b')?.textContent === title);
+  assert.ok(row, `a list row for ${title}`);
+  testingLibrary.fireEvent.click(row);
+  return testingLibrary.waitFor(() => {
+    const pane = document.querySelector<HTMLElement>('.cred-detail-pane');
+    assert.ok(pane, 'the inspector pane is visible');
+    assert.equal(pane.querySelector('.cdet-title')?.textContent, title);
+    return pane;
+  });
+}
+
 test('the credential library always groups passwords apart from secrets', async () => {
   testingLibrary.fireEvent.click(
     document.querySelector<HTMLButtonElement>('button[data-act="tab"][data-tab="secrets"]')!,
   );
-  const groups = await testingLibrary.waitFor(() => {
-    const found = [...document.querySelectorAll<HTMLElement>('.secrets-group-h')];
-    assert.equal(found.length, 2, 'both typed groups are always visible');
-    return found;
+  await testingLibrary.waitFor(() => {
+    const cards = document.querySelectorAll('.cred-rows');
+    assert.equal(cards.length, 2, 'both typed groups are always visible');
   });
-  assert.deepEqual(groups.map((group) => group.textContent), ['Passwords', 'Secrets']);
+  // Passwords lead the page unlabelled; only the secrets card is headed,
+  // in the same register as the page title.
+  const sectionHeads = [...document.querySelectorAll<HTMLElement>('.creds-sec-h')];
+  assert.deepEqual(sectionHeads.map((head) => head.textContent), ['Secrets']);
+  assert.equal(document.querySelector('.secrets-group-h'), null);
+  assert.equal(document.querySelector('.credential-group-add'), null,
+    'the per-group add links are gone from the desktop listing');
 
+  // The category tiles scope the list and count the whole inventory.
+  const tiles = [...document.querySelectorAll<HTMLElement>('.cred-tile')];
   assert.deepEqual(
-    [...document.querySelectorAll<HTMLButtonElement>('.credential-group-add')]
-      .map((button) => button.textContent?.trim()),
-    ['＋ Add password', '＋ Add secret'],
+    tiles.map((tile) => tile.querySelector('.cred-tile-label')?.textContent),
+    ['All', 'Passwords', 'Secrets', 'Codes'],
+    'the 1Password tile waits for the integration',
   );
+  assert.equal(tiles[0]?.getAttribute('aria-checked'), 'true');
 
-  // Password rows read site → username → masked value; the desktop window
-  // renders the x.com entry's current 2FA code and countdown.
+  // Password rows read site over username; selecting the x.com entry shows
+  // its inspector with the current 2FA code and countdown.
   const hosts = [...document.querySelectorAll<HTMLElement>('.site-host')]
     .map((host) => host.textContent);
   assert.deepEqual(hosts, ['google.com', 'x.com']);
   assert.ok(document.body.textContent?.includes('raykyri@gmail.com'));
+  const googleDetail = await openCredentialDetail('google.com');
+  assert.equal(googleDetail.querySelector('.totp-live'), null);
   const xRow = [...document.querySelectorAll<HTMLElement>('.site-host')]
-    .find((host) => host.textContent === 'x.com')?.closest('tr');
+    .find((host) => host.textContent === 'x.com')?.closest('button');
+  const xDetail = await openCredentialDetail('x.com');
+  // Codes are issued on request: selection shows only the Show code button.
+  assert.equal(xDetail.querySelector('.totp-live'), null);
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(xDetail, 'button', { name: 'Show the current 2FA code for x.com' }),
+  );
   const liveTotp = await testingLibrary.waitFor(() => {
-    const button = xRow?.querySelector<HTMLButtonElement>('.totp-live:not(.totp-live-loading)');
+    const button = xDetail.querySelector<HTMLButtonElement>('.totp-live:not(.totp-live-loading)');
     assert.ok(button);
     assert.match(button.textContent ?? '', /246 801\d+s/);
     return button;
   });
   assert.equal(liveTotp.getAttribute('aria-label'), 'Copy the current 2FA code for x.com');
-  assert.ok(testingLibrary.getByRole(xRow!, 'button', { name: 'Edit password x.com' }));
-  const deletePassword = testingLibrary.getByRole(xRow!, 'button', {
+  assert.ok(testingLibrary.getByRole(xDetail, 'button', { name: 'Edit password x.com' }));
+  const deletePassword = testingLibrary.getByRole(xDetail, 'button', {
     name: 'Delete password x.com',
   });
-  const googleRow = [...document.querySelectorAll<HTMLElement>('.site-host')]
-    .find((host) => host.textContent === 'google.com')?.closest('tr');
-  assert.equal(googleRow?.querySelector('.totp-live'), null);
   // Derived names stay internal — password rows never show them.
   assert.equal(document.body.textContent?.includes('PASSWORD_X_COM'), false);
 
@@ -222,7 +249,7 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
     );
   });
   const passwordInput = dialog.querySelector<HTMLInputElement>('#f-value')!;
-  const showPassword = testingLibrary.getByRole(dialog, 'checkbox', { name: 'Show password' });
+  const showPassword = testingLibrary.getByRole<HTMLInputElement>(dialog, 'checkbox', { name: 'Show password' });
   assert.equal(passwordInput.type, 'password');
   assert.equal(showPassword.checked, false);
   assert.equal(dialog.querySelector('#f-totp'), null, '2FA stays folded under Advanced');
@@ -281,13 +308,17 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
   const hosts = [...document.querySelectorAll<HTMLElement>('.site-host')]
     .map((host) => host.textContent);
   assert.ok(hosts.includes('example.com'), `site is canonicalized (got ${hosts.join(', ')})`);
-  const newRow = [...document.querySelectorAll<HTMLElement>('.site-host')]
-    .find((host) => host.textContent === 'example.com')?.closest('tr');
-  assert.ok(newRow?.querySelector('.totp-live'), 'the saved 2FA seed shows a desktop live code');
+  const newDetail = await openCredentialDetail('example.com');
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(newDetail, 'button', {
+      name: 'Show the current 2FA code for example.com',
+    }),
+  );
+  assert.ok(newDetail.querySelector('.totp-live'), 'the saved 2FA seed shows a desktop live code');
   assert.match(document.querySelector('.sb-count')?.textContent ?? '', /10 credentials/);
 
   testingLibrary.fireEvent.click(
-    newRow!.querySelector<HTMLButtonElement>('button[data-act="edit-secret"]')!,
+    newDetail.querySelector<HTMLButtonElement>('button[data-act="edit-secret"]')!,
   );
   const editDialog = await testingLibrary.findByRole(document.body, 'dialog', {
     name: 'Edit password',
@@ -309,14 +340,21 @@ test('the typed add sheet saves passwords with a 2FA seed', { timeout: 8_000 }, 
 test('credential value visibility is direct on add and confirmed on edit', async () => {
   testingLibrary.fireEvent.click(
     document.querySelector<HTMLButtonElement>(
-      '.credential-group-add[data-kind="secret"]',
+      '.dw-head-actions button[data-act="open-add-secret"]',
     )!,
   );
   const addDialog = await testingLibrary.findByRole(document.body, 'dialog', {
     name: 'Add credential',
   });
+  // The header entry point preselects the password shape; this test wants
+  // the secret one.
+  testingLibrary.fireEvent.click(
+    addDialog.querySelector<HTMLButtonElement>(
+      'button[data-act="secret-kind"][data-kind="secret"]',
+    )!,
+  );
   const addValue = addDialog.querySelector<HTMLInputElement>('#f-value')!;
-  const addShow = testingLibrary.getByRole(addDialog, 'checkbox', { name: 'Show secret' });
+  const addShow = testingLibrary.getByRole<HTMLInputElement>(addDialog, 'checkbox', { name: 'Show secret' });
   assert.equal(addValue.type, 'password');
   testingLibrary.fireEvent.click(addShow);
   assert.equal(addValue.type, 'text');
@@ -326,16 +364,15 @@ test('credential value visibility is direct on add and confirmed on edit', async
     testingLibrary.getByRole(addDialog, 'button', { name: 'Cancel' }),
   );
 
-  const xRow = [...document.querySelectorAll<HTMLElement>('.site-host')]
-    .find((host) => host.textContent === 'x.com')?.closest('tr');
+  const xDetail = await openCredentialDetail('x.com');
   testingLibrary.fireEvent.click(
-    testingLibrary.getByRole(xRow!, 'button', { name: 'Edit password x.com' }),
+    testingLibrary.getByRole(xDetail, 'button', { name: 'Edit password x.com' }),
   );
   let editDialog = await testingLibrary.findByRole(document.body, 'dialog', {
     name: 'Edit password',
   });
   let editValue = editDialog.querySelector<HTMLInputElement>('#f-value')!;
-  let editShow = testingLibrary.getByRole(editDialog, 'checkbox', { name: 'Show password' });
+  let editShow = testingLibrary.getByRole<HTMLInputElement>(editDialog, 'checkbox', { name: 'Show password' });
   assert.equal(editValue.value, '', 'the stored password is not placed in the form on open');
   assert.equal(editValue.placeholder, '••••••••••••');
   testingLibrary.fireEvent.click(editShow);
@@ -349,7 +386,7 @@ test('credential value visibility is direct on add and confirmed on edit', async
   await testingLibrary.waitFor(() => {
     editDialog = testingLibrary.getByRole(document.body, 'dialog', { name: 'Edit password' });
     editValue = editDialog.querySelector<HTMLInputElement>('#f-value')!;
-    editShow = testingLibrary.getByRole(editDialog, 'checkbox', { name: 'Show password' });
+    editShow = testingLibrary.getByRole<HTMLInputElement>(editDialog, 'checkbox', { name: 'Show password' });
     assert.equal(editValue.value, 'demo-pw-x');
     assert.equal(editValue.type, 'text');
     assert.equal(editShow.checked, true);
@@ -361,14 +398,13 @@ test('credential value visibility is direct on add and confirmed on edit', async
     testingLibrary.getByRole(editDialog, 'button', { name: 'Cancel' }),
   );
 
-  const secretRow = [...document.querySelectorAll<HTMLElement>('.s-name')]
-    .find((name) => name.textContent === 'GITHUB_API_KEY')?.closest('tr');
+  const secretDetail = await openCredentialDetail('GITHUB_API_KEY');
   testingLibrary.fireEvent.click(
-    testingLibrary.getByRole(secretRow!, 'button', { name: 'Edit secret GITHUB_API_KEY' }),
+    testingLibrary.getByRole(secretDetail, 'button', { name: 'Edit secret GITHUB_API_KEY' }),
   );
   editDialog = await testingLibrary.findByRole(document.body, 'dialog', { name: 'Edit secret' });
   editValue = editDialog.querySelector<HTMLInputElement>('#f-value')!;
-  editShow = testingLibrary.getByRole(editDialog, 'checkbox', { name: 'Show secret' });
+  editShow = testingLibrary.getByRole<HTMLInputElement>(editDialog, 'checkbox', { name: 'Show secret' });
   assert.equal(editValue.value, '');
   testingLibrary.fireEvent.click(editShow);
   const secretConfirm = await testingLibrary.findByRole(document.body, 'dialog', {
@@ -471,7 +507,7 @@ test('the 1Password sheet links a field through all three steps', { timeout: 8_0
   assert.equal(document.querySelector('.onepassword-sheet'), null);
   assert.ok(document.body.textContent?.includes(alias.value));
   const linkedRow = [...document.querySelectorAll<HTMLElement>('.s-name')]
-    .find((name) => name.textContent === alias.value)?.closest('tr');
+    .find((name) => name.textContent === alias.value)?.closest('button');
   assert.ok(linkedRow?.querySelector('.s-source-icon svg'));
   assert.equal(linkedRow?.querySelector('.s-source'), null);
   const credentialCount = document.querySelector<HTMLElement>('.secrets-statusbar .sb-count');
@@ -602,7 +638,7 @@ test('1Password credentials can recover and connections can be removed', { timeo
       '.vault-menu-wrap button[data-act="onepassword-update"]',
     );
     assert.ok(button);
-    assert.equal(button.textContent, 'Update connection');
+    assert.equal(button.textContent, 'Edit connection method…');
     return button;
   });
   testingLibrary.fireEvent.click(update);

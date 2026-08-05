@@ -9,7 +9,7 @@
 import { invoke, listen, mode } from '/src/bridge';
 import { QueryClientProvider } from '@tanstack/react-query';
 import {
-  Fragment, StrictMode, useEffect, useLayoutEffect, useRef, useState,
+  StrictMode, useEffect, useLayoutEffect, useRef, useState,
 } from 'react';
 import type {
   DragEvent as ReactDragEvent,
@@ -34,6 +34,7 @@ import type {
   ConnectionDraft,
   ConnMenuPoint,
   LoadKey,
+  SecretCategory,
   SheetState,
   Tab,
 } from '/src/app-state';
@@ -124,6 +125,7 @@ import {
   EndpointStrip,
 } from '/src/features/endpoint-view';
 import { ConnectedToolsList } from '/src/features/connected-tools-list';
+import { CredentialRowsList } from '/src/features/credential-rows';
 import { StartViewPage, startBlankId } from '/src/features/connect-agents-view';
 import { Sheet } from '/src/sheet';
 
@@ -247,6 +249,11 @@ function clearBrokerOwnedState(): void {
   state.connMenuPoint = null;
   state.secretMenuOpen = null;
   state.secretMenuPoint = null;
+  state.secretCategory = 'all';
+  state.selectedSecret = null;
+  state.secretDetailOpen = false;
+  state.totpVisible = null;
+  state.dropdownSecretOpen = null;
   state.connectionReady = null;
   state.connTests = {};
   state.draftTest = null;
@@ -334,7 +341,8 @@ function clearSensitivePresentation(): boolean {
   sensitivePresentationEpoch += 1;
   let changed = Object.keys(state.reveal).length > 0
     || Object.keys(state.epExpanded).length > 0
-    || state.secretMenuOpen !== null;
+    || state.secretMenuOpen !== null
+    || state.totpVisible !== null;
   if (state.sheet?.kind === 'edit-secret' && state.draft.showCredentialValue) {
     changed = true;
     state.draft.showCredentialValue = false;
@@ -344,6 +352,7 @@ function clearSensitivePresentation(): boolean {
   }
   state.reveal = {};
   state.epExpanded = {};
+  state.totpVisible = null;
   // The menu names the reveal state it was opened over; dropping the reveals
   // without it would leave "Unreveal secret" pointing at a hidden value.
   state.secretMenuOpen = null;
@@ -908,7 +917,8 @@ function GlobalSections({ embeddedInStart = false }: { embeddedInStart?: boolean
       : '',
   ].filter(Boolean).join(' · ');
   return (
-    <div className={`dd-global ${embeddedInStart ? 'start-global' : ''} request-route-only`}>
+    <div className={`dd-global ${embeddedInStart ? 'start-global' : ''}${
+      !embeddedInStart && state.tab === 'secrets' ? ' is-wide' : ''} request-route-only`}>
       <button className="request-banner" data-act="open-inbox"
         aria-label={`${label}. Open the Request Inbox.`}>
         <span className="request-banner-ico">
@@ -1256,110 +1266,236 @@ function LiveTotpCode({ id, site }: { id: string; site: string }): ReactNode {
   </button>;
 }
 
-function SecretsTable({ secrets, passwords = false }: {
-  secrets: SecretSummary[];
-  passwords?: boolean;
-}): ReactNode {
-  const compact = mode === 'dropdown';
-  const columnCount = passwords || !compact ? 4 : 3;
+/** Which category tile a credential sorts under (kind, factor, source). */
+function secretInCategory(secret: SecretSummary, category: SecretCategory): boolean {
+  switch (category) {
+    case 'all': return true;
+    case 'passwords': return secret.kind === 'password';
+    case 'secrets': return secret.kind !== 'password';
+    case 'codes': return Boolean(secret.totp);
+    case 'onepassword': return secret.source?.kind === 'one_password';
+  }
+}
+
+/** The monogram tile beside a row or atop the inspector: the site or name
+ * initial, Passwords-style. */
+function credentialInitial(secret: SecretSummary): string {
+  const label = secret.kind === 'password' ? secret.site ?? '' : secret.name;
+  return label.trim().charAt(0).toUpperCase() || '•';
+}
+
+/** A row's one-line description under its title. */
+function credentialSubtitle(secret: SecretSummary): string {
+  if (secret.kind === 'password') return secret.username || 'No username';
+  return secret.used_by_names.length
+    ? `Used by ${secret.used_by_names.join(', ')}`
+    : 'Not in use';
+}
+
+/** The masked-value copy affordance shared by the inspector and the tray
+ * expansion: the copy button and the post-copy "Copied" status both overlay
+ * the mask, centered — never beside it (the placeholder dims behind). */
+function MaskedValueCopy({ secret }: { secret: SecretSummary }): ReactNode {
+  const copied = state.copied === secret.id;
   return (
-    <table className={`sec-table ${passwords ? 'is-passwords' : 'is-secrets'}${compact ? ' is-compact' : ''}`}>
-      {passwords
-        ? <thead><tr><th>Site</th><th>Username</th><th><span className="sr-only">Password</span></th>
-            <th><span className="sr-only">Actions</span></th></tr></thead>
-        : compact
-        ? <thead><tr><th>Credential</th><th><span className="sr-only">Value</span></th>
-            <th><span className="sr-only">Actions</span></th></tr></thead>
-        : <thead><tr><th>Credential</th><th>Used by</th><th><span className="sr-only">Value</span></th>
-            <th><span className="sr-only">Actions</span></th></tr></thead>}
-      <tbody>{secrets.map((s) => {
-    // A reveal is the whole value, asked for by name through the row's
-    // right-click menu and confirmed there; it lands on its own line under
-    // the row rather than in the masked value slot.
-    const revealed = state.reveal[s.id];
-    const copied = state.copied === s.id;
-    const displayName = credentialDisplayName(s);
-    const noun = credentialNoun(s);
-    // The copy affordance and the post-copy "Copied" status both overlay the
-    // masked value, centered — never beside it (the placeholder dims behind).
-    const overlay = copied
-      ? <span className="copied-badge"><Icon markup={ICONS.check} /><span>Copied</span></span>
-      : <button className="ghost-copy" title="Copy value" data-act="copy-secret"
-          data-id={s.id}><Icon markup={ICONS.copy} /><span>Copy</span></button>;
-    const usedBy = s.used_by_names.length ? (
-      <div className="used-by-links">{s.used_by_names.map((name) => {
-          const connection = state.connections.find((candidate) => candidate.name === name);
-          return connection
-            ? <button key={connection.id} className="used-by-link" data-act="show-connection"
-                data-id={connection.id}>{name}</button>
-            : <span key={name}>{name}</span>;
-        })}</div>
-    ) : <span className="used-by-empty">Not in use</span>;
-    const identity = passwords
-      ? <>
-          <td><span className="site-cell">
-            <span className="site-tile" aria-hidden="true">
-              {(s.site ?? '?').charAt(0).toUpperCase()}
+    <span className="val-wrap"><span className={`val-slot ${copied ? 'is-copied' : ''}`}>
+      <code>••••••••</code>
+      <span className="val-overlay">{copied
+        ? <span className="copied-badge"><Icon markup={ICONS.check} /><span>Copied</span></span>
+        : <button className="ghost-copy" title="Copy value" data-act="copy-secret"
+            data-id={secret.id}><Icon markup={ICONS.copy} /><span>Copy</span></button>}</span>
+    </span></span>
+  );
+}
+
+/** A user name is public metadata; it copies from the webview directly and
+ * shows its hover affordance beside the visible text. */
+function UsernameCopy({ secret }: { secret: SecretSummary }): ReactNode {
+  if (!secret.username) return <span className="used-by-empty">No username</span>;
+  const copied = state.copied === `user:${secret.id}`;
+  return (
+    <span className="val-wrap">
+      <span dir="auto">{secret.username}</span>
+      {copied
+        ? <span className="copied-badge"><Icon markup={ICONS.check} /><span>Copied</span></span>
+        : <button className="ghost-copy" title="Copy user name" data-act="copy-user"
+            data-id={secret.id} data-text={secret.username}>
+            <Icon markup={ICONS.copy} /><span>Copy</span>
+          </button>}
+    </span>
+  );
+}
+
+function UsedByLinks({ secret }: { secret: SecretSummary }): ReactNode {
+  if (!secret.used_by_names.length) return <span className="used-by-empty">Not in use</span>;
+  return (
+    <div className="used-by-links">{secret.used_by_names.map((name) => {
+      const connection = state.connections.find((candidate) => candidate.name === name);
+      return connection
+        ? <button key={connection.id} className="used-by-link" data-act="show-connection"
+            data-id={connection.id}>{name}</button>
+        : <span key={name}>{name}</span>;
+    })}</div>
+  );
+}
+
+function CredentialRow({ secret, selected }: {
+  secret: SecretSummary;
+  selected: boolean;
+}): ReactNode {
+  const password = secret.kind === 'password';
+  const displayName = credentialDisplayName(secret);
+  return (
+    // data-secret-row is what the right-click handler reads; the whole row
+    // is the target, so the reveal menu opens wherever it is pressed.
+    <button className={`cred-row ${selected ? 'on' : ''}`} id={`cred-row-${secret.id}`}
+      data-act="select-secret" data-id={secret.id} data-secret-row={secret.id}
+      aria-current={selected ? 'true' : undefined}>
+      <span className="cred-mono" aria-hidden="true">{credentialInitial(secret)}</span>
+      <span className="cred-row-tx">
+        <b className={password ? 'site-host' : 's-name'} title={displayName}>{displayName}</b>
+        <small dir="auto">{credentialSubtitle(secret)}</small>
+      </span>
+      <span className="cred-row-badges">
+        {secret.totp ? <span className="cred-chip" title="Has a 2FA code">2FA</span> : null}
+        {secret.source?.kind === 'one_password'
+          ? <span className="s-source-icon" title={`Stored in ${secret.source.integration_label}`}
+              aria-label={`Stored in ${secret.source.integration_label}`}>
+              <Icon markup={ICONS.onepassword} />
             </span>
-            <span className="site-host">{s.site}</span>
-          </span></td>
-          <td className="username-cell">{s.username
-            ? <span dir="auto">{s.username}</span>
-            : <span className="used-by-empty">No username</span>}</td>
-        </>
-      : <>
-          <td><div className="s-credential-cell">
-            <div className="s-name" title={s.name}>{s.name}</div>
-            {s.source?.kind === 'one_password'
-              ? <span className="s-source-icon" title={`Stored in ${s.source.integration_label}`}
-                  aria-label={`Stored in ${s.source.integration_label}`}>
-                  <Icon markup={ICONS.onepassword} />
-                </span>
+          : null}
+      </span>
+    </button>
+  );
+}
+
+/** The inspector: identity on top, then grouped rows — the Passwords-app
+ * shape. Values stay write-only; the mask copies, and a reveal (asked for
+ * by name through the right-click menu, confirmed there) lands on its own
+ * full-width line under the mask. */
+function CredentialDetail({ secret }: { secret: SecretSummary }): ReactNode {
+  const password = secret.kind === 'password';
+  const displayName = credentialDisplayName(secret);
+  const noun = credentialNoun(secret);
+  const revealed = state.reveal[secret.id];
+  const linked = secret.source?.kind === 'one_password' ? secret.source : null;
+  return (
+    <div className="cdet" data-secret-row={secret.id}>
+      <div className="cdet-toolbar">
+        <button className="btn sm cdet-back" data-act="close-cred-detail">
+          <Icon markup={ICONS.chevronLeft} /> Back
+        </button>
+        <button className="btn sm" data-act="edit-secret" data-id={secret.id}
+          aria-label={`Edit ${noun} ${displayName}`}>Edit</button>
+        <button className="btn sm" data-act="del-secret-ask" data-id={secret.id}
+          aria-label={`Delete ${noun} ${displayName}`}>Delete</button>
+      </div>
+      <div className="cdet-hero">
+        <span className="cdet-mono" aria-hidden="true">{credentialInitial(secret)}</span>
+        <h3 className={`cdet-title ${password ? '' : 'is-mono'}`}>{displayName}</h3>
+      </div>
+      <div className="cdet-card">
+        {password
+          ? <div className="cdet-row"><span className="cdet-lbl">User name</span>
+              <span className="cdet-val"><UsernameCopy secret={secret} /></span></div>
+          : null}
+        <div className="cdet-row"><span className="cdet-lbl">{password ? 'Password' : 'Value'}</span>
+          <span className="cdet-val"><MaskedValueCopy secret={secret} /></span></div>
+        {revealed === undefined
+          ? null
+          : <div className="cdet-reveal"><code className="sec-reveal-value">{revealed}</code></div>}
+      </div>
+      {secret.totp
+        ? <div className="cdet-card"><div className="cdet-row">
+            <span className="cdet-lbl">Verification code</span>
+            {/* Codes are issued (and audited) on request, not by browsing:
+                the live code mounts only after Show code asks for it. */}
+            <span className="cdet-val">{state.totpVisible === secret.id
+              ? <LiveTotpCode id={secret.id} site={displayName} />
+              : <button className="btn sm" data-act="show-totp" data-id={secret.id}
+                  aria-label={`Show the current 2FA code for ${displayName}`}>
+                  Show code
+                </button>}</span>
+          </div></div>
+        : null}
+      <div className="cdet-card">
+        {password && secret.site
+          ? <div className="cdet-row"><span className="cdet-lbl">Website</span>
+              <span className="cdet-val">{secret.site}</span></div>
+          : null}
+        <div className="cdet-row"><span className="cdet-lbl">Used by</span>
+          <span className="cdet-val"><UsedByLinks secret={secret} /></span></div>
+        <div className="cdet-row"><span className="cdet-lbl">Modified</span>
+          <span className="cdet-val cdet-muted" title={absTime(secret.updated_at)}>
+            {relTime(secret.updated_at)}</span></div>
+      </div>
+      {linked
+        ? <div className="cdet-card"><div className="cdet-source">
+            <span className="cdet-source-icon" aria-hidden="true">
+              <Icon markup={ICONS.onepassword} /></span>
+            <span className="cdet-source-tx"><b>Stored in 1Password</b>
+              <small>{linked.integration_label} › {linked.vault_label} › {linked.item_label} › {linked.field_label}</small></span>
+          </div></div>
+        : null}
+    </div>
+  );
+}
+
+/** A tray row expands in place to its copy actions — the dropdown keeps
+ * find-and-copy fast and hands everything else to the main window. The 2FA
+ * code copies without ever rendering (codes display only on the desktop). */
+function DropdownCredentialRow({ secret }: { secret: SecretSummary }): ReactNode {
+  const open = state.dropdownSecretOpen === secret.id;
+  const password = secret.kind === 'password';
+  const displayName = credentialDisplayName(secret);
+  const noun = credentialNoun(secret);
+  const revealed = state.reveal[secret.id];
+  return (
+    <div className={`dd-cred ${open ? 'open' : ''}`} data-secret-row={secret.id}>
+      <button className="cred-row dd-cred-toggle" data-act="toggle-dd-secret" data-id={secret.id}
+        aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${noun} ${displayName}`}>
+        <span className="cred-mono" aria-hidden="true">{credentialInitial(secret)}</span>
+        <span className="cred-row-tx">
+          <b className={password ? 'site-host' : 's-name'} title={displayName}>{displayName}</b>
+          <small dir="auto">{credentialSubtitle(secret)}</small>
+        </span>
+        <span className="cred-row-badges">
+          {secret.totp ? <span className="cred-chip" title="Has a 2FA code">2FA</span> : null}
+          {secret.source?.kind === 'one_password'
+            ? <span className="s-source-icon" title={`Stored in ${secret.source.integration_label}`}>
+                <Icon markup={ICONS.onepassword} />
+              </span>
+            : null}
+          <span className="dd-cred-chev" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>
+        </span>
+      </button>
+      {open
+        ? <div className="dd-cred-exp">
+            {password
+              ? <div className="cdet-row"><span className="cdet-lbl">User name</span>
+                  <span className="cdet-val"><UsernameCopy secret={secret} /></span></div>
               : null}
-          </div></td>
-          {!compact ? <td className="used-by-cell">{usedBy}</td> : null}
-        </>;
-    return <Fragment key={s.id}>
-      {/* data-secret-row is what the right-click handler reads; the whole
-          row is the target, so the menu opens wherever it is pressed. */}
-      <tr className={revealed === undefined ? undefined : 'is-revealed'}
-        data-secret-row={s.id}>
-        {identity}
-        <td className="val"><span className="val-wrap">
-          {compact && s.totp
-            ? <button className="totp-chip" data-act="copy-totp" data-id={s.id}
-                title="Copy the current 2FA code"
-                aria-label={`Copy the current 2FA code for ${displayName}`}>2FA</button>
-            : null}
-          <span className={`val-slot ${copied ? 'is-copied' : ''}`}>
-            <code>{compact ? '••••' : '••••••••'}</code>
-            <span className="val-overlay">{overlay}</span></span>
-          </span></td>
-        <td className="rowdel">
-          {s.totp && !compact
-            ? <LiveTotpCode id={s.id} site={displayName} />
-            : null}
-          <button className="icon-btn" title={passwords ? 'Edit password' : 'Edit secret'}
-            aria-label={`Edit ${noun} ${displayName}`}
-            data-act="edit-secret" data-id={s.id}><Icon markup={ICONS.pencil} /></button>
-          <button className="icon-btn" title={passwords ? 'Delete password' : 'Delete secret'}
-            aria-label={`Delete ${noun} ${displayName}`}
-            data-act="del-secret-ask" data-id={s.id}><Icon markup={ICONS.trash} /></button>
-        </td>
-      </tr>
-      {/* The revealed value gets the full width of the row, starting at the
-          credential name's own left edge, so a long secret reads as one line
-          instead of wrapping inside a column. */}
-      {revealed === undefined
-        ? null
-        : <tr className="sec-reveal-row" data-secret-row={s.id}>
-            <td colSpan={columnCount}>
-              <code className="sec-reveal-value">{revealed}</code>
-            </td>
-          </tr>}
-    </Fragment>;
-      })}</tbody>
-    </table>
+            <div className="cdet-row"><span className="cdet-lbl">{password ? 'Password' : 'Value'}</span>
+              <span className="cdet-val"><MaskedValueCopy secret={secret} /></span></div>
+            {revealed === undefined
+              ? null
+              : <div className="cdet-reveal"><code className="sec-reveal-value">{revealed}</code></div>}
+            {secret.totp
+              ? <div className="cdet-row"><span className="cdet-lbl">2FA code</span>
+                  <span className="cdet-val"><button className="totp-chip" data-act="copy-totp"
+                    data-id={secret.id} title="Copy the current 2FA code"
+                    aria-label={`Copy the current 2FA code for ${displayName}`}>Copy code</button>
+                  </span></div>
+              : null}
+            <div className="dd-cred-actions">
+              <button className="btn sm" data-act="edit-secret" data-id={secret.id}
+                aria-label={`Edit ${noun} ${displayName}`}>Edit</button>
+              <button className="btn sm" data-act="del-secret-ask" data-id={secret.id}
+                aria-label={`Delete ${noun} ${displayName}`}>Delete</button>
+            </div>
+          </div>
+        : null}
+    </div>
   );
 }
 
@@ -3028,55 +3164,184 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
 // The credential library always advertises both typed groups. Each heading
 // owns its quiet, right-aligned add link, preselecting that credential kind.
 // Legacy remote brokers retain their single untyped table.
+const SECRET_CATEGORY_TILES: ReadonlyArray<{
+  id: SecretCategory;
+  label: string;
+  icon: IconDefinition;
+}> = [
+  { id: 'all', label: 'All', icon: ICONS.key },
+  { id: 'passwords', label: 'Passwords', icon: ICONS.globe },
+  { id: 'secrets', label: 'Secrets', icon: ICONS.fileKey },
+  { id: 'codes', label: 'Codes', icon: ICONS.timer },
+  { id: 'onepassword', label: '1Password', icon: ICONS.onepassword },
+];
+
+// Apple's Passwords app spends a third column on these; Multitool's left
+// edge already belongs to app navigation, so the categories compress into
+// the tile grid Passwords itself uses at compact widths.
+function CredentialCategoryTiles(): ReactNode {
+  const counts = new Map<SecretCategory, number>(SECRET_CATEGORY_TILES.map((tile) =>
+    [tile.id, state.secrets.filter((secret) => secretInCategory(secret, tile.id)).length]));
+  // The 1Password scope earns its tile once the integration is in play.
+  const showOnePassword = (counts.get('onepassword') ?? 0) > 0
+    || state.onepasswordIntegrations.length > 0;
+  const tiles = SECRET_CATEGORY_TILES.filter((tile) =>
+    tile.id !== 'onepassword' || showOnePassword);
+  // Roving tabindex: one tab stop for the whole group. If the checked tile
+  // just disappeared (1Password unlinked), the first tile keeps the stop.
+  const stop = tiles.some((tile) => tile.id === state.secretCategory)
+    ? state.secretCategory : tiles[0]?.id;
+  return (
+    <div className="cred-tiles" role="radiogroup" aria-label="Credential categories"
+      onKeyDown={(e) => {
+        if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(e.key)) return;
+        e.preventDefault();
+        const at = tiles.findIndex((tile) => tile.id === state.secretCategory);
+        const delta = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1;
+        const next = tiles[(at + delta + tiles.length) % tiles.length];
+        if (!next) return;
+        // Radio semantics: moving the focus moves the selection with it.
+        state.secretCategory = next.id;
+        state.secretDetailOpen = false;
+        render();
+        focusField(`cred-tile-${next.id}`);
+      }}>
+      {tiles.map((tile) => {
+        const on = (state.secretCategory === tile.id);
+        return (
+          <button key={tile.id} className={`cred-tile is-${tile.id} ${on ? 'on' : ''}`}
+            id={`cred-tile-${tile.id}`} tabIndex={tile.id === stop ? 0 : -1}
+            role="radio" aria-checked={on} data-act="secret-category" data-id={tile.id}>
+            <span className="cred-tile-ico" aria-hidden="true"><Icon markup={tile.icon} /></span>
+            <span className="cred-tile-label">{tile.label}</span>
+            <span className="cred-tile-count">{counts.get(tile.id)}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// The Credentials page is a master–detail split, Passwords-style: category
+// tiles over a monogram list on the left, the selected credential's
+// inspector on the right. The dropdown compresses the same inventory into
+// expandable tray rows. Legacy untyped brokers keep the split but drop the
+// tiles and grouping — everything they hold is a secret.
 function SecretsView(): ReactNode {
   const needle = state.secretSearch.trim().toLowerCase();
   const typed = supportsTypedCredentials(state.broker);
-  const passwords = state.secrets.filter((secret) => secret.kind === 'password');
-  const secrets = state.secrets.filter((secret) => secret.kind !== 'password');
-  const matchingPasswords = passwords.filter((secret) => secretMatches(secret, needle));
-  const matchingSecrets = secrets.filter((secret) => secretMatches(secret, needle));
-  if (!typed) return <div className="credential-group">
-    <div className="secrets-card">
-      {matchingSecrets.length
-        ? <SecretsTable secrets={matchingSecrets} />
-        : <div className="muted-note">
-            {secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}
-          </div>}
-    </div>
-    {mode === 'dropdown'
-      ? <button className="credential-group-add" data-act="open-add-secret">＋ Add credential</button>
-      : null}
-  </div>;
+  const matching = state.secrets.filter((secret) => secretMatches(secret, needle));
+  if (mode === 'dropdown') {
+    const ordered = [
+      ...matching.filter((secret) => secret.kind === 'password'),
+      ...matching.filter((secret) => secret.kind !== 'password'),
+    ];
+    return (
+      <div className="dd-creds">
+        {ordered.length
+          ? <CredentialRowsList className="dd-cred-list" secrets={ordered} rowEstimate={40}
+              keepMountedId={state.dropdownSecretOpen}
+              renderRow={(secret) => <DropdownCredentialRow key={secret.id} secret={secret} />} />
+          : <div className="muted-note">
+              {state.secrets.length
+                ? 'No saved credentials match your search.'
+                : 'No saved credentials yet.'}
+            </div>}
+        <button className="credential-group-add" data-act="open-add-secret">＋ Add credential</button>
+      </div>
+    );
+  }
+  const category: SecretCategory = typed ? state.secretCategory : 'all';
+  const inCategory = matching.filter((secret) => secretInCategory(secret, category));
+  const passwords = inCategory.filter((secret) => secret.kind === 'password');
+  const secrets = inCategory.filter((secret) => secret.kind !== 'password');
+  const grouped = typed && category === 'all';
+  const ordered = grouped ? [...passwords, ...secrets] : inCategory;
+  // The inspector always has a subject: an explicit selection when it is
+  // still visible under the active tile and search, else the first row.
+  const selected = ordered.find((secret) => secret.id === state.selectedSecret)
+    ?? ordered[0] ?? null;
+  // Each card windows its rows against the page scroller; the selected row
+  // stays mounted so keyboard focus and the current-row semantics hold.
+  const rowCard = (list: SecretSummary[]): ReactNode => (
+    <CredentialRowsList className="cred-rows" secrets={list} rowEstimate={44}
+      keepMountedId={selected?.id}
+      renderRow={(secret) => <CredentialRow key={secret.id} secret={secret}
+        selected={secret.id === selected?.id} />} />
+  );
+  const filteredEmptyNote = category === 'codes' ? 'No credentials have a 2FA code yet.'
+    : category === 'onepassword' ? 'No credentials are linked from 1Password yet.'
+    : category === 'passwords' ? 'No passwords yet.'
+    : category === 'secrets' ? 'No secrets yet.'
+    : 'No saved credentials yet.';
+  // Passwords lead the page unlabelled — they are the page. The secrets
+  // group gets one page-register header; the tray keeps its flat list.
+  const listBody = grouped
+    ? <>
+        {passwords.length
+          ? rowCard(passwords)
+          : <div className="cred-rows"><div className="muted-note">
+              {state.secrets.some((secret) => secret.kind === 'password')
+                ? 'No passwords match your search.' : 'No passwords yet.'}
+            </div></div>}
+        <h2 className="creds-sec-h">Secrets</h2>
+        {secrets.length
+          ? rowCard(secrets)
+          : <div className="cred-rows"><div className="muted-note">
+              {state.secrets.some((secret) => secret.kind !== 'password')
+                ? 'No secrets match your search.' : 'No secrets yet.'}
+            </div></div>}
+      </>
+    : ordered.length
+      ? rowCard(ordered)
+      : <div className="cred-rows"><div className="muted-note">
+          {needle ? 'No credentials match your search.' : filteredEmptyNote}
+        </div></div>;
   return (
-    <div className="secrets-groups">
-      <div className="credential-group">
-        <div className="credential-group-heading">
-          <div className="secrets-group-h" aria-hidden="true">Passwords</div>
-          <button className="credential-group-add" data-act="open-add-secret"
-            data-kind="password">＋ Add password</button>
+    <div className={`creds ${selected && state.secretDetailOpen ? 'detail-open' : ''}`}>
+      <div className="creds-split">
+        <div className="creds-list-col"
+          onKeyDown={(e) => {
+            if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+            // The tiles above the list own their radiogroup arrow keys.
+            if (e.target instanceof Element && e.target.closest('.cred-tiles')) return;
+            e.preventDefault();
+            const at = ordered.findIndex((secret) => secret.id === selected?.id);
+            const next = ordered[at + (e.key === 'ArrowDown' ? 1 : -1)];
+            if (!next) return;
+            state.selectedSecret = next.id;
+            render();
+            focusField(`cred-row-${next.id}`);
+          }}>
+          {typed ? <CredentialCategoryTiles /> : null}
+          {listBody}
         </div>
-        <div className="secrets-card">
-          {matchingPasswords.length
-            ? <SecretsTable secrets={matchingPasswords} passwords />
-            : <div className="muted-note">
-                {passwords.length ? 'No passwords match your search.' : 'No passwords yet.'}
-              </div>}
-        </div>
+        {selected
+          ? <div className="cred-detail-col">
+              <aside className="cred-detail-pane"
+                aria-label={`Details for ${credentialDisplayName(selected)}`}>
+                <CredentialDetail secret={selected} />
+              </aside>
+            </div>
+          // An empty scope keeps the split's shape: the inspector column
+          // stays, carrying the inbox-style placeholder, instead of the
+          // list stretching across the whole page.
+          : <div className="cred-detail-col">
+              <aside className="cred-detail-pane" aria-label="No credentials in this view">
+                <div className="empty">
+                  <div className="empty-ico"><Icon markup={ICONS.key} /></div>
+                  <h3>No credentials here</h3>
+                  <p>{needle
+                    ? 'Nothing in this view matches your search.'
+                    : 'Credentials in this category will appear here.'}</p>
+                </div>
+              </aside>
+            </div>}
       </div>
-      <div className="credential-group">
-        <div className="credential-group-heading">
-          <div className="secrets-group-h" aria-hidden="true">Secrets</div>
-          <button className="credential-group-add" data-act="open-add-secret"
-            data-kind="secret">＋ Add secret</button>
-        </div>
-        <div className="secrets-card">
-          {matchingSecrets.length
-            ? <SecretsTable secrets={matchingSecrets} />
-            : <div className="muted-note">
-                {secrets.length ? 'No secrets match your search.' : 'No secrets yet.'}
-              </div>}
-        </div>
-      </div>
+      {selected && state.secretDetailOpen
+        ? <button className="cred-detail-backdrop" data-act="close-cred-detail"
+            aria-label="Close credential details" tabIndex={-1}></button>
+        : null}
     </div>
   );
 }
@@ -3102,7 +3367,7 @@ function VaultRow({ integration }: { integration: OnePasswordIntegration }): Rea
       </span>
       <span className="onepassword-integration-actions">
         <button className="btn sm" data-act="onepassword-browse"
-          data-id={integration.id}>Browse</button>
+          data-id={integration.id}>Link credentials</button>
         <button className={`btn sm vault-menu-btn ${menuOpen ? 'on' : ''}`}
           data-act="toggle-vault-menu" data-id={integration.id}
           title={`Options for ${integration.label}`}
@@ -3116,7 +3381,7 @@ function VaultRow({ integration }: { integration: OnePasswordIntegration }): Rea
                 <div className="tile-menu" aria-label={`Options for ${integration.label}`}>
                   {integration.kind !== 'desktop_app'
                     ? <button className="menu-item" data-act="onepassword-update"
-                        data-id={integration.id}>Update connection</button>
+                        data-id={integration.id}>Edit connection method…</button>
                     : null}
                   <button className="menu-item danger" data-act="onepassword-delete-ask"
                     data-id={integration.id}>Remove…</button>
@@ -3148,7 +3413,7 @@ function SecretsStatusBar(): ReactNode {
         ? <button className={`sb-vaults ${open ? 'on' : ''}`} data-act="toggle-vaults-panel"
             aria-expanded={open} aria-haspopup="true" title="Manage 1Password vaults">
             <span className="sb-1p" aria-hidden="true"><Icon markup={ICONS.onepassword} /></span>
-            {integrations.length} {integrations.length === 1 ? 'vault' : 'vaults'}
+            Connected {integrations.length} {integrations.length === 1 ? 'vault' : 'vaults'}
             <span className={`sb-chev ${open ? 'open' : ''}`} aria-hidden="true">
               <Icon markup={ICONS.chevronDown} /></span>
           </button>
@@ -3917,7 +4182,10 @@ function MainWindow(): ReactNode {
               ? <div className="content broker-takeover"><BrokerPane kind={takeover} /></div>
               : <>
                   {state.tab !== 'start' && (
-                    <div className="dw-head">
+                    // The credentials split needs more room than the reading
+                    // column; its header widens with it so search and Add
+                    // stay on the pane edge.
+                    <div className={`dw-head ${state.tab === 'secrets' ? 'is-wide' : ''}`}>
                       <div className="dw-head-title">
                         <h2>{pageTitle}</h2>
                         {state.tab === 'inbox'
@@ -7626,9 +7894,10 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.connMenuPoint = null;
       state.epMenuOpen = null;
       state.epOptsMenuOpen = null;
-      // The slide-over is a transient view; coming back to Tools starts
-      // at the list, not with the panel already over it.
+      // The slide-overs are transient views; coming back to a tab starts
+      // at its list, not with a panel already over it.
       state.connDetailOpen = false;
+      state.secretDetailOpen = false;
       render();
       resetScroll();
       break;
@@ -7901,6 +8170,17 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
           break;
         }
         state.reveal[id] = value;
+        // A confirmed reveal must land somewhere visible. The value renders
+        // in the inspector (window) or the expanded row (tray), so surface
+        // that container — the row that was right-clicked may be neither
+        // selected nor expanded, and the narrow layout may have the
+        // inspector closed.
+        if (mode === 'dropdown') {
+          state.dropdownSecretOpen = id;
+        } else {
+          state.selectedSecret = id;
+          state.secretDetailOpen = true;
+        }
         state.confirm = null;
         render();
       } catch (error) {
@@ -7946,6 +8226,46 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         toast('📋 Copied for 30s');
         flashCopied(id);
       }
+      break;
+    case 'copy-user': {
+      // The user name is public metadata, so the webview clipboard suffices;
+      // no broker round-trip and no 30s clear.
+      const text = btn.dataset.text ?? '';
+      if (!text) break;
+      try {
+        await navigator.clipboard.writeText(text);
+        flashCopied(`user:${id}`);
+      } catch {
+        toast('⚠ Could not copy');
+      }
+      break;
+    }
+    case 'select-secret':
+      // A shown code belongs to the moment it was asked for; moving to
+      // another credential puts the button back.
+      if (state.selectedSecret !== id) state.totpVisible = null;
+      state.selectedSecret = id;
+      // Inert in the wide layout; in the narrow one this rides the
+      // inspector over the list (same shape as the tools slide-over).
+      state.secretDetailOpen = true;
+      render();
+      break;
+    case 'show-totp':
+      state.totpVisible = id;
+      render();
+      break;
+    case 'close-cred-detail':
+      state.secretDetailOpen = false;
+      render();
+      break;
+    case 'secret-category':
+      state.secretCategory = (btn.dataset.id as SecretCategory | undefined) ?? 'all';
+      state.secretDetailOpen = false;
+      render();
+      break;
+    case 'toggle-dd-secret':
+      state.dropdownSecretOpen = state.dropdownSecretOpen === id ? null : id;
+      render();
       break;
     case 'del-secret-ask': {
       const s = state.secrets.find((x) => x.id === id);
@@ -9371,10 +9691,13 @@ function handleAppKeyDown(e: KeyboardEvent): void {
     }
     if (state.epMenuOpen) { state.epMenuOpen = null; render(); return; }
     if (state.epOptsMenuOpen) { state.epOptsMenuOpen = null; render(); return; }
-    // The detail slide-over only exists in the narrow layout; in the wide
-    // layout the flag is inert and Escape passes through.
+    // The detail slide-overs only exist in the narrow layout; in the wide
+    // layout the flags are inert and Escape passes through.
     if (state.connDetailOpen && window.matchMedia(NARROW_LAYOUT).matches) {
       state.connDetailOpen = false; render(); return;
+    }
+    if (state.secretDetailOpen && window.matchMedia(NARROW_LAYOUT).matches) {
+      state.secretDetailOpen = false; render(); return;
     }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
     if (state.formMenuOpen) {
