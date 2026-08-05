@@ -155,7 +155,7 @@ test('the credential library always groups passwords apart from secrets', async 
   const tiles = [...document.querySelectorAll<HTMLElement>('.cred-tile')];
   assert.deepEqual(
     tiles.map((tile) => tile.querySelector('.cred-tile-label')?.textContent),
-    ['All', 'Passwords', 'Secrets', 'Codes'],
+    ['All', 'Passwords', 'Secrets', '2FA Codes'],
     'the 1Password tile waits for the integration',
   );
   assert.equal(tiles[0]?.getAttribute('aria-checked'), 'true');

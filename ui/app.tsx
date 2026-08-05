@@ -3191,7 +3191,7 @@ const SECRET_CATEGORY_TILES: ReadonlyArray<{
   { id: 'all', label: 'All', icon: ICONS.key },
   { id: 'passwords', label: 'Passwords', icon: ICONS.globe },
   { id: 'secrets', label: 'Secrets', icon: ICONS.fileKey },
-  { id: 'codes', label: 'Codes', icon: ICONS.timer },
+  { id: 'codes', label: '2FA Codes', icon: ICONS.timer },
   { id: 'onepassword', label: '1Password', icon: ICONS.onepassword },
 ];
 
@@ -3346,7 +3346,7 @@ function SecretsView(): ReactNode {
           // stays, carrying the inbox-style placeholder, instead of the
           // list stretching across the whole page.
           : <div className="cred-detail-col">
-              <aside className="cred-detail-pane" aria-label="No credentials in this view">
+              <aside className="cred-detail-pane is-empty" aria-label="No credentials in this view">
                 <div className="empty">
                   <div className="empty-ico"><Icon markup={ICONS.key} /></div>
                   <h3>No credentials here</h3>
@@ -4110,7 +4110,7 @@ function LoadFailureBand(): ReactNode {
 function MainWindow(): ReactNode {
   const takeover = brokerTakeover(state.broker, state.remoteSetup.open);
   const requestCount = activeRequestCount(state.approvals, state.elicitations);
-  const pageTitle = state.tab === 'connections' ? 'Connect tools'
+  const pageTitle = state.tab === 'connections' ? 'Tools'
     : state.tab === 'secrets' ? 'Credentials'
     : state.tab === 'inbox' ? 'Request inbox'
     // The sidebar keeps the tab's title-case label; the page header speaks

@@ -457,8 +457,10 @@
      sideways when the scrollbar appears or disappears. overflow: scroll reserves
      the space in every WebKit build we ship on, where scrollbar-gutter is honored
      inconsistently next to a custom ::-webkit-scrollbar. The track itself stays
-     transparent, so an idle panel shows reserved space, not an empty bar. */
-  flex: 1; overflow-y: scroll; overflow-x: hidden; padding: 0 14px 12px;
+     transparent, so an idle panel shows reserved space, not an empty bar.
+     The right padding leaves 6px for the 8px reserved track to complete: both
+     visual insets read 14px, keeping content flush with the tab bar above. */
+  flex: 1; overflow-y: scroll; overflow-x: hidden; padding: 0 6px 12px 14px;
 }
   .dd-content{ position: relative; min-height: 0; }
   /* The main scroll pane spans the available app region so its scrollbar
@@ -481,13 +483,14 @@
 /* Reserve the scrollbar track here too (see .content): the Active sessions and
    "Waiting on you" bands fill past their max-height with many items, and holding
    the 8px keeps the band from jumping sideways when its scrollbar appears. */
-.dd-global{ padding: 0 14px; margin-bottom: 8px; max-height: 172px; overflow-y: scroll; border-bottom: 1px solid var(--line); }
-  .dd-global.onboarding-global{ max-height: none; overflow: visible; border-bottom: 0; }
+.dd-global{ padding: 0 6px 0 14px; margin-bottom: 8px; max-height: 172px; overflow-y: scroll; border-bottom: 1px solid var(--line); }
+  /* Non-scrolling variants reserve no track, so they carry the full 14px. */
+  .dd-global.onboarding-global{ max-height: none; overflow: visible; border-bottom: 0; padding-right: 14px; }
   /* A lone Inbox route is not a scrolling queue. Keeping the old scroll
      container here can restore a previous queue's scroll offset and clip
      the banner down to its borders after changing tabs. */
   .dd-global.request-route-only{
-  max-height: none; overflow: visible; border-bottom: 0;
+  max-height: none; overflow: visible; border-bottom: 0; padding-right: 14px;
 }
   .dw-main .dd-global{
   width: 100%; max-width: none; margin: 0 0 8px; padding: 0 8px 0 24px;
@@ -1898,6 +1901,11 @@
   border: 1px solid var(--line); border-radius: 12px;
   background: var(--card-bg); box-shadow: var(--shadow-sm);
 }
+/* An empty inspector reads as a placeholder, not a card: the Inbox
+   empty-state's dashed outline on the bare page background. */
+.cred-detail-pane.is-empty {
+  border-style: dashed; background: transparent; box-shadow: none;
+}
 .cdet-toolbar { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 12px; }
 .cdet-back { display: none; margin-right: auto; }
 .cdet-hero { padding: 0 0 12px; text-align: center; }
@@ -2024,8 +2032,9 @@
 .totp-live:hover { background: var(--accent-wash); }
 .totp-live-loading { color: var(--muted-2); cursor: default; }
 .totp-countdown { min-width: 2.2em; color: var(--muted); font-size: 0.65625rem; letter-spacing: 0; }
-/* The credential sheet's type segments and password extras. */
-.secret-kind-seg { margin-bottom: 12px; }
+/* The credential sheet's type segments and password extras. Three classes so
+   the breathing room under the tabs outranks `.seg.in-form`'s margin: 0. */
+.seg.in-form.secret-kind-seg { margin-bottom: 4px; }
 .secret-kind-seg .seg-btn { flex: 1; }
 .gen-row { display: flex; align-items: stretch; gap: 6px; }
 .gen-row input { flex: 1; min-width: 0; }
