@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Verify every npm artifact before publishing anything, then publish the four
 # platform packages before the launcher. Extra arguments are passed to every
-# `npm publish` invocation, e.g. `npm run npm:publish -- --dry-run`.
+# `npm publish` invocation, e.g. `pnpm run npm:publish -- --dry-run`.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 repo_root="$(cd "$script_dir/.." >/dev/null && pwd)"

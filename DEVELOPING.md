@@ -1,25 +1,60 @@
 ## Developing Multitool
 
-```sh
-npm install        # Install the pinned Tauri and TypeScript toolchain
-npm test           # Type-check, then test the core, CLI, desktop commands, and UI helpers
-npm run test:ui    # Run only the TypeScript UI helper tests
-npm run lint       # Lint every Cargo workspace crate and target
-npm run typecheck  # Type-check the frontend without emitting files
+Install Node.js 22, pnpm, and stable Rust with Cargo before starting.
+For desktop development on macOS, install the Xcode Command Line Tools with
+`xcode-select --install`. On Linux, install your distribution's
+[Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
-npm start          # start Vite and launch the desktop app
-npm run build      # build .app and .dmg bundles
+The repository pins pnpm 11.15.1 in `package.json`; if your Node.js
+distribution includes Corepack, run `corepack enable`, otherwise
+install that pnpm version using your normal package-manager setup.
+
+Go is only needed to build `multitool-onepassword` or distribution artifacts;
+ordinary frontend, core, CLI, and desktop development does not require it. A
+distributable macOS build also needs a Developer ID Application identity, while
+`pnpm start` uses an unsigned development build. The publishing sections below
+cover the helper, signing, notarization, and cross-compilation requirements.
+
+The Docker sandbox has additional command-line prerequisites; see
+[`dev/sandbox/README.md`](dev/sandbox/README.md) before running its tests.
+
+From the repository root, install the JavaScript dependencies first, then use
+the commands for the work you are doing:
+
+```sh
+pnpm install        # Install the pinned Tauri and TypeScript toolchain
+pnpm test           # Type-check, then test the core, CLI, desktop commands, and UI helpers
+pnpm run test:ui    # Run only the TypeScript UI helper tests
+pnpm run lint       # Lint every Cargo workspace crate and target
+pnpm run typecheck  # Type-check the frontend without emitting files
+
+pnpm start          # start Vite and launch the desktop app
+pnpm run build      # build .app and .dmg bundles
 ```
+
+### Cargo workspace scope
+
+Cargo has six workspace members: the five portable packages under `crates/`
+(`aka-api`, `aka-client`, `aka-core`, `multitool`, and `aka-sandbox`) plus the
+`multitool-desktop` package under `src-tauri/`. They share the root
+`Cargo.lock` and `target/` directory.
+
+The five portable packages are the workspace's default members, so a bare
+`cargo build` or `cargo test` does not build the desktop app. `--workspace`
+includes all six members; that requires the desktop webview toolchain (macOS,
+or WebKitGTK on Linux). The top-level `pnpm test` and `pnpm run lint` commands
+intentionally use `--workspace`. For CLI-only work, use `cargo test -p
+multitool` or the bare Cargo commands.
 
 ### Testing against the sandbox
 
-`npm test` is hermetic and never reaches a network service. The
+`pnpm test` is hermetic and never reaches a network service. The
 broker's end-to-end behaviour is covered separately, against a
 disposable Docker stack:
 
 ```sh
-npm run sandbox:up     # start the four upstreams (Docker required)
-npm run sandbox:test   # drive real brokers against them
+pnpm run sandbox:up     # start the four upstreams (Docker required)
+pnpm run sandbox:test   # drive real brokers against them
 ```
 
 Each test file in `dev/sandbox/tests/` starts its own headless
@@ -40,7 +75,7 @@ every command is served from an in-memory fixture store, with seeded
 secrets, connections, a wired-up agent, and past activity.
 
 ```sh
-npm run frontend:dev   # vite dev server with hot reload
+pnpm run frontend:dev   # vite dev server with hot reload
 ```
 
 Then open:
@@ -105,10 +140,10 @@ that refused reads would let a read-based probe look correct.
 
 What that means while developing:
 
-- `npm start` / `tauri dev` and `cargo run` produce builds with no
+- `pnpm start` / `tauri dev` and `cargo run` produce builds with no
   entitlement, so they use the login keychain and *do* prompt. That is the
   expected dev experience, not a bug.
-- `npm run build` signs with the entitlement. `scripts/build.sh` generates
+- `pnpm run build` signs with the entitlement. `scripts/build.sh` generates
   `src-tauri/entitlements.signed.plist` from `src-tauri/entitlements.plist`
   plus `keychain-access-groups = <TEAMID>.com.aka.desktop`, reading the team
   ID from `APPLE_TEAM_ID` or off the signing identity's name. It refuses to
@@ -139,7 +174,7 @@ probe cannot help there — it never gets to run.)
 The fix is a provisioning profile, and the build supports it:
 
 ```sh
-APPLE_PROVISIONING_PROFILE=~/Multitool.provisionprofile npm run build
+APPLE_PROVISIONING_PROFILE=~/Multitool.provisionprofile pnpm run build
 ```
 
 That adds `com.apple.application-identifier` — restricted for certain, which
@@ -204,26 +239,26 @@ Prerequisites: one-time macOS cross-linker setup: `brew install zig`
 
 1. Bump the workspace version in `Cargo.toml`; run
    `node scripts/npm/sync-versions.mjs`; commit.
-2. Run `npm run npm:dist` on a host configured to cross-build every target.
+2. Run `pnpm run npm:dist` on a host configured to cross-build every target.
 3. Publish from the workspace root. The command verifies all five packages
    before publishing anything, then publishes the four platform packages
    first and the main package last, so no install can ever resolve a launcher
    whose binary package is missing:
 
    ```sh
-   npm run npm:publish -- --dry-run
+   pnpm run npm:publish -- --dry-run
    ```
 
    ```sh
-   npm run npm:publish
+   pnpm run npm:publish
    ```
 
 4. Publish the main application. For a distributable `.app`/`.dmg`,
    build with a Developer ID Application certificate.
 
    ```sh
-   npm run build          # signed universal .app + .dmg (auto-detects identity)
-   npm run build:release  # will also notarize, staple, and validate
+   pnpm run build          # signed universal .app + .dmg (auto-detects identity)
+   pnpm run build:release  # will also notarize, staple, and validate
 
    gh release create v0.2.0 \
      target/universal-apple-darwin/release/bundle/dmg/Multitool_0.2.0_universal.dmg \

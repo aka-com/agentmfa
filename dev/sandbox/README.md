@@ -18,8 +18,12 @@ A copy of this walkthrough formatted for the browser is in
 ## 1. What you need
 
 - Docker with Compose v2, **running** (start Docker Desktop first)
-- Node.js with `npm` (only to run the `npm run sandbox:*` scripts —
-  `bash scripts/sandbox-up.sh` works without it)
+- Node.js 22 with pnpm available (`corepack enable` when Corepack is installed;
+  `package.json` pins pnpm 11.15.1). This is needed for the `pnpm run
+  sandbox:*` scripts and TypeScript test runner; `bash scripts/sandbox-up.sh`
+  works without it.
+- Rust with Cargo, if you use the headless broker or run `sandbox:test` (the
+  test harness builds `multitool` before it starts its isolated brokers)
 - `curl`, `ssh-keygen`, `ssh-keyscan`, and the Postgres `psql` client
 - Multitool Desktop: the desktop app, or the headless broker
   (`cargo run -p multitool -- serve`) on any platform
@@ -29,8 +33,13 @@ A copy of this walkthrough formatted for the browser is in
 From the repository root:
 
 ```sh
-npm run sandbox:up
+pnpm install --frozen-lockfile  # one-time install; required for sandbox:test
+pnpm run sandbox:up
 ```
+
+If you only want to start the containers for an already-installed Desktop app,
+you can skip the JavaScript install and run `bash scripts/sandbox-up.sh`
+directly.
 
 The first start compiles the HTTP/MCP fixture inside Docker and
 can take several minutes; later starts take seconds. The command
@@ -42,7 +51,7 @@ for Postgres and SSH and the current SSH host-key fingerprint.
 Print the containers and connection values again at any time:
 
 ```sh
-npm run sandbox:status
+pnpm run sandbox:status
 ```
 
 ## 3. Add the services in Multitool Desktop
@@ -139,9 +148,9 @@ The same sandbox backs an automated suite that drives the broker the way
 an agent and the app do — headless, so it runs on Linux as well as macOS:
 
 ```sh
-npm run sandbox:test                                  # the whole suite
-npm run sandbox:test -- dev/sandbox/tests/ssh.test.ts  # one file
-AKA_SANDBOX_SLOW=1 npm run sandbox:test               # + the minute-scale cases
+pnpm run sandbox:test                                  # the whole suite
+pnpm run sandbox:test -- dev/sandbox/tests/ssh.test.ts  # one file
+AKA_SANDBOX_SLOW=1 pnpm run sandbox:test               # + the minute-scale cases
 ```
 
 The command checks that all four services are up, builds `multitool`, and runs the
@@ -181,19 +190,19 @@ already written. See `dev/sandbox/tests/lib/pending.ts`.
 ## 6. Stop or reset
 
 ```sh
-npm run sandbox:down          # stop; keeps both generated SSH identities
-npm run sandbox:reset         # delete containers, volumes, and SSH identities
-npm run sandbox:reset -- --yes   # same, without the confirmation prompt
+pnpm run sandbox:down          # stop; keeps both generated SSH identities
+pnpm run sandbox:reset         # delete containers, volumes, and SSH identities
+pnpm run sandbox:reset -- --yes   # same, without the confirmation prompt
 ```
 
 After a reset the SSH host key and fingerprint change: run
-`npm run sandbox:up` and update (or re-create) `sandbox-ssh` before
+`pnpm run sandbox:up` and update (or re-create) `sandbox-ssh` before
 connecting again.
 
 ## Troubleshooting
 
 - **“cannot reach the Docker daemon”** — start Docker Desktop (or the
-  `docker` service) and rerun `npm run sandbox:up`.
+  `docker` service) and rerun `pnpm run sandbox:up`.
 - **A port is already in use** — export any of `SANDBOX_HTTP_PORT`,
   `SANDBOX_ALT_PORT`, `SANDBOX_PG_PORT`, `SANDBOX_SSH_PORT` before
   `sandbox:up`; `sandbox:status` reads the same variables, so export

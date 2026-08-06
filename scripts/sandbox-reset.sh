@@ -26,4 +26,4 @@ fi
 docker compose -f "$compose_file" down --volumes --remove-orphans
 rm -rf "$state_dir"
 
-echo "Sandbox reset. The next npm run sandbox:up will create new SSH identities."
+echo "Sandbox reset. The next pnpm run sandbox:up will create new SSH identities."

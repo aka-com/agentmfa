@@ -7,7 +7,7 @@
 # Node test runner. Every argument is passed through to it, so a single file
 # can be run directly:
 #
-#   npm run sandbox:test -- dev/sandbox/tests/postgres.test.ts
+#   pnpm run sandbox:test -- dev/sandbox/tests/postgres.test.ts
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,7 +29,7 @@ done
 
 not_up() {
   echo "sandbox: $1" >&2
-  echo "         run \`npm run sandbox:up\` first (see dev/sandbox/README.md)" >&2
+  echo "         run \`pnpm run sandbox:up\` first (see dev/sandbox/README.md)" >&2
   exit 1
 }
 
@@ -78,4 +78,4 @@ $http_port (http/mcp), $pg_port (pg), $ssh_port (ssh)..."
 [[ -n "${AKA_SANDBOX_SLOW:-}" ]] ||
   echo "  (set AKA_SANDBOX_SLOW=1 to include the minute-scale timeout and expiry cases)"
 
-exec npx tsx --test --test-concurrency="$concurrency" "${targets[@]}"
+exec pnpm exec tsx --test --test-concurrency="$concurrency" "${targets[@]}"

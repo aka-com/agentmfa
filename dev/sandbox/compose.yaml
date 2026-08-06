@@ -47,7 +47,7 @@ services:
     volumes:
       # create_host_path: false makes a direct `docker compose up` fail with a
       # clear error instead of silently creating a directory where the key
-      # belongs; `npm run sandbox:up` generates the key before composing.
+      # belongs; `pnpm run sandbox:up` generates the key before composing.
       - type: bind
         source: ./state/ssh/client_key.pub
         target: /keys/client_key.pub

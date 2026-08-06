@@ -1,6 +1,7 @@
 {
   "name": "multitool-desktop",
   "private": true,
+  "packageManager": "pnpm@11.15.1",
   "scripts": {
     "build": "bash scripts/build.sh",
     "build:release": "bash scripts/release.sh",
@@ -18,7 +19,7 @@
     "npm:check": "node scripts/npm/sync-versions.mjs --check",
     "npm:dist": "bash scripts/npm-dist.sh --all --pack",
     "npm:publish": "bash scripts/npm-publish.sh",
-    "test": "npm run npm:check && npm run test:npm-launcher && npm run typecheck && cargo test --workspace && npm run test:ui",
+    "test": "pnpm run npm:check && pnpm run test:npm-launcher && pnpm run typecheck && cargo test --workspace && pnpm run test:ui",
     "test:npm-launcher": "node --test scripts/npm/launcher.test.mjs",
     "test:ui": "tsx --test ui/tests/*.test.ts ui/tests/*.test.tsx"
   },

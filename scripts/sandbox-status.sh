@@ -6,7 +6,7 @@ compose_file="$repo_root/dev/sandbox/compose.yaml"
 client_key="$repo_root/dev/sandbox/state/ssh/client_key"
 # Keep these defaults in sync with dev/sandbox/compose.yaml, which reads the
 # same SANDBOX_*_PORT variables. Export an override for both commands, e.g.
-#   SANDBOX_HTTP_PORT=28080 npm run sandbox:up
+#   SANDBOX_HTTP_PORT=28080 pnpm run sandbox:up
 http_port="${SANDBOX_HTTP_PORT:-18080}"
 pg_port="${SANDBOX_PG_PORT:-15432}"
 ssh_port="${SANDBOX_SSH_PORT:-12222}"
@@ -27,7 +27,7 @@ for command in docker curl ssh-keyscan ssh-keygen; do
 done
 
 if [[ ! -f "$client_key" ]]; then
-  echo "sandbox: SSH client key is missing; run npm run sandbox:up" >&2
+  echo "sandbox: SSH client key is missing; run pnpm run sandbox:up" >&2
   exit 1
 fi
 
@@ -88,7 +88,7 @@ fi
 
 host_keys="$(scan_ssh_host_key)"
 if [[ -z "$host_keys" ]]; then
-  echo "sandbox: SSH is not ready; run npm run sandbox:up" >&2
+  echo "sandbox: SSH is not ready; run pnpm run sandbox:up" >&2
   exit 1
 fi
 fingerprint_line="$(printf '%s\n' "$host_keys" | ssh-keygen -lf -)"

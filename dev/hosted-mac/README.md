@@ -8,7 +8,18 @@ plain HTTP on the address you give it.
 
 ## 1. On the broker Mac
 
-Install the CLI (`npm install -g @aka-com/multitool`) or use a checkout. Then:
+Choose one way to put `multitool` on your `PATH`:
+
+```sh
+# Published CLI:
+npm install -g @aka-com/multitool
+
+# Or, from the root of a source checkout:
+cargo build --release -p multitool
+export PATH="$PWD/target/release:$PATH"
+```
+
+Then:
 
 ```sh
 # Optionally seed tools/secrets offline (or do it all from the app later,

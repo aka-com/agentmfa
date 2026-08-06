@@ -176,7 +176,7 @@ export function multitoolBinary(): string {
   }
   throw new Error(
     'no `multitool` binary found — run `cargo build -p multitool` or set AKA_MULTITOOL_BIN ' +
-      '(`npm run sandbox:test` does this for you)',
+      '(`pnpm run sandbox:test` does this for you)',
   );
 }
 

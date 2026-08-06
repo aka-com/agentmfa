@@ -1,0 +1,9 @@
+packages:
+  - ui
+
+# esbuild ships its platform binary via a postinstall build script, and pnpm
+# (>=10) blocks lifecycle scripts by default. tsx (test:ui) runs on esbuild, so
+# approve its build. Bazel's aspect_rules_js builds the frontend hermetically and
+# does not rely on this.
+allowBuilds:
+  esbuild: true

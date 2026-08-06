@@ -82,7 +82,7 @@ before(async () => {
   await requireFixture();
   assert.ok(
     sshKeyExists(),
-    'the sandbox SSH key is missing — run `npm run sandbox:up` to generate it',
+    'the sandbox SSH key is missing — run `pnpm run sandbox:up` to generate it',
   );
   sshClient = await hasSshClient();
   broker = await Broker.start({ label: 'ssh', seed: ['ssh'] });

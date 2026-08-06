@@ -74,18 +74,21 @@
   <h2><span class="step">1</span>Check what you need</h2>
   <ul>
     <li>Docker with Compose v2 — <b>running</b> (start Docker Desktop first)</li>
-    <li>Node.js with <code>npm</code></li>
+    <li>Node.js 22 with <code>pnpm</code> available (the repository pins pnpm 11.15.1)</li>
+    <li>Rust with Cargo if you use the headless broker or run the automated sandbox tests</li>
+    <li><code>curl</code>, <code>ssh-keygen</code>, <code>ssh-keyscan</code>, and the Postgres <code>psql</code> client</li>
     <li>The Multitool Desktop app (or the headless broker, <code>cargo run -p multitool -- serve</code>)</li>
   </ul>
 
   <h2><span class="step">2</span>Start the sandbox</h2>
   <pre><code>git clone https://github.com/aka-com/multitool.git
 cd multitool
-npm run sandbox:up</code></pre>
+pnpm install --frozen-lockfile
+pnpm run sandbox:up</code></pre>
   <p>The first start compiles the test fixture inside Docker and can take
   several minutes; later starts take seconds. When everything is ready it
   prints <span class="ok">ready</span> for HTTP, MCP, Postgres, and SSH, followed by the exact values to enter in Multitool Desktop. Re-print
-  them any time with <code>npm run sandbox:status</code>.</p>
+  them any time with <code>pnpm run sandbox:status</code>.</p>
 
   <h2><span class="step">3</span>Add the services in Multitool</h2>
   <!-- Keep this walkthrough in sync with scripts/sandbox-status.sh and
@@ -169,16 +172,16 @@ npm run sandbox:up</code></pre>
   codes) — see <code>dev/sandbox/README.md</code>.</p>
 
   <h2><span class="step">5</span>Stop or reset</h2>
-  <pre><code>npm run sandbox:down    # stop; keeps the generated SSH identities
-npm run sandbox:reset   # delete containers, volumes, and SSH identities</code></pre>
+  <pre><code>pnpm run sandbox:down    # stop; keeps the generated SSH identities
+pnpm run sandbox:reset   # delete containers, volumes, and SSH identities</code></pre>
   <p>After a reset the SSH fingerprint changes — run
-  <code>npm run sandbox:up</code> again and update
+  <code>pnpm run sandbox:up</code> again and update
   <code>sandbox-ssh</code> before reconnecting.</p>
 
   <h2>If something goes wrong</h2>
   <ul>
     <li><b>“cannot reach the Docker daemon”</b> — start Docker Desktop and
-        rerun <code>npm run sandbox:up</code>.</li>
+        rerun <code>pnpm run sandbox:up</code>.</li>
     <li><b>Port already in use</b> — export
         <code>SANDBOX_HTTP_PORT</code>, <code>SANDBOX_ALT_PORT</code>,
         <code>SANDBOX_PG_PORT</code>, or <code>SANDBOX_SSH_PORT</code>

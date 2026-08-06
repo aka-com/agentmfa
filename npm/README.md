@@ -30,14 +30,14 @@ node scripts/npm/sync-versions.mjs          # stamp the npm manifests
 node scripts/npm/sync-versions.mjs --check  # verify only (CI/test mode)
 ```
 
-`npm test` (via `npm run npm:check`) and `scripts/npm-dist.sh` both run the
+`pnpm test` (via `pnpm run npm:check`) and `scripts/npm-dist.sh` both run the
 check, so drift fails fast. The launcher also refuses at runtime to execute a
 platform package whose version differs from its own.
 
 ## Building and local testing
 
 ```sh
-npm run npm:dist    # build, verify, stage, and pack every supported target
+pnpm run npm:dist    # build, verify, stage, and pack every supported target
 ```
 
 This runs `scripts/npm-dist.sh --all --pack`, producing all four platform

@@ -21,24 +21,26 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
 
       - name: Install test clients
         run: |
           sudo apt-get update
           sudo apt-get install --yes openssh-client postgresql-client
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Start sandbox
-        run: npm run sandbox:up
+        run: pnpm run sandbox:up
 
       - name: Run sandbox suite
-        run: npm run sandbox:test
+        run: pnpm run sandbox:test
 
       - name: Stop sandbox
         if: always()
-        run: npm run sandbox:down
+        run: pnpm run sandbox:down

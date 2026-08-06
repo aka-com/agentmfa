@@ -42,8 +42,7 @@ CLI is its dev/headless counterpart):
 multitool serve
 ```
 
-Seed the store from another terminal (offline edits require the broker to
-be stopped first, so it cannot overwrite them from memory):
+Seed the running broker from another terminal:
 
 ```sh
 printf '%s' "$GITHUB_TOKEN" | multitool secret add GITHUB_TOKEN
@@ -59,9 +58,9 @@ connection against its pinned destination. These edits run through the
 broker's own management layer, so audit entries and side effects (a
 retarget revoking direct endpoints, for example) match the app exactly.
 
-Management commands also work against a **running** broker — no
-stop/start needed — over its manage API, authorized by the management
-token (never the agent key):
+With a local broker running, management commands use its manage API
+automatically — no stop/start needed — authorized by the management token
+(never the agent key):
 
 ```sh
 multitool serve                       # first start writes ~/.aka/manage-token (0600)
@@ -124,7 +123,10 @@ demos, tests, and CI.
   each item. Working against a running broker — the normal path, and every
   `--broker` command — goes over the socket and never touches the Keychain.
   `multitool status` reports which keychain the store is on.
-- **Linux** support is developer-grade: secrets are kept in a `0600` JSON
-  file vault that is **not encrypted at rest**. `multitool serve` prints a warning
-  to this effect. It is intended for development, integration testing, and
-  evaluation rather than production use.
+- **Linux** uses a `0600` JSON development vault when no master key is
+  configured. That fallback is **not encrypted at rest**, and `multitool serve`
+  prints a warning. Set `AKA_VAULT_KEY` or `AKA_VAULT_KEY_FILE` to use the
+  encrypted XChaCha20-Poly1305 file vault. Never expose a network broker with
+  the plaintext fallback; follow the
+  [hosted Linux runbook](https://github.com/aka-com/multitool/blob/main/dev/hosted-linux/README.md)
+  for deployment.

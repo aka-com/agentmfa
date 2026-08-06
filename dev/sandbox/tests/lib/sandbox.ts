@@ -115,6 +115,6 @@ export async function requireFixture(): Promise<void> {
   if (await fixtureUp()) return;
   throw new Error(
     `the sandbox HTTP fixture is not answering on 127.0.0.1:${sandbox.httpPort} — ` +
-      'run `npm run sandbox:up` first (see dev/sandbox/README.md)',
+      'run `pnpm run sandbox:up` first (see dev/sandbox/README.md)',
   );
 }

@@ -18,7 +18,8 @@ Generate a key and keep it somewhere your host injects as an environment
 variable (a secret manager, a systemd `EnvironmentFile`, a Docker secret):
 
 ```sh
-openssl rand -hex 32          # 64 hex chars → AKA_VAULT_KEY
+openssl rand -hex 32          # save these 64 hex chars in your secret manager
+export AKA_VAULT_KEY='<paste the stored value>'
 ```
 
 Provide it one of two ways:
@@ -39,6 +40,7 @@ startup rather than silently.
 docker build -f dev/hosted-linux/Dockerfile -t multitool-broker .
 
 # One broker per workspace, state on a named volume, key from your env:
+: "${AKA_VAULT_KEY:?set AKA_VAULT_KEY before starting the broker}"
 docker run -d --name multitool-broker \
     -e AKA_VAULT_KEY="$AKA_VAULT_KEY" \
     -p 4780:4780 \

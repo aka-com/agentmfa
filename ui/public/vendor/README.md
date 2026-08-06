@@ -17,8 +17,15 @@ It still expects an external `window.Popper`, so we vendor Popper and the core
 To re-vendor:
 
 ```sh
-npm install --no-save tippy.js@6 @popperjs/core@2
-cp node_modules/@popperjs/core/dist/umd/popper.min.js ui/public/vendor/popper.min.js
-cp node_modules/tippy.js/dist/tippy.umd.min.js        ui/public/vendor/tippy.umd.min.js
-cp node_modules/tippy.js/dist/tippy.css               ui/public/vendor/tippy.css
+vendor_work="$(mktemp -d)"
+npm install --prefix "$vendor_work" --no-save --package-lock=false \
+  tippy.js@6.3.7 @popperjs/core@2.11.8
+
+cp "$vendor_work/node_modules/@popperjs/core/dist/umd/popper.min.js" ui/public/vendor/popper.min.js
+cp "$vendor_work/node_modules/tippy.js/dist/tippy.umd.min.js"        ui/public/vendor/tippy.umd.min.js
+cp "$vendor_work/node_modules/tippy.js/dist/tippy.css"               ui/public/vendor/tippy.css
+rm -rf "$vendor_work"
 ```
+
+Using a temporary install prefix keeps these vendoring-only dependencies out of
+the workspace manifest, lockfile, and `node_modules` tree.
