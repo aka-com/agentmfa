@@ -4,7 +4,7 @@
   "scripts": {
     "build": "bash scripts/build.sh",
     "build:release": "bash scripts/release.sh",
-    "lint": "cargo clippy --workspace --all-targets && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets",
+    "lint": "cargo clippy --workspace --all-targets",
     "start": "tauri dev",
     "frontend:dev": "vite",
     "frontend:build": "vite build",
@@ -18,7 +18,7 @@
     "npm:check": "node scripts/npm/sync-versions.mjs --check",
     "npm:dist": "bash scripts/npm-dist.sh --all --pack",
     "npm:publish": "bash scripts/npm-publish.sh",
-    "test": "npm run npm:check && npm run test:npm-launcher && npm run typecheck && cargo test --workspace && cargo test --manifest-path src-tauri/Cargo.toml && npm run test:ui",
+    "test": "npm run npm:check && npm run test:npm-launcher && npm run typecheck && cargo test --workspace && npm run test:ui",
     "test:npm-launcher": "node --test scripts/npm/launcher.test.mjs",
     "test:ui": "tsx --test ui/tests/*.test.ts ui/tests/*.test.tsx"
   },

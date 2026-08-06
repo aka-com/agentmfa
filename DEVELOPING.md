@@ -4,7 +4,7 @@
 npm install        # Install the pinned Tauri and TypeScript toolchain
 npm test           # Type-check, then test the core, CLI, desktop commands, and UI helpers
 npm run test:ui    # Run only the TypeScript UI helper tests
-npm run lint       # Lint the workspace and the separate Tauri app crate
+npm run lint       # Lint every Cargo workspace crate and target
 npm run typecheck  # Type-check the frontend without emitting files
 
 npm start          # start Vite and launch the desktop app
@@ -226,7 +226,7 @@ Prerequisites: one-time macOS cross-linker setup: `brew install zig`
    npm run build:release  # will also notarize, staple, and validate
 
    gh release create v0.2.0 \
-     src-tauri/target/universal-apple-darwin/release/bundle/dmg/Multitool_0.2.0_universal.dmg \
+     target/universal-apple-darwin/release/bundle/dmg/Multitool_0.2.0_universal.dmg \
      --target main \
      --title "Multitool 0.2.0" \
      --generate-notes

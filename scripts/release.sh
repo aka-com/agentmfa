@@ -63,7 +63,7 @@ env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
     -u APPLE_API_ISSUER -u APPLE_API_KEY -u APPLE_API_KEY_PATH \
     bash "$script_dir/build.sh"
 
-bundle_dir="$repo_root/src-tauri/target/universal-apple-darwin/release/bundle"
+bundle_dir="$repo_root/target/universal-apple-darwin/release/bundle"
 app="$bundle_dir/macos/Multitool.app"
 dmg="$(ls "$bundle_dir"/dmg/Multitool_*.dmg)"
 

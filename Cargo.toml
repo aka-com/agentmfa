@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/aka-api", "crates/aka-client", "crates/aka-core", "crates/multitool", "crates/aka-sandbox"]
-# src-tauri is deliberately NOT a workspace member: it only builds where the
-# platform webview toolchain exists (macOS; Linux needs webkit2gtk). The core
-# and CLI crates build and test everywhere.
-exclude = ["src-tauri"]
+members = ["crates/aka-api", "crates/aka-client", "crates/aka-core", "crates/multitool", "crates/aka-sandbox", "src-tauri"]
+default-members = ["crates/aka-api", "crates/aka-client", "crates/aka-core", "crates/multitool", "crates/aka-sandbox"]
+# src-tauri is a workspace member so a single Cargo.lock covers the whole tree,
+# which lets Bazel's crate_universe resolve one dependency graph (crate.from_cargo
+# in MODULE.bazel) instead of two. It only *builds* where the platform webview
+# toolchain exists (macOS; Linux needs webkit2gtk), so on Linux build/test the
+# core and CLI crates by package (`-p`) rather than the whole workspace.
 
 [workspace.package]
 version = "0.2.0"

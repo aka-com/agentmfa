@@ -1,16 +1,11 @@
-# Standalone crate (own lockfile): not part of ../Cargo.toml's workspace, so
-# the core/CLI stay buildable on any platform without the webview toolchain.
-[workspace]
-
+# A member of the root workspace (../Cargo.toml) so a single Cargo.lock covers
+# the whole tree; only *built* where the platform webview toolchain exists.
 [package]
 name = "multitool-desktop"
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "A secrets manager for humans and agents."
-# Deliberately NOT a member of the ../Cargo.toml workspace: this crate only
-# builds where the platform webview toolchain exists (macOS; Linux needs
-# webkit2gtk). The core + CLI crates build and test everywhere.
 
 [lib]
 name = "multitool_desktop_app"
